@@ -1,0 +1,27 @@
+./main
+main
+# Output of running ./main; produced fresh each run.
+./test
+
+# Build output
+build/
+
+# Object files
+*.o
+*.obj
+*.elf
+
+# Debug
+*.d
+*.dSYM/
+*.su
+*.pdb
+
+# Editor
+*.swp
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
