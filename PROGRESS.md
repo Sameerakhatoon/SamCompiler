@@ -5,7 +5,7 @@ Tracking the build, one chapter at a time.
 ## Module 1 - Lexer + Parser
 
 - [x] ch4: preparing our project (skeleton: compiler, cprocess, helpers, main)
-- [ ] ch6: creating our token structures
+- [x] ch6: creating our token structures (struct pos, TOKEN_TYPE_* enum, struct token)
 - [ ] ch7: preparing our lexer
 - [ ] ch8: creating a number token
 - [ ] ch9: creating a string token
