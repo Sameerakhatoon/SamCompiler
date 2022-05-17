@@ -6,7 +6,7 @@ Tracking the build, one chapter at a time.
 
 - [x] ch4: preparing our project (skeleton: compiler, cprocess, helpers, main)
 - [x] ch6: creating our token structures (struct pos, TOKEN_TYPE_* enum, struct token)
-- [ ] ch7: preparing our lexer
+- [x] ch7: preparing our lexer (lex_process + v-table, FILE*-backed adapters, empty lex())
 - [ ] ch8: creating a number token
 - [ ] ch9: creating a string token
 - [ ] ch10: creating an operator token
