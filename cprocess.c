@@ -24,9 +24,13 @@ struct compile_process* compile_process_create(const char* filename, const char*
         goto out_err;
     }
 
-    process->flags    = flags;
-    process->cfile.fp = file;
-    process->ofile    = out_file;
+    process->flags          = flags;
+    process->cfile.fp       = file;
+    process->cfile.abs_path = filename;
+    process->ofile          = out_file;
+    process->pos.line       = 1;
+    process->pos.col        = 1;
+    process->pos.filename   = filename;
     return process;
 
 out_err:
