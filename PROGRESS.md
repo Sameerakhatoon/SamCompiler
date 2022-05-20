@@ -8,7 +8,7 @@ Tracking the build, one chapter at a time.
 - [x] ch6: creating our token structures (struct pos, TOKEN_TYPE_* enum, struct token)
 - [x] ch7: preparing our lexer (lex_process + v-table, FILE*-backed adapters, empty lex())
 - [x] ch8: creating a number token (NUMERIC_CASE, compiler_error/warning, read_next_token loop)
-- [ ] ch9: creating a string token
+- [x] ch9: creating a string token (token_make_string with delim, naive '\\' skip)
 - [ ] ch10: creating an operator token
 - [ ] ch11: creating a symbol token
 - [ ] ch12: creating an identifier token

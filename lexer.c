@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdlib.h>
+#include <assert.h>
 #include "compiler.h"
 #include "helpers/vector.h"
 #include "helpers/buffer.h"
@@ -23,6 +24,7 @@ static const char*    read_number_str(void);
 static unsigned long long read_number(void);
 static struct token*  token_make_number_for_value(unsigned long long number);
 static struct token*  token_make_number(void);
+static struct token*  token_make_string(char start_delim, char end_delim);
 
 struct token* read_next_token(void);
 
@@ -97,12 +99,37 @@ static struct token* token_make_number(void){
     return token_make_number_for_value(read_number());
 }
 
+// Reads a string literal delimited by start_delim/end_delim. Consumes the
+// opening delimiter (asserted), then everything up to but not including
+// the closing delimiter. ch9 just skips backslashes; real escape handling
+// arrives later.
+static struct token* token_make_string(char start_delim, char end_delim){
+    struct buffer* buf = buffer_create();
+    assert(nextc() == start_delim);
+
+    char c;
+    for(c = nextc(); c != end_delim && c != EOF; c = nextc()){
+        if(c == '\\'){
+            // TODO(ch-later): real escape-sequence handling.
+            continue;
+        }
+        buffer_write(buf, c);
+    }
+
+    buffer_write(buf, 0x00);
+    return token_create(&(struct token){ .type = TOKEN_TYPE_STRING, .sval = buffer_ptr(buf) });
+}
+
 struct token* read_next_token(void){
     struct token* token = 0;
     char c = peekc();
     switch(c){
         NUMERIC_CASE:
             token = token_make_number();
+            break;
+
+        case '"':
+            token = token_make_string('"', '"');
             break;
 
         // Whitespace is meaningless to the lexer, except it flips the
