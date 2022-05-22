@@ -9,7 +9,7 @@ Tracking the build, one chapter at a time.
 - [x] ch7: preparing our lexer (lex_process + v-table, FILE*-backed adapters, empty lex())
 - [x] ch8: creating a number token (NUMERIC_CASE, compiler_error/warning, read_next_token loop)
 - [x] ch9: creating a string token (token_make_string with delim, naive '\\' skip)
-- [ ] ch10: creating an operator token
+- [x] ch10: creating an operator token (OPERATOR_CASE, greedy read_op, op_valid whitelist, paren counter, S_EQ macro, token.c)
 - [ ] ch11: creating a symbol token
 - [ ] ch12: creating an identifier token
 - [ ] ch13: creating a keyword token

@@ -3,6 +3,12 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
+
+// String equality with NULL-safe operands. Used everywhere from the lexer
+// onwards to compare keyword / operator spellings.
+#define S_EQ(str, str2) \
+    (str && str2 && (strcmp(str, str2) == 0))
 
 typedef struct pos pos_t;
 typedef struct token token_t;
@@ -27,6 +33,27 @@ struct pos {
     case '7':        \
     case '8':        \
     case '9'
+
+// Every single-char that can start an operator, except '/'. Division is
+// handled separately so the same path can also strip C comments later on.
+#define OPERATOR_CASE_EXCLUDING_DIVISION \
+    case '+':                            \
+    case '-':                            \
+    case '*':                            \
+    case '>':                            \
+    case '<':                            \
+    case '^':                            \
+    case '%':                            \
+    case '!':                            \
+    case '=':                            \
+    case '~':                            \
+    case '|':                            \
+    case '&':                            \
+    case '(':                            \
+    case '[':                            \
+    case ',':                            \
+    case '.':                            \
+    case '?'
 
 enum {
     LEXICAL_ANALYSIS_ALL_OK,
@@ -141,5 +168,7 @@ void                lex_process_free(struct lex_process* process);
 void*               lex_process_private(struct lex_process* process);
 struct vector*      lex_process_tokens(struct lex_process* process);
 int                 lex(struct lex_process* process);
+
+bool token_is_keyword(struct token* token, const char* value);
 
 #endif

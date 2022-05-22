@@ -25,6 +25,14 @@ static unsigned long long read_number(void);
 static struct token*  token_make_number_for_value(unsigned long long number);
 static struct token*  token_make_number(void);
 static struct token*  token_make_string(char start_delim, char end_delim);
+static bool           op_treated_as_one(char op);
+static bool           is_single_operator(char op);
+static bool           op_valid(const char* op);
+static void           read_op_flush_back_keep_first(struct buffer* buffer);
+static const char*    read_op(void);
+static void           lex_new_expression(void);
+bool                  lex_is_in_expression(void);
+static struct token*  token_make_operator_or_string(void);
 
 struct token* read_next_token(void);
 
@@ -120,12 +128,135 @@ static struct token* token_make_string(char start_delim, char end_delim){
     return token_create(&(struct token){ .type = TOKEN_TYPE_STRING, .sval = buffer_ptr(buf) });
 }
 
+// "Treated as one" operators never combine with the next char into a
+// two-char operator. e.g. '(' on its own is fine; ".." would mean
+// something else (the `...` ellipsis is handled elsewhere).
+static bool op_treated_as_one(char op){
+    return op == '('
+        || op == '['
+        || op == ','
+        || op == '.'
+        || op == '*'
+        || op == '?';
+}
+
+// Single-char operators that can also appear as the second char of a
+// two-char op (so we know whether to greedily consume one more char).
+static bool is_single_operator(char op){
+    return op == '+' || op == '-' || op == '/' || op == '*'
+        || op == '=' || op == '>' || op == '<' || op == '|'
+        || op == '&' || op == '^' || op == '%' || op == '!'
+        || op == '(' || op == '[' || op == ',' || op == '.'
+        || op == '~' || op == '?';
+}
+
+// Whitelist of operator spellings we accept. The lexer's job is only to
+// tokenize; precedence / arity live in the parser.
+static bool op_valid(const char* op){
+    return S_EQ(op, "+")  || S_EQ(op, "-")  || S_EQ(op, "*")  || S_EQ(op, "/")
+        || S_EQ(op, "!")  || S_EQ(op, "^")
+        || S_EQ(op, "+=") || S_EQ(op, "-=") || S_EQ(op, "*=") || S_EQ(op, "/=")
+        || S_EQ(op, ">>") || S_EQ(op, "<<") || S_EQ(op, ">=") || S_EQ(op, "<=")
+        || S_EQ(op, ">")  || S_EQ(op, "<")
+        || S_EQ(op, "||") || S_EQ(op, "&&") || S_EQ(op, "|")  || S_EQ(op, "&")
+        || S_EQ(op, "++") || S_EQ(op, "--") || S_EQ(op, "=")
+        || S_EQ(op, "!=") || S_EQ(op, "==") || S_EQ(op, "->")
+        || S_EQ(op, "(")  || S_EQ(op, "[")  || S_EQ(op, ",")  || S_EQ(op, ".")
+        || S_EQ(op, "...")|| S_EQ(op, "~")  || S_EQ(op, "?")  || S_EQ(op, "%");
+}
+
+// We greedily read N chars; if the resulting operator isn't valid we have
+// to push everything but the first char back onto the input stream so the
+// next read_next_token() picks them up fresh.
+static void read_op_flush_back_keep_first(struct buffer* buffer){
+    const char* data = buffer_ptr(buffer);
+    int         len  = buffer->len;
+    for(int i = len - 1; i >= 1; i--){
+        if(data[i] == 0x00){
+            continue;
+        }
+        pushc(data[i]);
+    }
+}
+
+static const char* read_op(void){
+    bool   single_operator = true;
+    char   op              = nextc();
+    struct buffer* buffer  = buffer_create();
+    buffer_write(buffer, op);
+
+    // If the first char isn't a "treated-as-one" op, try to greedily eat
+    // one more char to form a two-char op.
+    if(!op_treated_as_one(op)){
+        op = peekc();
+        if(is_single_operator(op)){
+            buffer_write(buffer, op);
+            nextc();
+            single_operator = false;
+        }
+    }
+
+    buffer_write(buffer, 0x00);
+    char* ptr = buffer_ptr(buffer);
+    if(!single_operator){
+        if(!op_valid(ptr)){
+            // The greedy two-char form isn't a real op; back the second
+            // char out and truncate to the first char.
+            read_op_flush_back_keep_first(buffer);
+            ptr[1] = 0x00;
+        }
+    } else if(!op_valid(ptr)){
+        compiler_error(lex_process->compiler, "The operator %s is not valid\n", ptr);
+    }
+
+    return ptr;
+}
+
+// Bump the nested-expression counter (per '(' we see). The first '(' also
+// allocates the parentheses_buffer that records the text inside the
+// parens for later between_brackets attribution.
+static void lex_new_expression(void){
+    lex_process->current_expression_count++;
+    if(lex_process->current_expression_count == 1){
+        lex_process->parentheses_buffer = buffer_create();
+    }
+}
+
+bool lex_is_in_expression(void){
+    return lex_process->current_expression_count > 0;
+}
+
+// '<' is the wart: in `#include <stdio.h>` it opens a string literal, not
+// a less-than operator. We disambiguate by peeking at the previous token.
+static struct token* token_make_operator_or_string(void){
+    char op = peekc();
+    if(op == '<'){
+        struct token* last_token = lexer_last_token();
+        if(token_is_keyword(last_token, "include")){
+            return token_make_string('<', '>');
+        }
+    }
+
+    struct token* token = token_create(&(struct token){
+        .type = TOKEN_TYPE_OPERATOR,
+        .sval = read_op(),
+    });
+    if(op == '('){
+        lex_new_expression();
+    }
+    return token;
+}
+
 struct token* read_next_token(void){
     struct token* token = 0;
     char c = peekc();
     switch(c){
         NUMERIC_CASE:
             token = token_make_number();
+            break;
+
+        OPERATOR_CASE_EXCLUDING_DIVISION:
+            token = token_make_operator_or_string();
             break;
 
         case '"':
