@@ -31,8 +31,10 @@ static bool           op_valid(const char* op);
 static void           read_op_flush_back_keep_first(struct buffer* buffer);
 static const char*    read_op(void);
 static void           lex_new_expression(void);
+static void           lex_finish_expression(void);
 bool                  lex_is_in_expression(void);
 static struct token*  token_make_operator_or_string(void);
+static struct token*  token_make_symbol(void);
 
 struct token* read_next_token(void);
 
@@ -222,6 +224,13 @@ static void lex_new_expression(void){
     }
 }
 
+static void lex_finish_expression(void){
+    lex_process->current_expression_count--;
+    if(lex_process->current_expression_count < 0){
+        compiler_error(lex_process->compiler, "You closed an expression that you never opened\n");
+    }
+}
+
 bool lex_is_in_expression(void){
     return lex_process->current_expression_count > 0;
 }
@@ -247,6 +256,14 @@ static struct token* token_make_operator_or_string(void){
     return token;
 }
 
+static struct token* token_make_symbol(void){
+    char c = nextc();
+    if(c == ')'){
+        lex_finish_expression();
+    }
+    return token_create(&(struct token){ .type = TOKEN_TYPE_SYMBOL, .cval = c });
+}
+
 struct token* read_next_token(void){
     struct token* token = 0;
     char c = peekc();
@@ -257,6 +274,10 @@ struct token* read_next_token(void){
 
         OPERATOR_CASE_EXCLUDING_DIVISION:
             token = token_make_operator_or_string();
+            break;
+
+        SYMBOL_CASE:
+            token = token_make_symbol();
             break;
 
         case '"':

@@ -55,6 +55,19 @@ struct pos {
     case '.':                            \
     case '?'
 
+// Symbol chars: never combine, always one token of TOKEN_TYPE_SYMBOL.
+// Closing parens land here (not in OPERATOR_CASE) so we can decrement
+// the expression counter when we see ')'.
+#define SYMBOL_CASE \
+    case '{':       \
+    case '}':       \
+    case ':':       \
+    case ';':       \
+    case '#':       \
+    case '\\':      \
+    case ')':       \
+    case ']'
+
 enum {
     LEXICAL_ANALYSIS_ALL_OK,
     LEXICAL_ANALYSIS_INPUT_ERROR,
