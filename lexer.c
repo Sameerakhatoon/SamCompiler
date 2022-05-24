@@ -1,6 +1,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <ctype.h>
 #include "compiler.h"
 #include "helpers/vector.h"
 #include "helpers/buffer.h"
@@ -35,6 +36,8 @@ static void           lex_finish_expression(void);
 bool                  lex_is_in_expression(void);
 static struct token*  token_make_operator_or_string(void);
 static struct token*  token_make_symbol(void);
+static struct token*  token_make_identifier_or_keyword(void);
+struct token*         read_special_token(void);
 
 struct token* read_next_token(void);
 
@@ -264,6 +267,34 @@ static struct token* token_make_symbol(void){
     return token_create(&(struct token){ .type = TOKEN_TYPE_SYMBOL, .cval = c });
 }
 
+// Eats [A-Za-z_][A-Za-z0-9_]* and returns it as an identifier. ch13 will
+// later promote it to a keyword if the spelling matches a reserved word.
+static struct token* token_make_identifier_or_keyword(void){
+    struct buffer* buffer = buffer_create();
+    char c = 0;
+    LEX_GETC_IF(buffer, c,
+        (c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') ||
+        c == '_');
+
+    buffer_write(buffer, 0x00);
+    return token_create(&(struct token){
+        .type = TOKEN_TYPE_IDENTIFIER,
+        .sval = buffer_ptr(buffer),
+    });
+}
+
+// Catch-all for input the main dispatch switch doesn't recognize. Right
+// now only "looks like the start of an identifier" qualifies.
+struct token* read_special_token(void){
+    char c = peekc();
+    if(isalpha(c) || c == '_'){
+        return token_make_identifier_or_keyword();
+    }
+    return 0;
+}
+
 struct token* read_next_token(void){
     struct token* token = 0;
     char c = peekc();
@@ -296,7 +327,10 @@ struct token* read_next_token(void){
             break;
 
         default:
-            compiler_error(lex_process->compiler, "Unexpected token\n");
+            token = read_special_token();
+            if(!token){
+                compiler_error(lex_process->compiler, "Unexpected token\n");
+            }
     }
     return token;
 }
