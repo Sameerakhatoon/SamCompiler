@@ -12,7 +12,7 @@ Tracking the build, one chapter at a time.
 - [x] ch10: creating an operator token (OPERATOR_CASE, greedy read_op, op_valid whitelist, paren counter, S_EQ macro, token.c)
 - [x] ch11: creating a symbol token (SYMBOL_CASE, ')' drops paren counter via lex_finish_expression)
 - [x] ch12: creating an identifier token (default-case fallback to read_special_token)
-- [ ] ch13: creating a keyword token
+- [x] ch13: creating a keyword token (is_keyword whitelist, promotes IDENTIFIER -> KEYWORD)
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
