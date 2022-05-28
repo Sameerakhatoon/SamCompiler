@@ -39,6 +39,7 @@ static struct token*  token_make_symbol(void);
 static struct token*  token_make_identifier_or_keyword(void);
 struct token*         read_special_token(void);
 static bool           is_keyword(const char* str);
+static struct token*  token_make_newline(void);
 
 struct token* read_next_token(void);
 
@@ -327,6 +328,14 @@ struct token* read_special_token(void){
     return 0;
 }
 
+// '\n' becomes its own token. The preprocessor will care about line
+// boundaries (e.g. terminating a #define); the parser usually skips
+// over them.
+static struct token* token_make_newline(void){
+    nextc();
+    return token_create(&(struct token){ .type = TOKEN_TYPE_NEWLINE });
+}
+
 struct token* read_next_token(void){
     struct token* token = 0;
     char c = peekc();
@@ -352,6 +361,10 @@ struct token* read_next_token(void){
         case ' ':
         case '\t':
             token = handle_whitespace();
+            break;
+
+        case '\n':
+            token = token_make_newline();
             break;
 
         case EOF:
