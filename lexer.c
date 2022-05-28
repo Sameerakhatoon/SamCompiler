@@ -40,6 +40,12 @@ static struct token*  token_make_identifier_or_keyword(void);
 struct token*         read_special_token(void);
 static bool           is_keyword(const char* str);
 static struct token*  token_make_newline(void);
+static char           assert_next_char(char c);
+struct token*         token_make_one_line_comment(void);
+struct token*         token_make_multiline_comment(void);
+struct token*         handle_comment(void);
+char                  lex_get_escaped_char(char c);
+struct token*         token_make_quote(void);
 
 struct token* read_next_token(void);
 
@@ -67,6 +73,14 @@ static char nextc(void){
 
 static void pushc(char c){
     lex_process->function->push_char(lex_process, c);
+}
+
+// Used when we already know the next char must be a particular value
+// (e.g. the opening delimiter we just peeked at).
+static char assert_next_char(char c){
+    char next_c = nextc();
+    assert(c == next_c);
+    return next_c;
 }
 
 static struct pos lex_file_position(void){
@@ -284,6 +298,62 @@ static struct token* token_make_operator_or_string(void){
     return token;
 }
 
+// "//" line comments: eat to newline-or-EOF and emit one COMMENT token.
+struct token* token_make_one_line_comment(void){
+    struct buffer* buffer = buffer_create();
+    char c = 0;
+    LEX_GETC_IF(buffer, c, c != '\n' && c != EOF);
+    return token_create(&(struct token){
+        .type = TOKEN_TYPE_COMMENT,
+        .sval = buffer_ptr(buffer),
+    });
+}
+
+// "/* ... */" multiline comments. Loop: accumulate until '*' or EOF; on
+// '*', consume it and peek for '/'. Unterminated comment is a fatal
+// compiler_error.
+struct token* token_make_multiline_comment(void){
+    struct buffer* buffer = buffer_create();
+    char c = 0;
+    while(1){
+        LEX_GETC_IF(buffer, c, c != '*' && c != EOF);
+        if(c == EOF){
+            compiler_error(lex_process->compiler, "You did not close this multiline comment\n");
+        } else if(c == '*'){
+            nextc();
+            if(peekc() == '/'){
+                nextc();
+                break;
+            }
+        }
+    }
+    return token_create(&(struct token){
+        .type = TOKEN_TYPE_COMMENT,
+        .sval = buffer_ptr(buffer),
+    });
+}
+
+// '/' could be the start of "//", "/*", or just the division operator.
+// We peek twice: if it's a comment start, route accordingly; otherwise
+// push '/' back so token_make_operator_or_string handles it.
+struct token* handle_comment(void){
+    char c = peekc();
+    if(c == '/'){
+        nextc();
+        if(peekc() == '/'){
+            nextc();
+            return token_make_one_line_comment();
+        } else if(peekc() == '*'){
+            nextc();
+            return token_make_multiline_comment();
+        }
+
+        pushc('/');
+        return token_make_operator_or_string();
+    }
+    return 0;
+}
+
 static struct token* token_make_symbol(void){
     char c = nextc();
     if(c == ')'){
@@ -336,9 +406,47 @@ static struct token* token_make_newline(void){
     return token_create(&(struct token){ .type = TOKEN_TYPE_NEWLINE });
 }
 
+// Map the char that follows a '\' in a quote/string into the byte it
+// represents. Only the common escapes - extra ones come later.
+char lex_get_escaped_char(char c){
+    char co = 0;
+    switch(c){
+        case 'n':   co = '\n'; break;
+        case '\\':  co = '\\'; break;
+        case 't':   co = '\t'; break;
+        case '\'':  co = '\''; break;
+    }
+    return co;
+}
+
+// Char literal: '<one byte>' or '\<escape>'. The value lives in cval but
+// the token type is TOKEN_TYPE_NUMBER (a quoted char is the same as its
+// numeric value in C, and the rest of the pipeline already understands
+// numbers).
+struct token* token_make_quote(void){
+    assert_next_char('\'');
+    char c = nextc();
+    if(c == '\\'){
+        c = nextc();
+        c = lex_get_escaped_char(c);
+    }
+    if(nextc() != '\''){
+        compiler_error(lex_process->compiler, "You opened a quote ' but did not close it with a ' character");
+    }
+    return token_create(&(struct token){ .type = TOKEN_TYPE_NUMBER, .cval = c });
+}
+
 struct token* read_next_token(void){
     struct token* token = 0;
     char c = peekc();
+
+    // Try comment handling first; it consumes '/' if it's the start of
+    // "//" or "/*", otherwise it pushes '/' back and falls through.
+    token = handle_comment();
+    if(token){
+        return token;
+    }
+
     switch(c){
         NUMERIC_CASE:
             token = token_make_number();
@@ -354,6 +462,10 @@ struct token* read_next_token(void){
 
         case '"':
             token = token_make_string('"', '"');
+            break;
+
+        case '\'':
+            token = token_make_quote();
             break;
 
         // Whitespace is meaningless to the lexer, except it flips the
