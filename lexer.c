@@ -50,6 +50,8 @@ void                  lexer_pop_token(void);
 bool                  is_hex_char(char c);
 const char*           read_hex_number_str(void);
 struct token*         token_make_special_number_hexadecimal(void);
+void                  lexer_validate_binary_string(const char* str);
+struct token*         token_make_special_number_binary(void);
 struct token*         token_make_special_number(void);
 
 struct token* read_next_token(void);
@@ -455,18 +457,45 @@ struct token* token_make_special_number_hexadecimal(void){
     return token_make_number_for_value(number);
 }
 
-// Called from the 'x' case of the dispatch switch. The preceding NUMBER
-// must be 0 for this to be meaningful; ch18 widens this to also handle
-// '0b' for binary.
+// Reject anything in the post-`0b` digit run that isn't '0' or '1'.
+void lexer_validate_binary_string(const char* str){
+    size_t len = strlen(str);
+    for(size_t i = 0; i < len; i++){
+        if(str[i] != '0' && str[i] != '1'){
+            compiler_error(lex_process->compiler, "This is not a valid binary number\n");
+        }
+    }
+}
+
+// `0b1010`. After popping the leading NUMBER(0), eat 'b', then reuse
+// read_number_str (which only accepts 0-9, so it will gather both
+// valid and invalid digits, which we then validate explicitly).
+struct token* token_make_special_number_binary(void){
+    nextc();   // consume the 'b'
+    const char* number_str = read_number_str();
+    lexer_validate_binary_string(number_str);
+    unsigned long number = strtol(number_str, 0, 2);
+    return token_make_number_for_value(number);
+}
+
+// Called from the 'x' / 'b' cases of the dispatch switch. We can only
+// take this path if the *previous* token was the literal NUMBER(0).
+// If it wasn't, fall through to identifier handling so a bare "x"
+// or "b" in source code still works.
 struct token* token_make_special_number(void){
-    struct token* token = 0;
-    /* struct token* last_token = */ lexer_last_token();
+    struct token* token      = 0;
+    struct token* last_token = lexer_last_token();
+    if(!last_token || !(last_token->type == TOKEN_TYPE_NUMBER && last_token->llnum == 0)){
+        return token_make_identifier_or_keyword();
+    }
 
     lexer_pop_token();
 
     char c = peekc();
     if(c == 'x'){
         token = token_make_special_number_hexadecimal();
+    } else if(c == 'b'){
+        token = token_make_special_number_binary();
     }
 
     return token;
@@ -513,6 +542,7 @@ struct token* read_next_token(void){
             token = token_make_symbol();
             break;
 
+        case 'b':
         case 'x':
             token = token_make_special_number();
             break;

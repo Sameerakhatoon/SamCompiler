@@ -16,7 +16,11 @@ Tracking the build, one chapter at a time.
 - [x] ch14: creating a new-line token ('\n' becomes TOKEN_TYPE_NEWLINE, distinct from whitespace)
 - [x] ch16: handling quotes + comments in the lexer (//, /* */, 'X' char literals, escapes)
 - [x] ch17: implementing hexadecimal numbers (0xNN via lexer_pop_token + read_hex_number_str)
-- [ ] ch18: implementing binary numbers
+- [x] ch18: implementing binary numbers (0bNN; guard so bare 'b'/'x' falls back to identifier)
+- [ ] ch19: dealing with the parentheses buffer
+- [ ] ch20: creating tokens outside of the input file
+- [ ] ch21: creating number types
+- [ ] ch22: finalizing the lexer
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
