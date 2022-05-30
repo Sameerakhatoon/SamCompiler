@@ -70,6 +70,13 @@ static char peekc(void){
 
 static char nextc(void){
     char c = lex_process->function->next_char(lex_process);
+    // While we're inside (), record every consumed char so that the
+    // tokens born inside can carry the original substring via
+    // between_brackets. Useful later for diagnostics that want to
+    // quote the raw expression.
+    if(lex_is_in_expression()){
+        buffer_write(lex_process->parentheses_buffer, c);
+    }
     lex_process->pos.col += 1;
     if(c == '\n'){
         lex_process->pos.line += 1;
@@ -97,6 +104,9 @@ static struct pos lex_file_position(void){
 static struct token* token_create(struct token* _token){
     memcpy(&tmp_token, _token, sizeof(struct token));
     tmp_token.pos = lex_file_position();
+    if(lex_is_in_expression()){
+        tmp_token.between_brackets = buffer_ptr(lex_process->parentheses_buffer);
+    }
     return &tmp_token;
 }
 
