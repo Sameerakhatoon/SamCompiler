@@ -18,7 +18,7 @@ Tracking the build, one chapter at a time.
 - [x] ch17: implementing hexadecimal numbers (0xNN via lexer_pop_token + read_hex_number_str)
 - [x] ch18: implementing binary numbers (0bNN; guard so bare 'b'/'x' falls back to identifier)
 - [x] ch19: dealing with the parentheses buffer (in-paren chars accumulated, stamped onto tokens via between_brackets)
-- [ ] ch20: creating tokens outside of the input file
+- [x] ch20: creating tokens outside of the input file (tokens_build_for_string, string-backed v-table)
 - [ ] ch21: creating number types
 - [ ] ch22: finalizing the lexer
 - [ ] ...
