@@ -19,7 +19,7 @@ Tracking the build, one chapter at a time.
 - [x] ch18: implementing binary numbers (0bNN; guard so bare 'b'/'x' falls back to identifier)
 - [x] ch19: dealing with the parentheses buffer (in-paren chars accumulated, stamped onto tokens via between_brackets)
 - [x] ch20: creating tokens outside of the input file (tokens_build_for_string, string-backed v-table)
-- [ ] ch21: creating number types
+- [x] ch21: creating number types (NUMBER_TYPE_NORMAL/LONG/FLOAT/DOUBLE, L/f suffix in num.type)
 - [ ] ch22: finalizing the lexer
 - [ ] ...
 
