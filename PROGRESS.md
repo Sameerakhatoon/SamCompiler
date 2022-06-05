@@ -20,7 +20,13 @@ Tracking the build, one chapter at a time.
 - [x] ch19: dealing with the parentheses buffer (in-paren chars accumulated, stamped onto tokens via between_brackets)
 - [x] ch20: creating tokens outside of the input file (tokens_build_for_string, string-backed v-table)
 - [x] ch21: creating number types (NUMBER_TYPE_NORMAL/LONG/FLOAT/DOUBLE, L/f suffix in num.type)
-- [ ] ch22: finalizing the lexer
+- [x] ch22: finalizing the lexer (compile_process.token_vec gets the lex output, parser-ready)
+
+## Module 1 - Parser
+
+- [ ] ch24: creating our parser structures
+- [ ] ch25: writing our parser template
+- [ ] ...
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver

@@ -58,6 +58,10 @@ int compile_file(const char* filename, const char* out_filename, int flags){
         goto out;
     }
 
+    // Hand the token vector to the compile_process so the parser stage
+    // (ch24+) can find it without going back through lex_process.
+    process->token_vec = lex_process->token_vec;
+
     // Perform parsing.
     // Perform code generation.
 

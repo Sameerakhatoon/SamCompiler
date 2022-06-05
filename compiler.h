@@ -174,6 +174,11 @@ struct compile_process {
     struct pos                        pos;
     struct compile_process_input_file cfile;
 
+    // Token vector from lexical analysis; populated after lex() runs.
+    // The parser will consume it; for now it's just attached so the
+    // pipeline owns its outputs.
+    struct vector* token_vec;
+
     FILE* ofile;
 };
 
