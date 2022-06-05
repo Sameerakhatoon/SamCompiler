@@ -206,6 +206,67 @@ int                 lex(struct lex_process* process);
 // Lets the preprocessor (much later) re-lex macro expansions.
 struct lex_process* tokens_build_for_string(struct compile_process* compiler, const char* str);
 
+// ============================================================================
+// Parser (ch24+)
+// ============================================================================
+
+enum {
+    NODE_TYPE_EXPRESSION,
+    NODE_TYPE_EXPRESSION_PARENTHESES,
+    NODE_TYPE_NUMBER,
+    NODE_TYPE_IDENTIFIER,
+    NODE_TYPE_STRING,
+    NODE_TYPE_VARIABLE,
+    NODE_TYPE_VARIABLE_LIST,
+    NODE_TYPE_FUNCTION,
+    NODE_TYPE_BODY,
+    NODE_TYPE_STATEMENT_RETURN,
+    NODE_TYPE_STATEMENT_IF,
+    NODE_TYPE_STATEMENT_ELSE,
+    NODE_TYPE_STATEMENT_WHILE,
+    NODE_TYPE_STATEMENT_DO_WHILE,
+    NODE_TYPE_STATEMENT_FOR,
+    NODE_TYPE_STATEMENT_BREAK,
+    NODE_TYPE_STATEMENT_CONTINUE,
+    NODE_TYPE_STATEMENT_SWITCH,
+    NODE_TYPE_STATEMENT_CASE,
+    NODE_TYPE_STATEMENT_DEFAULT,
+    NODE_TYPE_STATEMENT_GOTO,
+
+    NODE_TYPE_UNARY,
+    NODE_TYPE_TENARY,
+    NODE_TYPE_LABEL,
+    NODE_TYPE_STRUCT,
+    NODE_TYPE_UNION,
+    NODE_TYPE_BRACKET,
+    NODE_TYPE_CAST,
+    NODE_TYPE_BLANK,
+};
+
+typedef struct node node_t;
+
+struct node {
+    int        type;
+    int        flags;
+    struct pos pos;
+
+    // Tracks where in the AST this node sits: its owning body and the
+    // function it belongs to, both set when the parser binds the node
+    // into the tree. NULL while the node is being constructed.
+    struct node_binded {
+        struct node* owner;
+        struct node* function;
+    } binded;
+
+    union {
+        char               cval;
+        const char*        sval;
+        unsigned int       inum;
+        unsigned long      lnum;
+        unsigned long long llnum;
+    };
+};
+
 bool token_is_keyword(struct token* token, const char* value);
 
 #endif
