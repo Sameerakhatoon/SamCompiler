@@ -280,6 +280,15 @@ struct node {
 
 int  parse(struct compile_process* process);
 
+// ch26: node stack helpers. node_set_vector points them at the parser's
+// scratch / root vectors; the rest of the parser uses node_push /
+// node_peek* / node_pop to manipulate the work-stack.
+void         node_set_vector(struct vector* vec, struct vector* root_vec);
+void         node_push(struct node* node);
+struct node* node_peek_or_null(void);
+struct node* node_peek(void);
+struct node* node_pop(void);
+
 bool token_is_keyword(struct token* token, const char* value);
 
 #endif

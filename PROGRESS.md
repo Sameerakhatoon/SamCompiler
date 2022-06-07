@@ -26,7 +26,8 @@ Tracking the build, one chapter at a time.
 
 - [x] ch24: creating our parser structures (NODE_TYPE_* enum, struct node + binded)
 - [x] ch25: writing our parser template (parser.c skeleton, parse() stub, node_vec/node_tree_vec)
-- [ ] ch26..ch102: rest of Module 1 parser
+- [x] ch26: creating our node file (node.c with set_vector/push/peek/pop, root-aware pop)
+- [ ] ch27..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
