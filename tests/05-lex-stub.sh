@@ -29,12 +29,7 @@ int main(void){
 }
 EOF
 
-gcc -I"$REPO_ROOT" "$probe" \
-    "$REPO_ROOT"/build/cprocess.o \
-    "$REPO_ROOT"/build/lex_process.o \
-    "$REPO_ROOT"/build/helpers/buffer.o \
-    "$REPO_ROOT"/build/helpers/vector.o \
-    -o "$bin" 2>&1 | head -5
+gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>&1 | head -8
 [ -x "$bin" ] || fail "ch7 probe failed to compile"
 
 got="$("$bin")"

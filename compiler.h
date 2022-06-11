@@ -290,5 +290,12 @@ struct node* node_peek(void);
 struct node* node_pop(void);
 
 bool token_is_keyword(struct token* token, const char* value);
+bool token_is_symbol(struct token* token, char c);
+// Preserves the book's "seperator" spelling.
+bool token_is_nl_or_comment_or_newline_seperator(struct token* token);
+
+// ch27: take a stack-allocated node, copy it to the heap, push onto the
+// parser's node stack, return the new pointer.
+struct node* node_create(struct node* _node);
 
 #endif
