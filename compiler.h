@@ -254,6 +254,10 @@ enum {
     NODE_TYPE_BLANK,
 };
 
+enum {
+    NODE_FLAG_INSIDE_EXPRESSION = 0b00000001,
+};
+
 typedef struct node node_t;
 
 struct node {
@@ -268,6 +272,16 @@ struct node {
         struct node* owner;
         struct node* function;
     } binded;
+
+    // Composite node payloads. NODE_TYPE_EXPRESSION fills `exp`.
+    // More variants land in later chapters (var, function, body, etc.).
+    union {
+        struct exp {
+            struct node* left;
+            struct node* right;
+            const char*  op;
+        } exp;
+    };
 
     union {
         char               cval;
@@ -297,5 +311,10 @@ bool token_is_nl_or_comment_or_newline_seperator(struct token* token);
 // ch27: take a stack-allocated node, copy it to the heap, push onto the
 // parser's node stack, return the new pointer.
 struct node* node_create(struct node* _node);
+// ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
+void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);
+
+bool         node_is_expressionable(struct node* node);
+struct node* node_peek_expressionable_or_null(void);
 
 #endif

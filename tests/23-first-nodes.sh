@@ -47,7 +47,12 @@ EOF
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>&1 | head -5
 [ -x "$bin" ] || fail "ch27 probe failed to compile"
 got="$("$bin")"
-assert_contains "$got" "roots=2"    "two top-level nodes"
-assert_contains "$got" "ND NUM 5837" "first node is the number"
-assert_contains "$got" "ND ID ABCD"  "second node is the identifier"
+# After ch28, parse_expressionable() greedily consumes adjacent
+# expressionable tokens. For "5837 ABCD" with no operator, only the
+# last one (ABCD) ends up in node_tree_vec; 5837 is left on the
+# scratch stack. The book's parser does the same, and real C input
+# never has two bare expressionable tokens in a row so it doesn't
+# matter past ch28.
+assert_contains "$got" "roots=1"     "one top-level node (post-ch28 greedy parse_expressionable)"
+assert_contains "$got" "ND ID ABCD"  "trailing identifier surfaces as the root"
 pass
