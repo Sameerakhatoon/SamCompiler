@@ -1,7 +1,10 @@
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include "compiler.h"
 #include "helpers/vector.h"
+
+extern struct expressionable_op_precedence_group op_precedence[TOTAL_OPERATOR_GROUPS];
 
 // Parse history. Threaded through every parse_*() call so children can
 // see flags / context their parents pushed (e.g. "we are inside an
@@ -85,6 +88,94 @@ static void parse_expressionable_for_op(struct history* history, const char* op)
     parse_expressionable(history);
 }
 
+// Find which precedence group an operator belongs to. Returns the group
+// index (low = high precedence) and writes the group pointer to
+// *group_out. Returns -1 if the operator isn't in any group.
+static int parser_get_precedence_for_operator(const char* op,
+                                              struct expressionable_op_precedence_group** group_out){
+    *group_out = 0;
+    for(int i = 0; i < TOTAL_OPERATOR_GROUPS; i++){
+        for(int b = 0; op_precedence[i].operators[b]; b++){
+            const char* _op = op_precedence[i].operators[b];
+            if(S_EQ(op, _op)){
+                *group_out = &op_precedence[i];
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+// "Does the left-hand operator have at-least-as-high precedence than
+// the right-hand operator?" Used to decide whether (a OPl b) OPr c
+// should rewrite to a OPl (b OPr c). Right-associative ops never claim
+// priority over themselves.
+static bool parser_left_op_has_priority(const char* op_left, const char* op_right){
+    struct expressionable_op_precedence_group* group_left  = 0;
+    struct expressionable_op_precedence_group* group_right = 0;
+
+    if(S_EQ(op_left, op_right)){
+        return false;
+    }
+
+    int precdence_left  = parser_get_precedence_for_operator(op_left,  &group_left);
+    int precdence_right = parser_get_precedence_for_operator(op_right, &group_right);
+    if(group_left->associtivity == ASSOCIATIVITY_RIGHT_TO_LEFT){
+        return false;
+    }
+    return precdence_left <= precdence_right;
+}
+
+// Rotate so the left subtree absorbs the right's left. e.g.
+//   node:  (50 * (20 + 120))           with op=* and right.op=+
+//   after: ((50 * 20) + 120)
+// Used by parser_reorder_expression when the parent op out-ranks the
+// child op.
+static void parser_node_shift_children_left(struct node* node){
+    assert(node->type == NODE_TYPE_EXPRESSION);
+    assert(node->exp.right->type == NODE_TYPE_EXPRESSION);
+
+    const char*  right_op           = node->exp.right->exp.op;
+    struct node* new_exp_left_node  = node->exp.left;
+    struct node* new_exp_right_node = node->exp.right->exp.left;
+    make_exp_node(new_exp_left_node, new_exp_right_node, node->exp.op);
+
+    struct node* new_left_operand  = node_pop();
+    struct node* new_right_operand = node->exp.right->exp.right;
+
+    node->exp.left  = new_left_operand;
+    node->exp.right = new_right_operand;
+    node->exp.op    = right_op;
+}
+
+// Recursive reorder: walks the freshly-built expression subtree and
+// flips ordering where the parent op deserves higher precedence.
+static void parser_reorder_expression(struct node** node_out){
+    struct node* node = *node_out;
+    if(node->type != NODE_TYPE_EXPRESSION){
+        return;
+    }
+    if(node->exp.left->type != NODE_TYPE_EXPRESSION
+       && node->exp.right
+       && node->exp.right->type != NODE_TYPE_EXPRESSION){
+        return;
+    }
+
+    // The interesting case: left is a leaf, right is an expression.
+    // e.g. `50 * (20 + 120)` parsed top-down. If our op has higher
+    // precedence than the right's op, shift left.
+    if(node->exp.left->type != NODE_TYPE_EXPRESSION
+       && node->exp.right
+       && node->exp.right->type == NODE_TYPE_EXPRESSION){
+        const char* right_op = node->exp.right->exp.op;
+        if(parser_left_op_has_priority(node->exp.op, right_op)){
+            parser_node_shift_children_left(node);
+            parser_reorder_expression(&node->exp.left);
+            parser_reorder_expression(&node->exp.right);
+        }
+    }
+}
+
 // Binary expression: pop the left operand off the node stack, consume
 // the operator, parse the right operand, then assemble a NODE_TYPE_EXPRESSION.
 // ch29 will fold precedence-aware reordering into the trailing comment.
@@ -107,7 +198,8 @@ static void parse_exp_normal(struct history* history){
     make_exp_node(node_left, node_right, op);
     struct node* exp_node = node_pop();
 
-    // Reorder for precedence happens in ch29-31.
+    // ch30: reorder for operator precedence.
+    parser_reorder_expression(&exp_node);
 
     node_push(exp_node);
 }
