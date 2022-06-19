@@ -32,7 +32,9 @@ Tracking the build, one chapter at a time.
 - [x] ch29: precedence in expressions part 1 (expressionable.c: op_precedence table, 14 groups, associativity)
 - [x] ch30: precedence in expressions part 2 (reorder logic: get_precedence, left_has_priority, shift_children_left, reorder_expression)
 - [x] ch31: precedence in expressions part 3 (mirror-shape coverage test, no code changes)
-- [ ] ch32..ch102: rest of Module 1 parser
+- [x] ch32: creating an identifier node (parse_identifier split, ships book's broken assert; fixed in g01)
+- [x] g01: parse_identifier asserts TOKEN_TYPE_IDENTIFIER, not NODE_TYPE_IDENTIFIER
+- [ ] ch33..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
