@@ -210,11 +210,11 @@ static int parse_exp(struct history* history){
     return 0;
 }
 
-// Note: the book's assert here compares a TOKEN_TYPE_* with
-// NODE_TYPE_IDENTIFIER, which is wrong type-wise. Shipped verbatim
-// per the "follow the book" rule; the fix lands in g01.
+// g01: assert compares a token's type with TOKEN_TYPE_IDENTIFIER,
+// not NODE_TYPE_IDENTIFIER. The book ships this wrong; see
+// docs/gotchas/G01-token-type-vs-node-type.md.
 static void parse_identifier(struct history* history){
-    assert(token_peek_next()->type == NODE_TYPE_IDENTIFIER);
+    assert(token_peek_next()->type == TOKEN_TYPE_IDENTIFIER);
     parse_single_token_to_node();
 }
 
