@@ -291,6 +291,17 @@ bool lex_is_in_expression(void){
     return lex_process->current_expression_count > 0;
 }
 
+// Subset of is_keyword: the spellings that introduce a datatype. The
+// parser uses this when deciding "is this `int` or `struct` the start
+// of a variable / function / struct declaration?"
+bool keyword_is_datatype(const char* str){
+    return S_EQ(str, "void")  || S_EQ(str, "char")
+        || S_EQ(str, "int")   || S_EQ(str, "short")
+        || S_EQ(str, "float") || S_EQ(str, "double")
+        || S_EQ(str, "long")  || S_EQ(str, "struct")
+        || S_EQ(str, "union");
+}
+
 // Reserved-word table. Anything spelled identically becomes a
 // TOKEN_TYPE_KEYWORD instead of a TOKEN_TYPE_IDENTIFIER. "include" is
 // in here so the operator-or-string disambiguation in ch10 can detect
