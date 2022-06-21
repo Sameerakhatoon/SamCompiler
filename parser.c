@@ -260,24 +260,105 @@ static void parse_datatype_modifiers(struct datatype* dtype){
     }
 }
 
-// Stub: ch34 fills in the actual primary-type parsing (consuming `int`,
-// `long int`, `struct foo`, etc.). For now we consume one keyword if
-// it's a datatype name so the parser doesn't loop forever on `int x`.
-static void parse_datatype_type(struct datatype* dtype){
+static bool token_next_is_operator(const char* op){
     struct token* token = token_peek_next();
-    if(token && token->type == TOKEN_TYPE_KEYWORD && keyword_is_datatype(token->sval)){
-        dtype->type_str = token->sval;
-        // Coarse mapping; ch34 promotes this to the real switch.
-        if(S_EQ(token->sval, "int"))         dtype->type = DATA_TYPE_INTEGER;
-        else if(S_EQ(token->sval, "void"))   dtype->type = DATA_TYPE_VOID;
-        else if(S_EQ(token->sval, "char"))   dtype->type = DATA_TYPE_CHAR;
-        else if(S_EQ(token->sval, "short"))  dtype->type = DATA_TYPE_SHORT;
-        else if(S_EQ(token->sval, "long"))   dtype->type = DATA_TYPE_LONG;
-        else if(S_EQ(token->sval, "float"))  dtype->type = DATA_TYPE_FLOAT;
-        else if(S_EQ(token->sval, "double")) dtype->type = DATA_TYPE_DOUBLE;
-        else                                  dtype->type = DATA_TYPE_UNKNOWN;
+    return token_is_operator(token, op);
+}
+
+// Consume the datatype keyword + (optional) secondary primitive (the
+// "int" in "long int", say) and hand both back to the caller.
+static void parser_get_datatype_tokens(struct token** datatype_token,
+                                       struct token** datatype_secondary_token){
+    *datatype_token = token_next();
+    struct token* next_token = token_peek_next();
+    if(token_is_primitive_keyword(next_token)){
+        *datatype_secondary_token = next_token;
         token_next();
     }
+}
+
+static int parser_datatype_expected_for_type_string(const char* str){
+    int type = DATA_TYPE_EXPECT_PRIMITIVE;
+    if(S_EQ(str, "union")){
+        type = DATA_TYPE_EXPECT_UNION;
+    } else if(S_EQ(str, "struct")){
+        type = DATA_TYPE_EXPECT_STRUCT;
+    }
+    return type;
+}
+
+// Forges a unique synthetic identifier for anonymous struct / union
+// bodies. ch34 uses a process-local monotonic counter; nothing else
+// relies on the spelling.
+static int parser_get_random_type_index(void){
+    static int x = 0;
+    return ++x;
+}
+
+static struct token* parser_build_random_type_name(void){
+    char tmp_name[25];
+    snprintf(tmp_name, sizeof tmp_name, "customtypename_%i", parser_get_random_type_index());
+    char* sval = malloc(sizeof tmp_name);
+    strncpy(sval, tmp_name, sizeof tmp_name);
+    struct token* token = calloc(1, sizeof(struct token));
+    token->type = TOKEN_TYPE_IDENTIFIER;
+    token->sval = sval;
+    return token;
+}
+
+// Count leading '*' operator tokens; each '*' is one level of pointer.
+static int parser_get_pointer_depth(void){
+    int depth = 0;
+    while(token_next_is_operator("*")){
+        depth++;
+        token_next();
+    }
+    return depth;
+}
+
+// Stubs - filled in by later chapters. ch34 only sets up the call
+// graph; sizing / classification logic moves in later.
+static void parser_datatype_init_type_and_size(struct token* datatype_token,
+                                               struct token* datatype_secondary_token,
+                                               struct datatype* datatype_out,
+                                               int pointer_depth, int expected_type){
+}
+
+static void parser_datatype_init(struct token* datatype_token,
+                                 struct token* datatype_secondary_token,
+                                 struct datatype* datatype_out,
+                                 int pointer_depth, int expected_type){
+}
+
+static void parse_datatype_type(struct datatype* dtype){
+    struct token* datatype_token            = 0;
+    struct token* datatype_secondary_token  = 0;
+    parser_get_datatype_tokens(&datatype_token, &datatype_secondary_token);
+    int expected_type = parser_datatype_expected_for_type_string(datatype_token->sval);
+
+    // For `struct` / `union`, the next token names the type (or is
+    // missing, in which case we forge a synthetic identifier).
+    if(datatype_is_struct_or_union_for_name(datatype_token->sval)){
+        if(token_peek_next()->type == TOKEN_TYPE_IDENTIFIER){
+            datatype_token = token_next();
+        } else {
+            datatype_token = parser_build_random_type_name();
+            dtype->flags |= DATATYPE_FLAG_STRUCT_UNION_NO_NAME;
+        }
+    }
+
+    // `int**` etc.
+    int pointer_depth = parser_get_pointer_depth();
+
+    // Keep the spelling so downstream can render it.
+    dtype->type_str      = datatype_token->sval;
+    dtype->pointer_depth = pointer_depth;
+    if(pointer_depth > 0){
+        dtype->flags |= DATATYPE_FLAG_IS_POINTER;
+    }
+
+    parser_datatype_init(datatype_token, datatype_secondary_token, dtype, pointer_depth, expected_type);
+    parser_datatype_init_type_and_size(datatype_token, datatype_secondary_token, dtype, pointer_depth, expected_type);
 }
 
 // modifier* type modifier*
