@@ -378,6 +378,16 @@ enum {
     DATA_TYPE_EXPECT_STRUCT,
 };
 
+// Convenience sizes for primitive types. Used by
+// parser_datatype_init_type_and_size_for_primitive in ch35.
+enum {
+    DATA_SIZE_ZERO   = 0,
+    DATA_SIZE_BYTE   = 1,
+    DATA_SIZE_WORD   = 2,
+    DATA_SIZE_DWORD  = 4,
+    DATA_SIZE_DDWORD = 8,
+};
+
 // Operator precedence table - definitions moved out of expressionable.c
 // in ch30 so the parser can extern the table and look operators up.
 #define TOTAL_OPERATOR_GROUPS  14

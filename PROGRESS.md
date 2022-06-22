@@ -36,7 +36,9 @@ Tracking the build, one chapter at a time.
 - [x] g01: parse_identifier asserts TOKEN_TYPE_IDENTIFIER, not NODE_TYPE_IDENTIFIER
 - [x] ch33: datatypes part 1 (struct datatype, DATATYPE_FLAG_*, DATA_TYPE_* enums, parse_datatype scaffold)
 - [x] ch34: datatypes part 2 (parse_datatype_type real impl: tokens, pointer depth, struct/union, anonymous names)
-- [ ] ch35..ch102: rest of Module 1 parser
+- [x] ch35: datatypes part 3 (primitive sizes, secondary types, long long warning, ships book typo on double)
+- [ ] g02: parser_datatype_init_type_and_size_for_primitive double-arm typo (.size = DATA_TYPE_DOUBLE)
+- [ ] ch36..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
