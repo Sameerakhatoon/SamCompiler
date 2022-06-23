@@ -373,9 +373,8 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
         datatype_out->type = DATA_TYPE_FLOAT;
         datatype_out->size = DATA_SIZE_DWORD;
     } else if(S_EQ(datatype_token->sval, "double")){
-        // Upstream typo preserved: writes DATA_TYPE_DOUBLE into .size
-        // instead of .type. Caught in g02 (next commit).
-        datatype_out->size = DATA_TYPE_DOUBLE;
+        // g02: write the type to .type, not .size.
+        datatype_out->type = DATA_TYPE_DOUBLE;
         datatype_out->size = DATA_SIZE_DWORD;
     } else {
         compiler_error(current_process, "BUG: Invalid primitive datatype\n");
