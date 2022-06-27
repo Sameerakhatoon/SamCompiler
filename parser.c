@@ -522,6 +522,17 @@ static void parse_expressionable(struct history* history){
     }
 }
 
+// Entry from parse_next for top-level keyword declarations (variables,
+// functions, structs, unions at file scope). Drives the keyword
+// parser; ch37+ will push a real declaration node here, and the
+// upstream node_pop() call only makes sense once that happens. We
+// guard it for now so the parser doesn't crash on bare `int`.
+static void parse_keyword_for_global(void){
+    parse_keyword(history_begin(0));
+    // TODO(post-ch37): re-enable when parse_keyword actually pushes:
+    //   struct node* node = node_pop();
+}
+
 static int parse_next(void){
     struct token* token = token_peek_next();
     if(!token){
@@ -535,6 +546,11 @@ static int parse_next(void){
         case TOKEN_TYPE_STRING:
             parse_expressionable(history_begin(0));
             break;
+
+        case TOKEN_TYPE_KEYWORD:
+            parse_keyword_for_global();
+            break;
+
         default:
             return -1;
     }
@@ -549,8 +565,12 @@ int parse(struct compile_process* process){
     struct node* node = 0;
     vector_set_peek_pointer(process->token_vec, 0);
     while(parse_next() == 0){
-        node = node_peek();
-        vector_push(process->node_tree_vec, &node);
+        // ch36: keyword parses don't push a node yet; only push to the
+        // tree when there's actually something on the scratch stack.
+        if(!vector_empty(process->node_vec)){
+            node = node_peek();
+            vector_push(process->node_tree_vec, &node);
+        }
     }
     return PARSE_ALL_OK;
 }
