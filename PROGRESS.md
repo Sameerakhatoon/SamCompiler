@@ -40,7 +40,8 @@ Tracking the build, one chapter at a time.
 - [x] g02: parser_datatype_init_type_and_size_for_primitive double-arm typo (.size = DATA_TYPE_DOUBLE)
 - [x] ch36: datatypes part 4 (parse_keyword_for_global, top-level keyword dispatch)
 - [x] ch38: implementing the scopes (struct scope, scope.c, root+nested+last-entity walk)
-- [ ] ch39..ch102: rest of Module 1 parser
+- [x] ch40: implementing the symbol resolver (symresolver.c, table stack, register/lookup/dedup)
+- [ ] ch41..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
