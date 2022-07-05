@@ -33,6 +33,8 @@ static void          parse_datatype_modifiers(struct datatype* dtype);
 static void          parse_datatype_type(struct datatype* dtype);
 static void          parse_datatype(struct datatype* dtype);
 static void          parse_variable_function_or_struct_union(struct history* history);
+static bool          parser_is_int_valid_after_datatype(struct datatype* dtype);
+static void          parser_ignore_int(struct datatype* dtype);
 static void          parse_keyword(struct history* history);
 static int           parse_expressionable_single(struct history* history);
 static void          parse_expressionable(struct history* history);
@@ -462,12 +464,37 @@ static void parse_datatype(struct datatype* dtype){
     parse_datatype_modifiers(dtype);
 }
 
+// "long int" / "float int" / "double int" are tolerated abbreviations
+// where `int` is purely decorative. Anything else with a trailing
+// `int` is a hard error.
+static bool parser_is_int_valid_after_datatype(struct datatype* dtype){
+    return dtype->type == DATA_TYPE_LONG
+        || dtype->type == DATA_TYPE_FLOAT
+        || dtype->type == DATA_TYPE_DOUBLE;
+}
+
+static void parser_ignore_int(struct datatype* dtype){
+    if(!token_is_keyword(token_peek_next(), "int")){
+        return;
+    }
+    if(!parser_is_int_valid_after_datatype(dtype)){
+        compiler_error(current_process,
+            "You provided a secondary \"int\" type however its not supported with this current abbrevation\n");
+    }
+    token_next();   // swallow the redundant "int"
+}
+
 // ch33 entry. ch34+ does the variable / function / struct dispatch
 // off the parsed datatype.
 static void parse_variable_function_or_struct_union(struct history* history){
     struct datatype dtype;
     parse_datatype(&dtype);
-    // ch34+ will look at the next token to decide variable vs function
+
+    // ch41: swallow the decorative "int" in "long int" / "float int" /
+    // "double int". The book keeps the real type as long/float/double
+    // and silently drops the int.
+    parser_ignore_int(&dtype);
+    // ch42+ will look at the next token to decide variable vs function
     // vs struct-body and build the appropriate node. For now the
     // datatype is parsed and discarded.
 }
