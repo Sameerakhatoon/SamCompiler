@@ -43,7 +43,8 @@ Tracking the build, one chapter at a time.
 - [x] ch40: implementing the symbol resolver (symresolver.c, table stack, register/lookup/dedup)
 - [x] ch41: datatypes part 5 (parser_ignore_int: swallow decorative trailing `int`)
 - [x] ch42: variables part 1 (struct var payload, parse_variable, `int x = 50` -> NODE_TYPE_VARIABLE)
-- [ ] ch43..ch102: rest of Module 1 parser
+- [x] ch43: variables part 2 (NODE_TYPE_VARIABLE_LIST, expect_sym(';'), comma-separated declarators)
+- [ ] ch44..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
