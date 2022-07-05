@@ -302,6 +302,23 @@ enum {
     NODE_FLAG_INSIDE_EXPRESSION = 0b00000001,
 };
 
+// Datatype shape is needed before struct node because var nodes embed
+// it by value. Original tables/enums for DATATYPE_* / DATA_TYPE_* /
+// DATA_TYPE_EXPECT_* stay below (they're independent of the layout).
+struct node;
+struct datatype {
+    int flags;
+    int type;
+    struct datatype* secondary;
+    const char* type_str;
+    size_t size;
+    int    pointer_depth;
+    union {
+        struct node* struct_node;
+        struct node* union_node;
+    };
+};
+
 typedef struct node node_t;
 
 struct node {
@@ -317,14 +334,20 @@ struct node {
         struct node* function;
     } binded;
 
-    // Composite node payloads. NODE_TYPE_EXPRESSION fills `exp`.
-    // More variants land in later chapters (var, function, body, etc.).
+    // Composite node payloads. NODE_TYPE_EXPRESSION fills `exp`,
+    // NODE_TYPE_VARIABLE fills `var`, etc.
     union {
         struct exp {
             struct node* left;
             struct node* right;
             const char*  op;
         } exp;
+
+        struct var {
+            struct datatype type;
+            const char*     name;
+            struct node*    val;
+        } var;
     };
 
     // Composite node payloads grow chapter by chapter.
@@ -427,23 +450,8 @@ enum {
     DATA_TYPE_UNKNOWN,
 };
 
-struct datatype {
-    int flags;
-    // The DATA_TYPE_* enum value (CHAR, SHORT, INT, ...).
-    int type;
-    // "long int" -> primary = long, secondary = int.
-    struct datatype* secondary;
-    // Source spelling, e.g. "int".
-    const char* type_str;
-    // sizeof this datatype in bytes.
-    size_t size;
-    int    pointer_depth;
-    // For struct / union types: the matching parser node.
-    union {
-        struct node* struct_node;
-        struct node* union_node;
-    };
-};
+// struct datatype is forward-defined earlier (so var nodes can embed
+// it). Fields documented there.
 
 enum {
     DATA_TYPE_EXPECT_PRIMITIVE,

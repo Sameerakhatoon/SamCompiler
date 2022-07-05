@@ -23,8 +23,8 @@ int try_compile(const char* src){
 
 int main(void){
     // long int, double int are valid abbreviations.
-    printf("long_int=%d\n",   try_compile("long int"));
-    printf("double_int=%d\n", try_compile("double int"));
+    printf("long_int=%d\n",   try_compile("long int x"));
+    printf("double_int=%d\n", try_compile("double int x"));
     return 0;
 }
 EOF
