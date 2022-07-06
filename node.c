@@ -74,6 +74,13 @@ void make_exp_node(struct node* left_node, struct node* right_node, const char* 
     });
 }
 
+void make_bracket_node(struct node* inner){
+    node_create(&(struct node){
+        .type          = NODE_TYPE_BRACKET,
+        .bracket.inner = inner,
+    });
+}
+
 // Copy the caller's stack-allocated node onto the heap, push onto the
 // scratch stack, and return the heap pointer. TODO: set binded.owner
 // and binded.function when the parser starts threading the AST.

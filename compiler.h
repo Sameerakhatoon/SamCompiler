@@ -306,6 +306,11 @@ enum {
 // it by value. Original tables/enums for DATATYPE_* / DATA_TYPE_* /
 // DATA_TYPE_EXPECT_* stay below (they're independent of the layout).
 struct node;
+
+// Forward decl: array brackets info (defined further down so we don't
+// need to reorder more of the file).
+struct array_brackets;
+
 struct datatype {
     int flags;
     int type;
@@ -317,6 +322,18 @@ struct datatype {
         struct node* struct_node;
         struct node* union_node;
     };
+
+    // ch44: array brackets info, plus the total array size.
+    struct array {
+        struct array_brackets* brackets;
+        size_t                 size;
+    } array;
+};
+
+// ch44: array-bracket list. A vector of NODE_TYPE_BRACKET nodes, one
+// per `[N]` in a declarator.
+struct array_brackets {
+    struct vector* n_brackets;
 };
 
 typedef struct node node_t;
@@ -353,6 +370,11 @@ struct node {
             // Vector of struct node* (the comma-separated peers).
             struct vector* list;
         } var_list;
+
+        struct bracket {
+            // `int x[50]` -> .inner is NODE_TYPE_NUMBER(50).
+            struct node* inner;
+        } bracket;
     };
 
     // Composite node payloads grow chapter by chapter.
@@ -391,9 +413,20 @@ bool datatype_is_struct_or_union_for_name(const char* name);
 struct node* node_create(struct node* _node);
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);
+// ch44: build a NODE_TYPE_BRACKET wrapping a single inner expression.
+void         make_bracket_node(struct node* inner);
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
+
+// ch44: array-bracket helpers.
+struct array_brackets* array_brackets_new(void);
+void                   array_brackets_free(struct array_brackets* brackets);
+void                   array_brackets_add(struct array_brackets* brackets, struct node* bracket_node);
+struct vector*         array_brackets_node_vector(struct array_brackets* brackets);
+size_t                 array_brackets_calculate_size_from_index(struct datatype* dtype, struct array_brackets* brackets, int index);
+size_t                 array_brackets_calculate_size(struct datatype* dtype, struct array_brackets* brackets);
+int                    array_total_indexes(struct datatype* dtype);
 
 // Scope chain (ch38+). The parser creates a root scope at the start
 // of a parse, pushes/pops nested scopes as it enters/leaves
