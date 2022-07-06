@@ -22,13 +22,31 @@ struct vector* array_brackets_node_vector(struct array_brackets* brackets){
     return brackets->n_brackets;
 }
 
-// TODO(later chapters): real array sizing. For now `int x[4][3]`
-// returns size 0; the parser still records the bracket nodes.
+// Bytes occupied by the array starting from `index`. Multiplies the
+// element size by each remaining bracket dimension. e.g. for
+// `int x[4][3]` with dtype->size==4, starting at index 0 returns
+// 4 * 4 * 3 = 48.
 size_t array_brackets_calculate_size_from_index(struct datatype* dtype,
                                                 struct array_brackets* brackets,
                                                 int index){
-    (void)dtype; (void)brackets; (void)index;
-    return 0;
+    struct vector* array_vec = array_brackets_node_vector(brackets);
+    size_t size = dtype->size;
+    if(index >= vector_count(array_vec)){
+        // Past the last bracket; we're sizing a single element.
+        return size;
+    }
+    vector_set_peek_pointer(array_vec, index);
+    struct node* bn = vector_peek_ptr(array_vec);
+    if(!bn){
+        return 0;
+    }
+    while(bn){
+        assert(bn->bracket.inner->type == NODE_TYPE_NUMBER);
+        int number = bn->bracket.inner->llnum;
+        size *= number;
+        bn = vector_peek_ptr(array_vec);
+    }
+    return size;
 }
 
 size_t array_brackets_calculate_size(struct datatype* dtype, struct array_brackets* brackets){
