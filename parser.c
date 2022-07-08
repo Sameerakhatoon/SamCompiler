@@ -273,6 +273,21 @@ static bool token_next_is_operator(const char* op){
     return token_is_operator(token, op);
 }
 
+static bool token_next_is_symbol(char c){
+    struct token* token = token_peek_next();
+    return token_is_symbol(token, c);
+}
+
+// Convenience wrappers - the parser doesn't carry the process around
+// as an arg, but scope.c does, so adapt.
+static void parser_scope_new(void){
+    scope_new(current_process, 0);
+}
+
+static void parser_scope_finish(void){
+    scope_finish(current_process);
+}
+
 // Consume the next token and assert it's the given symbol character.
 // Fatal compiler_error if not.
 static void expect_sym(char c){
@@ -419,8 +434,14 @@ static void parser_datatype_init_type_and_size(struct token* datatype_token,
             parser_datatype_init_type_and_size_for_primitive(datatype_token, datatype_secondary_token, datatype_out);
             break;
         case DATA_TYPE_EXPECT_STRUCT:
+            // ch47: real struct sizing comes later; for now stamp type
+            // + zero size and let parse_struct fill in the rest.
+            datatype_out->type = DATA_TYPE_STRUCT;
+            datatype_out->size = 0;
+            break;
         case DATA_TYPE_EXPECT_UNION:
-            compiler_error(current_process, "Structure and union types are currently unsupported\n");
+            datatype_out->type = DATA_TYPE_UNION;
+            datatype_out->size = 0;
             break;
         default:
             compiler_error(current_process, "BUG: Unsupported datatype expectation\n");
@@ -598,11 +619,71 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
     make_variable_node_and_register(history, dtype, name_token, value_node);
 }
 
+// ch47: minimally walk `{ ... }` so the parser doesn't get stuck on
+// the brace. Real body parsing arrives in ch48+.
+static void parse_struct_no_new_scope(struct datatype* dtype){
+    (void)dtype;
+    if(!token_is_symbol(token_peek_next(), '{')){
+        return;
+    }
+    expect_sym('{');
+    // Skip every token until the matching '}'. Nested braces aren't
+    // expected in the ch47 input ("struct abc {};") but are tolerated
+    // here so we don't pop into the global parse loop with garbage.
+    int depth = 1;
+    while(depth > 0){
+        struct token* t = token_next();
+        if(!t){
+            compiler_error(current_process, "Unterminated struct body\n");
+        }
+        if(t->type == TOKEN_TYPE_SYMBOL && t->cval == '{') depth++;
+        if(t->type == TOKEN_TYPE_SYMBOL && t->cval == '}') depth--;
+    }
+}
+
+static void parse_struct(struct datatype* dtype){
+    // `struct foo;` (no `{`) is a forward declaration - skip scope.
+    bool is_forward_declaration = !token_is_symbol(token_peek_next(), '{');
+    if(!is_forward_declaration){
+        parser_scope_new();
+    }
+    parse_struct_no_new_scope(dtype);
+    if(!is_forward_declaration){
+        parser_scope_finish();
+    }
+}
+
+static void parse_struct_or_union(struct datatype* dtype){
+    switch(dtype->type){
+        case DATA_TYPE_STRUCT:
+            parse_struct(dtype);
+            break;
+        case DATA_TYPE_UNION:
+            // ch48+ adds union parsing; nothing here for now.
+            break;
+        default:
+            compiler_error(current_process,
+                "COMPILER BUG: The provided datatype is not a structure or union\n");
+    }
+}
+
 // ch33 entry. ch34+ does the variable / function / struct dispatch
 // off the parsed datatype.
 static void parse_variable_function_or_struct_union(struct history* history){
     struct datatype dtype;
     parse_datatype(&dtype);
+
+    // ch47: struct / union body, e.g. `struct abc { ... };`
+    if(datatype_is_struct_or_union(&dtype) && token_next_is_symbol('{')){
+        parse_struct_or_union(&dtype);
+        // Bare `struct abc { ... };` with no declarator after - swallow
+        // the semicolon and bail; nothing to emit here yet (ch48+
+        // builds the real struct node).
+        if(token_next_is_symbol(';')){
+            expect_sym(';');
+            return;
+        }
+    }
 
     // ch41: swallow the decorative "int" in "long int" / "float int" /
     // "double int". The book keeps the real type as long/float/double
@@ -691,12 +772,14 @@ static void parse_expressionable(struct history* history){
 }
 
 // Entry from parse_next for top-level keyword declarations. As of
-// ch42 these actually push a variable node, so we can pop + re-push
-// the canonical way.
+// ch42 variables push a real node. ch47 added bare `struct foo {};`
+// which pushes nothing, so guard the pop/push.
 static void parse_keyword_for_global(void){
     parse_keyword(history_begin(0));
-    struct node* node = node_pop();
-    node_push(node);
+    if(!vector_empty(current_process->node_vec)){
+        struct node* node = node_pop();
+        node_push(node);
+    }
 }
 
 static int parse_next(void){
@@ -726,6 +809,7 @@ static int parse_next(void){
 int parse(struct compile_process* process){
     current_process   = process;
     parser_last_token = 0;
+    scope_create_root(process);
     node_set_vector(process->node_vec, process->node_tree_vec);
 
     struct node* node = 0;

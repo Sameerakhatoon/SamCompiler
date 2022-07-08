@@ -46,7 +46,8 @@ Tracking the build, one chapter at a time.
 - [x] ch43: variables part 2 (NODE_TYPE_VARIABLE_LIST, expect_sym(';'), comma-separated declarators)
 - [x] ch44: variables part 3 (array.c, array_brackets, NODE_TYPE_BRACKET, `int x[4][3];`)
 - [x] ch46: array size calculation (array_brackets_calculate_size_from_index real impl)
-- [ ] ch47..ch102: rest of Module 1 parser
+- [x] ch47: structures part 1 (parse_struct skeleton, scope_create_root in parse, datatype_is_struct_or_union)
+- [ ] ch48..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
