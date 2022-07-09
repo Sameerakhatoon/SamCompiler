@@ -47,7 +47,9 @@ Tracking the build, one chapter at a time.
 - [x] ch44: variables part 3 (array.c, array_brackets, NODE_TYPE_BRACKET, `int x[4][3];`)
 - [x] ch46: array size calculation (array_brackets_calculate_size_from_index real impl)
 - [x] ch47: structures part 1 (parse_struct skeleton, scope_create_root in parse, datatype_is_struct_or_union)
-- [ ] ch48..ch102: rest of Module 1 parser
+- [x] ch48: structures part 2 (struct _struct payload in node union)
+- [x] ch49: bodies part 1 (NODE_TYPE_BODY, parse_body single-statement, parser_current_body)
+- [ ] ch50..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver

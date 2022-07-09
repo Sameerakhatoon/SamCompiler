@@ -6,6 +6,10 @@
 
 extern struct expressionable_op_precedence_group op_precedence[TOTAL_OPERATOR_GROUPS];
 
+// Owned by node.c, threaded through statements so children know
+// which body they belong to.
+extern struct node* parser_current_body;
+
 // Parse history. Threaded through every parse_*() call so children can
 // see flags / context their parents pushed (e.g. "we are inside an
 // expression right now"). history_begin() makes a fresh one; history_down()
@@ -617,6 +621,80 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
     }
 
     make_variable_node_and_register(history, dtype, name_token, value_node);
+}
+
+static void parse_symbol(void){
+    compiler_error(current_process, "Symbols are not yet supported\n");
+}
+
+// One statement: keyword-led (declarations / control-flow) or a bare
+// expression-statement terminated by `;`.
+static void parse_statement(struct history* history){
+    if(token_peek_next()->type == TOKEN_TYPE_KEYWORD){
+        parse_keyword(history);
+        return;
+    }
+
+    parse_expressionable_root(history);
+    if(token_peek_next()->type == TOKEN_TYPE_SYMBOL
+       && !token_is_symbol(token_peek_next(), ';')){
+        parse_symbol();
+        return;
+    }
+    expect_sym(';');
+}
+
+static void parser_append_size_for_node(struct history* history, size_t* _variable_size, struct node* node){
+    (void)history; (void)_variable_size; (void)node;
+    // TODO(later): real size + alignment tracking.
+}
+
+static void parser_finalize_body(struct history* history, struct node* body_node,
+                                 struct vector* body_vec, size_t* variable_size,
+                                 struct node* largest_align_eligible_var_node,
+                                 struct node* largest_possible_var_node){
+    (void)history; (void)largest_possible_var_node;
+    body_node->body.largest_var_node = largest_align_eligible_var_node;
+    body_node->body.padded           = false;
+    body_node->body.size             = *variable_size;
+    body_node->body.statements       = body_vec;
+}
+
+// ch49: single-statement body (no braces), e.g. `y = 30;` in
+// `if (x) y = 30;`. Brace bodies come in ch54.
+static void parse_body_single_statement(size_t* variable_size, struct vector* body_vec, struct history* history){
+    make_body_node(0, 0, false, 0);
+    struct node* body_node = node_pop();
+    body_node->binded.owner = parser_current_body;
+    parser_current_body     = body_node;
+
+    parse_statement(history_down(history, history->flags));
+    struct node* stmt_node = node_pop();
+    vector_push(body_vec, &stmt_node);
+
+    parser_append_size_for_node(history, variable_size, stmt_node);
+    struct node* largest_var_node = (stmt_node->type == NODE_TYPE_VARIABLE) ? stmt_node : 0;
+    parser_finalize_body(history, body_node, body_vec, variable_size,
+                         largest_var_node, largest_var_node);
+    parser_current_body = body_node->binded.owner;
+    node_push(body_node);
+}
+
+// Body entry. Brace-delimited bodies are stubbed - ch54 fills them in.
+static void parse_body(size_t* variable_size, struct history* history){
+    parser_scope_new();
+    size_t tmp_size = 0;
+    if(!variable_size){
+        variable_size = &tmp_size;
+    }
+    struct vector* body_vec = vector_create(sizeof(struct node*));
+    if(!token_next_is_symbol('{')){
+        parse_body_single_statement(variable_size, body_vec, history);
+        parser_scope_finish();
+        return;
+    }
+    // TODO(ch54): walk a brace-delimited body.
+    parser_scope_finish();
 }
 
 // ch47: minimally walk `{ ... }` so the parser doesn't get stuck on

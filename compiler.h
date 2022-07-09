@@ -383,6 +383,14 @@ struct node {
             struct node* body_n;
             struct node* var;
         } _struct;
+
+        // ch49: NODE_TYPE_BODY - a sequence of statement nodes.
+        struct body {
+            struct vector* statements;
+            size_t         size;
+            bool           padded;
+            struct node*   largest_var_node;
+        } body;
     };
 
     // Composite node payloads grow chapter by chapter.
@@ -424,6 +432,8 @@ struct node* node_create(struct node* _node);
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);
 // ch44: build a NODE_TYPE_BRACKET wrapping a single inner expression.
 void         make_bracket_node(struct node* inner);
+// ch49: build a NODE_TYPE_BODY around a statement vector.
+void         make_body_node(struct vector* body_vec, size_t size, bool padded, struct node* largest_var_node);
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
