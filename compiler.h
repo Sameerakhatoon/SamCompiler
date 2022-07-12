@@ -362,6 +362,9 @@ struct node {
 
         struct var {
             struct datatype type;
+            // ch53: bytes of padding to insert before this variable
+            // to satisfy alignment.
+            int             padding;
             const char*     name;
             struct node*    val;
         } var;
@@ -434,6 +437,12 @@ size_t datatype_size(struct datatype* dtype);
 // ch52: size helpers that look at variable nodes (not datatypes).
 size_t variable_size(struct node* var_node);
 size_t variable_size_for_list(struct node* var_list_node);
+
+// ch53: alignment/padding helpers used by the body sizing logic.
+int padding(int val, int to);
+int align_value(int val, int to);
+int align_value_treat_positive(int val, int to);
+int compute_sum_padding(struct vector* vec);
 
 // ch27: take a stack-allocated node, copy it to the heap, push onto the
 // parser's node stack, return the new pointer.
