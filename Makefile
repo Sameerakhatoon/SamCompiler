@@ -1,6 +1,6 @@
 OBJECTS  = ./build/compiler.o ./build/cprocess.o \
            ./build/lexer.o ./build/lex_process.o ./build/token.o \
-           ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/array.o \
+           ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/array.o ./build/helper.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o
 INCLUDES = -I./
 CFLAGS   = -g -Wall -Wno-unused-variable -Wno-unused-function
@@ -45,6 +45,9 @@ all: ./main
 
 ./build/array.o: ./array.c ./compiler.h ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./array.c -o ./build/array.o
+
+./build/helper.o: ./helper.c ./compiler.h ./helpers/vector.h
+	gcc ${INCLUDES} ${CFLAGS} -c ./helper.c -o ./build/helper.o
 
 ./build/helpers/buffer.o: ./helpers/buffer.c ./helpers/buffer.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./helpers/buffer.c -o ./build/helpers/buffer.o
