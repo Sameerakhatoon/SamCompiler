@@ -10,6 +10,11 @@ extern struct expressionable_op_precedence_group op_precedence[TOTAL_OPERATOR_GR
 // which body they belong to.
 extern struct node* parser_current_body;
 
+// ch55: history flags carried through nested parses.
+enum {
+    HISTORY_FLAG_INSIDE_UNION = 0b00000001,
+};
+
 // Parse history. Threaded through every parse_*() call so children can
 // see flags / context their parents pushed (e.g. "we are inside an
 // expression right now"). history_begin() makes a fresh one; history_down()
@@ -688,14 +693,29 @@ static void parser_append_size_for_node(struct history* history, size_t* _variab
     }
 }
 
+// ch55: real body finalization. Unions get sized to their largest
+// member; otherwise we sum padding, then realign to the largest
+// align-eligible variable's natural size.
 static void parser_finalize_body(struct history* history, struct node* body_node,
-                                 struct vector* body_vec, size_t* variable_size,
+                                 struct vector* body_vec, size_t* _variable_size,
                                  struct node* largest_align_eligible_var_node,
                                  struct node* largest_possible_var_node){
-    (void)history; (void)largest_possible_var_node;
+    if(history->flags & HISTORY_FLAG_INSIDE_UNION){
+        if(largest_possible_var_node){
+            *_variable_size = variable_size(largest_possible_var_node);
+        }
+    }
+    int pad = compute_sum_padding(body_vec);
+    *_variable_size += pad;
+
+    if(largest_align_eligible_var_node){
+        *_variable_size = align_value(*_variable_size,
+                                      largest_align_eligible_var_node->var.type.size);
+    }
+
     body_node->body.largest_var_node = largest_align_eligible_var_node;
-    body_node->body.padded           = false;
-    body_node->body.size             = *variable_size;
+    body_node->body.padded           = (pad != 0);
+    body_node->body.size             = *_variable_size;
     body_node->body.statements       = body_vec;
 }
 
