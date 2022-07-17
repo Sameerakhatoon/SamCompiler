@@ -112,3 +112,22 @@ bool node_is_struct_or_union_variable(struct node* node){
     }
     return datatype_is_struct_or_union(&node->var.type);
 }
+
+// Get the variable node behind a struct / union / variable. For
+// NODE_TYPE_VARIABLE the node itself; for NODE_TYPE_STRUCT, the
+// attached var pointer; UNION not yet implemented.
+struct node* variable_node(struct node* node){
+    switch(node->type){
+        case NODE_TYPE_VARIABLE: return node;
+        case NODE_TYPE_STRUCT:   return node->_struct.var;
+        case NODE_TYPE_UNION:
+            assert(0 && "Unions are not yet supported");
+            return 0;
+    }
+    return 0;
+}
+
+bool variable_node_is_primitive(struct node* node){
+    assert(node->type == NODE_TYPE_VARIABLE);
+    return datatype_is_primitive(&node->var.type);
+}
