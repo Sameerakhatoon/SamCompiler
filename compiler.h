@@ -463,6 +463,8 @@ bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
 bool         node_is_struct_or_union_variable(struct node* node);
 struct node* variable_struct_or_union_body_node(struct node* node);
+// ch62: pass through for VARIABLE_LIST; else unwrap to underlying var.
+struct node* variable_node_or_list(struct node* node);
 
 // ch44: array-bracket helpers.
 struct array_brackets* array_brackets_new(void);

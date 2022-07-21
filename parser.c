@@ -853,7 +853,52 @@ static void parse_body_single_statement(size_t* variable_size, struct vector* bo
     node_push(body_node);
 }
 
-// Body entry. Brace-delimited bodies are stubbed - ch54 fills them in.
+// ch62: { stmt; stmt; ... } walk statements between braces, track
+// largest var (for alignment), and finalize the body.
+static void parse_body_multiple_statements(size_t* variable_size,
+                                           struct vector* body_vec,
+                                           struct history* history){
+    make_body_node(0, 0, false, 0);
+    struct node* body_node = node_pop();
+    body_node->binded.owner = parser_current_body;
+    parser_current_body     = body_node;
+
+    struct node* stmt_node = 0;
+    struct node* largest_possible_var_node       = 0;
+    struct node* largest_align_eligible_var_node = 0;
+
+    expect_sym('{');
+
+    while(!token_next_is_symbol('}')){
+        parse_statement(history_down(history, history->flags));
+        stmt_node = node_pop();
+
+        if(stmt_node->type == NODE_TYPE_VARIABLE){
+            if(!largest_possible_var_node
+               || largest_possible_var_node->var.type.size <= stmt_node->var.type.size){
+                largest_possible_var_node = stmt_node;
+            }
+            if(variable_node_is_primitive(stmt_node)){
+                if(!largest_align_eligible_var_node
+                   || largest_align_eligible_var_node->var.type.size <= stmt_node->var.type.size){
+                    largest_align_eligible_var_node = stmt_node;
+                }
+            }
+        }
+
+        vector_push(body_vec, &stmt_node);
+        parser_append_size_for_node(history, variable_size, variable_node_or_list(stmt_node));
+    }
+
+    expect_sym('}');
+
+    parser_finalize_body(history, body_node, body_vec, variable_size,
+                         largest_align_eligible_var_node, largest_possible_var_node);
+    parser_current_body = body_node->binded.owner;
+    node_push(body_node);
+}
+
+// Body entry. Single-statement (ch49) or { ... } (ch62).
 static void parse_body(size_t* variable_size, struct history* history){
     parser_scope_new();
     size_t tmp_size = 0;
@@ -866,7 +911,7 @@ static void parse_body(size_t* variable_size, struct history* history){
         parser_scope_finish();
         return;
     }
-    // TODO(ch54): walk a brace-delimited body.
+    parse_body_multiple_statements(variable_size, body_vec, history);
     parser_scope_finish();
 }
 
