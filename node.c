@@ -96,6 +96,19 @@ void make_body_node(struct vector* body_vec, size_t size, bool padded, struct no
     });
 }
 
+void make_struct_node(const char* name, struct node* body_node){
+    int flags = 0;
+    if(!body_node){
+        flags |= NODE_FLAG_IS_FORWARD_DECLARATION;
+    }
+    node_create(&(struct node){
+        .type           = NODE_TYPE_STRUCT,
+        ._struct.body_n = body_node,
+        ._struct.name   = name,
+        .flags          = flags,
+    });
+}
+
 // Copy the caller's stack-allocated node onto the heap, push onto the
 // scratch stack, and return the heap pointer. TODO: set binded.owner
 // and binded.function when the parser starts threading the AST.

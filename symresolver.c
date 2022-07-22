@@ -83,8 +83,11 @@ static void symresolver_build_for_function_node(struct compile_process* process,
 }
 
 static void symresolver_build_for_structure_node(struct compile_process* process, struct node* node){
-    (void)node;
-    compiler_error(process, "Structures are not yet supported\n");
+    if(node->flags & NODE_FLAG_IS_FORWARD_DECLARATION){
+        // Forward declarations don't register; the real one will.
+        return;
+    }
+    symresolver_register_symbol(process, node->_struct.name, SYMBOL_TYPE_NODE, node);
 }
 
 static void symresolver_build_for_union_node(struct compile_process* process, struct node* node){

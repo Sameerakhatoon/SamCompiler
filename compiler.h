@@ -299,7 +299,9 @@ enum {
 };
 
 enum {
-    NODE_FLAG_INSIDE_EXPRESSION = 0b00000001,
+    NODE_FLAG_INSIDE_EXPRESSION      = 0b00000001,
+    NODE_FLAG_IS_FORWARD_DECLARATION = 0b00000010,
+    NODE_FLAG_HAS_VARIABLE_COMBINED  = 0b00000100,
 };
 
 // Datatype shape is needed before struct node because var nodes embed
@@ -458,6 +460,8 @@ void         make_exp_node(struct node* left_node, struct node* right_node, cons
 void         make_bracket_node(struct node* inner);
 // ch49: build a NODE_TYPE_BODY around a statement vector.
 void         make_body_node(struct vector* body_vec, size_t size, bool padded, struct node* largest_var_node);
+// ch64: build a NODE_TYPE_STRUCT with optional body (NULL = forward decl).
+void         make_struct_node(const char* name, struct node* body_node);
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
