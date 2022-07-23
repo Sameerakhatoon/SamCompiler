@@ -1150,8 +1150,7 @@ int parse(struct compile_process* process){
     current_process   = process;
     parser_last_token = 0;
     scope_create_root(process);
-    symresolver_initialize(process);
-    symresolver_new_table(process);
+    // ch66: symresolver_initialize now happens in compile_process_create.
     node_set_vector(process->node_vec, process->node_tree_vec);
 
     struct node* node = 0;
