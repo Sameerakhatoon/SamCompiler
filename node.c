@@ -109,6 +109,34 @@ void make_struct_node(const char* name, struct node* body_node){
     });
 }
 
+// ch65: symbol -> node accessors. Lets the parser resolve `struct foo`
+// references against previously-registered struct definitions.
+struct node* node_from_sym(struct symbol* sym){
+    if(sym->type != SYMBOL_TYPE_NODE){
+        return 0;
+    }
+    return sym->data;
+}
+
+struct node* node_from_symbol(struct compile_process* process, const char* name){
+    struct symbol* sym = symresolver_get_symbol(process, name);
+    if(!sym){
+        return 0;
+    }
+    return node_from_sym(sym);
+}
+
+struct node* struct_node_for_name(struct compile_process* process, const char* name){
+    struct node* node = node_from_symbol(process, name);
+    if(!node){
+        return 0;
+    }
+    if(node->type != NODE_TYPE_STRUCT){
+        return 0;
+    }
+    return node;
+}
+
 // Copy the caller's stack-allocated node onto the heap, push onto the
 // scratch stack, and return the heap pointer. TODO: set binded.owner
 // and binded.function when the parser starts threading the AST.

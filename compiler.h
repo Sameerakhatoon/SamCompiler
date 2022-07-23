@@ -454,6 +454,12 @@ int compute_sum_padding(struct vector* vec);
 // ch27: take a stack-allocated node, copy it to the heap, push onto the
 // parser's node stack, return the new pointer.
 struct node* node_create(struct node* _node);
+
+// ch65: symbol -> node accessors.
+struct node* node_from_sym(struct symbol* sym);
+struct node* node_from_symbol(struct compile_process* process, const char* name);
+struct node* struct_node_for_name(struct compile_process* process, const char* name);
+
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);
 // ch44: build a NODE_TYPE_BRACKET wrapping a single inner expression.
