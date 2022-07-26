@@ -423,6 +423,7 @@ struct node* node_peek(void);
 struct node* node_pop(void);
 
 bool token_is_keyword(struct token* token, const char* value);
+bool token_is_identifier(struct token* token);
 bool token_is_symbol(struct token* token, char c);
 // Preserves the book's "seperator" spelling.
 bool token_is_nl_or_comment_or_newline_seperator(struct token* token);
