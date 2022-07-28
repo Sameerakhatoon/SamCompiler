@@ -619,21 +619,25 @@ static void make_variable_node(struct datatype* dtype, struct token* name_token,
     });
 }
 
-// ch58: compute the variable's stack offset based on the last
-// declared entity in the current (non-global) scope. Local stacks
-// grow downward (offset goes negative); upward-stack call frames
-// reverse the sign.
+// ch58/73: compute the variable's stack offset based on the last
+// declared entity in the current (non-global) scope. Local stacks grow
+// downward (negative offsets). Upward-stack call frames (function
+// args) start at 0 above EBP and grow upward.
 static void parser_scope_offset_for_stack(struct node* node, struct history* history){
     struct parser_scope_entity* last_entity = parser_scope_last_entity_stop_global_scope();
     bool upward_stack = history->flags & HISTORY_FLAG_IS_UPWARD_STACK;
-    int offset = -(int)variable_size(node);
-    if(upward_stack){
-        // TODO(post-ch58): real upward-stack offsets land later.
-        compiler_error(current_process, "Upward-stack offsets are not yet implemented\n");
-    }
+    int  vsize = (int)variable_size(node);
+    int  offset = upward_stack ? 0 : -vsize;
 
     if(last_entity){
-        offset += variable_node(last_entity->node)->var.aoffset;
+        if(upward_stack){
+            // First arg sits at last->offset + last->size; we record
+            // the new arg's starting position here.
+            offset = variable_node(last_entity->node)->var.aoffset
+                   + (int)variable_size(last_entity->node);
+        } else {
+            offset += variable_node(last_entity->node)->var.aoffset;
+        }
         if(variable_node_is_primitive(node)){
             variable_node(node)->var.padding =
                 padding(upward_stack ? offset : -offset, node->var.type.size);
@@ -764,8 +768,32 @@ static void parse_function_body(struct history* history){
     parse_body(0, history_down(history, history->flags | HISTORY_FLAG_INSIDE_FUNCTION_BODY));
 }
 
+// ch73 forward decl - definition is below.
+static struct vector* parse_function_arguments(struct history* history);
+
+// Consume exactly `amount` "." operators (for `...` variadics).
+static void token_read_dots(size_t amount){
+    for(size_t i = 0; i < amount; i++){
+        expect_op(".");
+    }
+}
+
+// ch73: parse one parameter: a datatype + optional identifier name.
+// Routes through parse_variable so the existing scope-push machinery
+// kicks in (with HISTORY_FLAG_IS_UPWARD_STACK set by the caller).
+static void parse_variable_full(struct history* history){
+    struct datatype dtype;
+    parse_datatype(&dtype);
+
+    struct token* name_token = 0;
+    if(token_is_identifier(token_peek_next())){
+        name_token = token_next();
+    }
+    parse_variable(&dtype, name_token, history);
+}
+
 // ch72: parse a function declaration / definition. The `(` is the next
-// token. ch73 fills in argument parsing; for now we just demand `()`.
+// token. ch73 fills in argument parsing.
 static void parse_function(struct datatype* ret_type, struct token* name_token, struct history* history){
     struct vector* arguments_vector = 0;
     parser_scope_new();
@@ -781,7 +809,7 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
     }
 
     expect_op("(");
-    // TODO(ch73): parse arguments here.
+    arguments_vector = parse_function_arguments(history_begin(0));
     expect_sym(')');
 
     function_node->func.args.vector = arguments_vector;
@@ -1032,6 +1060,32 @@ static void parse_struct(struct datatype* dtype){
     if(!is_forward_declaration){
         parser_scope_finish();
     }
+}
+
+// ch73: parse a function's argument list (everything between the
+// already-consumed `(` and the upcoming `)`).
+static struct vector* parse_function_arguments(struct history* history){
+    parser_scope_new();
+    struct vector* arguments_vec = vector_create(sizeof(struct node*));
+    while(!token_next_is_symbol(')')){
+        // `...` variadic - consume the three dots and stop.
+        if(token_next_is_operator(".")){
+            token_read_dots(3);
+            parser_scope_finish();
+            return arguments_vec;
+        }
+
+        parse_variable_full(history_down(history, history->flags | HISTORY_FLAG_IS_UPWARD_STACK));
+        struct node* argument_node = node_pop();
+        vector_push(arguments_vec, &argument_node);
+
+        if(!token_next_is_operator(",")){
+            break;
+        }
+        token_next();   // eat the comma
+    }
+    parser_scope_finish();
+    return arguments_vec;
 }
 
 static void parse_struct_or_union(struct datatype* dtype){
