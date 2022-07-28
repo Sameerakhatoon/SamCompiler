@@ -7,15 +7,17 @@
 extern struct expressionable_op_precedence_group op_precedence[TOTAL_OPERATOR_GROUPS];
 
 // Owned by node.c, threaded through statements so children know
-// which body they belong to.
+// which body / function they belong to.
 extern struct node* parser_current_body;
+extern struct node* parser_current_function;
 
 // ch55: history flags carried through nested parses.
 enum {
     HISTORY_FLAG_INSIDE_UNION     = 0b00000001,
     HISTORY_FLAG_IS_UPWARD_STACK  = 0b00000010,
-    HISTORY_FLAG_IS_GLOBAL_SCOPE  = 0b00000100,
-    HISTORY_FLAG_INSIDE_STRUCTURE = 0b00001000,
+    HISTORY_FLAG_IS_GLOBAL_SCOPE      = 0b00000100,
+    HISTORY_FLAG_INSIDE_STRUCTURE     = 0b00001000,
+    HISTORY_FLAG_INSIDE_FUNCTION_BODY = 0b00010000,
 };
 
 // ch57: parser-side scope entity. Each declared variable becomes one
@@ -756,6 +758,49 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
     make_variable_node_and_register(history, dtype, name_token, value_node);
 }
 
+// ch72: parse a function body. Adds INSIDE_FUNCTION_BODY to history so
+// nested code (variable decls inside the function) gets stack offsets.
+static void parse_function_body(struct history* history){
+    parse_body(0, history_down(history, history->flags | HISTORY_FLAG_INSIDE_FUNCTION_BODY));
+}
+
+// ch72: parse a function declaration / definition. The `(` is the next
+// token. ch73 fills in argument parsing; for now we just demand `()`.
+static void parse_function(struct datatype* ret_type, struct token* name_token, struct history* history){
+    struct vector* arguments_vector = 0;
+    parser_scope_new();
+    make_function_node(ret_type, name_token->sval, 0, 0);
+    struct node* function_node = node_peek();
+    parser_current_function = function_node;
+
+    // For functions returning struct/union by value, the caller pushes
+    // a hidden first arg (pointer to result), so the real args start
+    // one slot further along.
+    if(datatype_is_struct_or_union(ret_type)){
+        function_node->func.args.stack_addition += DATA_SIZE_DWORD;
+    }
+
+    expect_op("(");
+    // TODO(ch73): parse arguments here.
+    expect_sym(')');
+
+    function_node->func.args.vector = arguments_vector;
+    if(symresolver_get_symbol_for_native_function(current_process, name_token->sval)){
+        function_node->func.flags |= FUNCTION_NODE_FLAG_IS_NATIVE;
+    }
+
+    if(token_next_is_symbol('{')){
+        parse_function_body(history_begin(0));
+        struct node* body_node = node_pop();
+        function_node->func.body_n = body_node;
+    } else {
+        expect_sym(';');
+    }
+
+    parser_current_function = 0;
+    parser_scope_finish();
+}
+
 // ch63: handle the symbol case at statement-start. Only `{` is
 // supported for now - opens a brace body. Other symbols still error.
 static void parse_symbol(void){
@@ -1034,8 +1079,11 @@ static void parse_variable_function_or_struct_union(struct history* history){
             "Expecting a valid name for the given variable declaration\n");
     }
 
-    // TODO(ch46+): if the next token is `(`, this is a function decl,
-    // not a variable. ch42 only handles the variable path.
+    // ch72: if next is `(`, this is a function declaration.
+    if(token_next_is_operator("(")){
+        parse_function(&dtype, name_token, history);
+        return;
+    }
 
     parse_variable(&dtype, name_token, history);
 
