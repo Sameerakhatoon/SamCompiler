@@ -531,6 +531,10 @@ void           symresolver_end_table(struct compile_process* process);
 struct symbol* symresolver_get_symbol(struct compile_process* process, const char* name);
 struct symbol* symresolver_get_symbol_for_native_function(struct compile_process* process, const char* name);
 struct symbol* symresolver_register_symbol(struct compile_process* process, const char* sym_name, int type, void* data);
+
+// ch74: returns the function's stack_addition (bytes between EBP and
+// the first argument; typically 8 = saved EBP + return EIP).
+size_t function_node_argument_stack_addition(struct node* node);
 struct node*   symresolver_node(struct symbol* sym);
 void           symresolver_build_for_node(struct compile_process* process, struct node* node);
 
