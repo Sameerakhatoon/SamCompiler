@@ -412,6 +412,10 @@ struct node {
                 // `else if` chain / `else` body - NULL if absent.
                 struct node* next;
             } if_stmt;
+            // ch79: `else { ... }` body.
+            struct else_stmt {
+                struct node* body_node;
+            } else_stmt;
         } stmt;
 
         // ch71: NODE_TYPE_FUNCTION payload.
@@ -509,6 +513,8 @@ void         make_struct_node(const char* name, struct node* body_node);
 struct node* make_function_node(struct datatype* ret_type, const char* name, struct vector* arguments, struct node* body_node);
 // ch78: build a NODE_TYPE_STATEMENT_IF.
 void         make_if_node(struct node* cond_node, struct node* body_node, struct node* next_node);
+// ch79: build a NODE_TYPE_STATEMENT_ELSE.
+void         make_else_node(struct node* body_node);
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);

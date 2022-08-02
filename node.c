@@ -228,6 +228,13 @@ void make_if_node(struct node* cond_node, struct node* body_node, struct node* n
     });
 }
 
+void make_else_node(struct node* body_node){
+    node_create(&(struct node){
+        .type                     = NODE_TYPE_STATEMENT_ELSE,
+        .stmt.else_stmt.body_node = body_node,
+    });
+}
+
 bool node_is_expression_or_parentheses(struct node* node){
     return node && (node->type == NODE_TYPE_EXPRESSION_PARENTHESES
                  || node->type == NODE_TYPE_EXPRESSION);

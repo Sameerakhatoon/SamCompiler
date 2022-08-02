@@ -371,6 +371,11 @@ static bool token_next_is_operator(const char* op){
     return token_is_operator(token, op);
 }
 
+static bool token_next_is_keyword(const char* keyword){
+    struct token* token = token_peek_next();
+    return token_is_keyword(token, keyword);
+}
+
 static bool token_next_is_symbol(char c){
     struct token* token = token_peek_next();
     return token_is_symbol(token, c);
@@ -1220,7 +1225,34 @@ static void parse_variable_function_or_struct_union(struct history* history){
     expect_sym(';');
 }
 
-// ch78: parse `if (cond) <body>`. ch79 will chain `else if` / `else`.
+static void parse_if_stmt(struct history* history);
+
+// ch79: parse the body of a bare `else`. Returns a NODE_TYPE_STATEMENT_ELSE.
+static struct node* parse_else(struct history* history){
+    size_t var_size = 0;
+    parse_body(&var_size, history);
+    struct node* body_node = node_pop();
+    make_else_node(body_node);
+    return node_pop();
+}
+
+// ch79: after an `if` body has been parsed, optionally consume an
+// `else` (and possibly an `else if` chain). Returns the next-link
+// node or NULL.
+static struct node* parse_else_or_else_if(struct history* history){
+    if(!token_next_is_keyword("else")){
+        return 0;
+    }
+    token_next();   // eat "else"
+
+    if(token_next_is_keyword("if")){
+        parse_if_stmt(history_down(history, 0));
+        return node_pop();
+    }
+    return parse_else(history_down(history, 0));
+}
+
+// ch78/79: parse `if (cond) <body> [else if ... | else ...]`.
 static void parse_if_stmt(struct history* history){
     expect_keyword("if");
     expect_op("(");
@@ -1231,7 +1263,8 @@ static void parse_if_stmt(struct history* history){
     size_t var_size = 0;
     parse_body(&var_size, history);
     struct node* body_node = node_pop();
-    make_if_node(cond_node, body_node, 0);
+
+    make_if_node(cond_node, body_node, parse_else_or_else_if(history));
 }
 
 static void parse_keyword(struct history* history){
