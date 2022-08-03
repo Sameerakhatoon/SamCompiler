@@ -8,9 +8,14 @@ cd "$REPO_ROOT"
 
 test_name="$(basename "${0%.*}")"
 
+# Build first so $LINK_OBJS sees the freshly produced object files.
+# (Earlier we captured LINK_OBJS before build, which broke when a
+# previous test's build had wiped build/.)
+./build.sh >/dev/null 2>&1 || true
+
 # Full link list for any test probe that wants to link the compiler
-# libraries. Tests should use $LINK_OBJS instead of hand-listing files,
-# so new modules added in later chapters don't require touching every
+# libraries. Tests use $LINK_OBJS instead of hand-listing files, so
+# new modules added in later chapters don't require touching every
 # test.
 LINK_OBJS="$(ls "$REPO_ROOT"/build/*.o "$REPO_ROOT"/build/helpers/*.o 2>/dev/null | tr '\n' ' ')"
 
