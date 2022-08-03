@@ -235,6 +235,13 @@ void make_else_node(struct node* body_node){
     });
 }
 
+void make_return_node(struct node* exp_node){
+    node_create(&(struct node){
+        .type                 = NODE_TYPE_STATEMENT_RETURN,
+        .stmt.return_stmt.exp = exp_node,
+    });
+}
+
 bool node_is_expression_or_parentheses(struct node* node){
     return node && (node->type == NODE_TYPE_EXPRESSION_PARENTHESES
                  || node->type == NODE_TYPE_EXPRESSION);
