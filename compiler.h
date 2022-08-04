@@ -420,6 +420,13 @@ struct node {
             struct else_stmt {
                 struct node* body_node;
             } else_stmt;
+            // ch82: `for (init; cond; loop) body`.
+            struct for_stmt {
+                struct node* init_node;
+                struct node* cond_node;
+                struct node* loop_node;
+                struct node* body_node;
+            } for_stmt;
         } stmt;
 
         // ch71: NODE_TYPE_FUNCTION payload.
@@ -521,6 +528,8 @@ void         make_if_node(struct node* cond_node, struct node* body_node, struct
 void         make_else_node(struct node* body_node);
 // ch81: build a NODE_TYPE_STATEMENT_RETURN.
 void         make_return_node(struct node* exp_node);
+// ch82: build a NODE_TYPE_STATEMENT_FOR.
+void         make_for_node(struct node* init_node, struct node* cond_node, struct node* loop_node, struct node* body_node);
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
