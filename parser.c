@@ -1267,6 +1267,86 @@ static void parse_if_stmt(struct history* history){
     make_if_node(cond_node, body_node, parse_else_or_else_if(history));
 }
 
+// ch83: shared helper - consume `keyword (` expr `)` and leave expr on stack.
+static void parse_keyword_parentheses_expression(const char* keyword){
+    expect_keyword(keyword);
+    expect_op("(");
+    parse_expressionable_root(history_begin(0));
+    expect_sym(')');
+}
+
+// ch83: `while (exp) body`.
+static void parse_while(struct history* history){
+    parse_keyword_parentheses_expression("while");
+    struct node* exp_node = node_pop();
+    size_t var_size = 0;
+    parse_body(&var_size, history);
+    struct node* body_node = node_pop();
+    make_while_node(exp_node, body_node);
+}
+
+// ch84: `do body while (exp);`.
+static void parse_do_while(struct history* history){
+    expect_keyword("do");
+    size_t var_size = 0;
+    parse_body(&var_size, history);
+    struct node* body_node = node_pop();
+    parse_keyword_parentheses_expression("while");
+    struct node* exp_node = node_pop();
+    expect_sym(';');
+    make_do_while_node(body_node, exp_node);
+}
+
+// ch85: `switch (exp) body`. ch89 wires the case-collection logic.
+static void parse_switch(struct history* history){
+    parse_keyword_parentheses_expression("switch");
+    struct node* exp_node = node_pop();
+    size_t var_size = 0;
+    parse_body(&var_size, history);
+    struct node* body_node = node_pop();
+    make_switch_node(exp_node, body_node, vector_create(sizeof(struct node*)), false);
+}
+
+// ch86: `break;` / `continue;`.
+static void parse_break(struct history* history){
+    (void)history;
+    expect_keyword("break");
+    expect_sym(';');
+    make_break_node();
+}
+
+static void parse_continue(struct history* history){
+    (void)history;
+    expect_keyword("continue");
+    expect_sym(';');
+    make_continue_node();
+}
+
+// ch88: `goto label;`.
+static void parse_goto(struct history* history){
+    expect_keyword("goto");
+    parse_identifier(history);
+    expect_sym(';');
+    struct node* label_node = node_pop();
+    make_goto_node(label_node);
+}
+
+// ch89: `case expr:` and `default:`.
+static void parse_case(struct history* history){
+    expect_keyword("case");
+    parse_expressionable_root(history);
+    struct node* exp_node = node_pop();
+    expect_sym(':');
+    make_case_node(exp_node);
+}
+
+static void parse_default(struct history* history){
+    (void)history;
+    expect_keyword("default");
+    expect_sym(':');
+    make_default_node();
+}
+
 // ch82: a `for` part that ends with `;` (init / cond). Returns true if
 // it actually parsed an expression; false for empty.
 static bool parse_for_loop_part(struct history* history){
@@ -1337,6 +1417,38 @@ static void parse_keyword(struct history* history){
     }
     if(S_EQ(token->sval, "for")){
         parse_for_stmt(history);
+        return;
+    }
+    if(S_EQ(token->sval, "while")){
+        parse_while(history);
+        return;
+    }
+    if(S_EQ(token->sval, "do")){
+        parse_do_while(history);
+        return;
+    }
+    if(S_EQ(token->sval, "switch")){
+        parse_switch(history);
+        return;
+    }
+    if(S_EQ(token->sval, "break")){
+        parse_break(history);
+        return;
+    }
+    if(S_EQ(token->sval, "continue")){
+        parse_continue(history);
+        return;
+    }
+    if(S_EQ(token->sval, "goto")){
+        parse_goto(history);
+        return;
+    }
+    if(S_EQ(token->sval, "case")){
+        parse_case(history);
+        return;
+    }
+    if(S_EQ(token->sval, "default")){
+        parse_default(history);
         return;
     }
 }

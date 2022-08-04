@@ -427,6 +427,33 @@ struct node {
                 struct node* loop_node;
                 struct node* body_node;
             } for_stmt;
+            // ch83: `while (exp) body`.
+            struct while_stmt {
+                struct node* exp_node;
+                struct node* body_node;
+            } while_stmt;
+            // ch84: `do { body } while (exp);` (same payload as while).
+            struct do_while_stmt {
+                struct node* exp_node;
+                struct node* body_node;
+            } do_while_stmt;
+            // ch85+: switch / case / break / continue / goto / labels.
+            struct switch_stmt {
+                struct node*   exp;
+                struct node*   body;
+                // Vector of `struct case_or_default*`.
+                struct vector* cases;
+                bool           has_default_case;
+            } switch_stmt;
+            struct _case_stmt {
+                struct node* exp;
+            } _case;
+            struct _goto_stmt {
+                struct node* label;
+            } _goto;
+            struct _label {
+                struct node* name;
+            } label;
         } stmt;
 
         // ch71: NODE_TYPE_FUNCTION payload.
@@ -530,6 +557,17 @@ void         make_else_node(struct node* body_node);
 void         make_return_node(struct node* exp_node);
 // ch82: build a NODE_TYPE_STATEMENT_FOR.
 void         make_for_node(struct node* init_node, struct node* cond_node, struct node* loop_node, struct node* body_node);
+// ch83/84: while + do-while.
+void         make_while_node(struct node* exp_node, struct node* body_node);
+void         make_do_while_node(struct node* body_node, struct node* exp_node);
+// ch85+: switch / case / continue / break / goto / label.
+void         make_switch_node(struct node* exp_node, struct node* body_node, struct vector* cases, bool has_default_case);
+void         make_case_node(struct node* exp_node);
+void         make_continue_node(void);
+void         make_break_node(void);
+void         make_goto_node(struct node* label_node);
+void         make_label_node(struct node* name_node);
+void         make_default_node(void);
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
