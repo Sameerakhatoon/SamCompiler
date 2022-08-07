@@ -21,6 +21,24 @@ enum {
     HISTORY_FLAG_IS_GLOBAL_SCOPE      = 0b00000100,
     HISTORY_FLAG_INSIDE_STRUCTURE     = 0b00001000,
     HISTORY_FLAG_INSIDE_FUNCTION_BODY = 0b00010000,
+    HISTORY_FLAG_IN_SWITCH_STATEMENT   = 0b00100000,
+};
+
+// ch94: switch-case registration. Each `case <expr>:` inside a switch
+// body becomes one of these, attached to the parser_history_switch
+// hanging off the active history. The index is the literal value of
+// the case expression (we only allow integer-constant cases for now).
+struct parsed_switch_case {
+    int index;
+};
+
+struct history_cases {
+    struct vector* cases;             // vector of parsed_switch_case
+    bool           has_default_case;
+};
+
+struct parser_history_switch {
+    struct history_cases case_data;
 };
 
 // ch57: parser-side scope entity. Each declared variable becomes one
@@ -54,8 +72,13 @@ static struct parser_scope_entity* parser_scope_last_entity_stop_global_scope(vo
 // expression right now"). history_begin() makes a fresh one; history_down()
 // clones one for a deeper call so we don't mutate the parent's flags.
 struct history {
-    int flags;
+    int                          flags;
+    struct parser_history_switch _switch;
 };
+
+static struct parser_history_switch parser_new_switch_statement(struct history* history);
+static void                         parser_end_switch_statement(struct parser_history_switch* sw);
+static void                         parser_register_case(struct history* history, struct node* case_node);
 
 static struct history* history_begin(int flags);
 static struct history* history_down(struct history* history, int flags);
@@ -112,6 +135,28 @@ static struct history* history_down(struct history* history, int flags){
     memcpy(h, history, sizeof(struct history));
     h->flags = flags;
     return h;
+}
+
+// ch94: switch-case bookkeeping. parse_switch calls
+// parser_new_switch_statement at entry; parse_case calls
+// parser_register_case for each `case <expr>:` it sees; parse_switch
+// calls parser_end_switch_statement at exit.
+static struct parser_history_switch parser_new_switch_statement(struct history* history){
+    memset(&history->_switch, 0, sizeof(history->_switch));
+    history->_switch.case_data.cases = vector_create(sizeof(struct parsed_switch_case));
+    history->flags |= HISTORY_FLAG_IN_SWITCH_STATEMENT;
+    return history->_switch;
+}
+
+static void parser_end_switch_statement(struct parser_history_switch* sw){
+    (void)sw;
+}
+
+static void parser_register_case(struct history* history, struct node* case_node){
+    assert(history->flags & HISTORY_FLAG_IN_SWITCH_STATEMENT);
+    struct parsed_switch_case scase;
+    scase.index = case_node->stmt._case.exp->llnum;
+    vector_push(history->_switch.case_data.cases, &scase);
 }
 
 static void parser_ignore_nl_or_comment(struct token* token){
@@ -1366,13 +1411,17 @@ static void parse_do_while(struct history* history){
 }
 
 // ch85: `switch (exp) body`. ch89 wires the case-collection logic.
+// ch94: cases are collected into the history's _switch.case_data and
+// handed off to the switch node.
 static void parse_switch(struct history* history){
+    struct parser_history_switch sw = parser_new_switch_statement(history);
     parse_keyword_parentheses_expression("switch");
     struct node* exp_node = node_pop();
     size_t var_size = 0;
     parse_body(&var_size, history);
     struct node* body_node = node_pop();
-    make_switch_node(exp_node, body_node, vector_create(sizeof(struct node*)), false);
+    make_switch_node(exp_node, body_node, sw.case_data.cases, sw.case_data.has_default_case);
+    parser_end_switch_statement(&sw);
 }
 
 // ch86: `break;` / `continue;`.
@@ -1400,12 +1449,22 @@ static void parse_goto(struct history* history){
 }
 
 // ch89: `case expr:` and `default:`.
+// ch94: only integer-constant case expressions are supported; the
+// resulting NODE_TYPE_STATEMENT_CASE is registered with the active
+// switch so codegen can later index into it.
 static void parse_case(struct history* history){
     expect_keyword("case");
     parse_expressionable_root(history);
     struct node* exp_node = node_pop();
     expect_sym(':');
     make_case_node(exp_node);
+
+    if(exp_node->type != NODE_TYPE_NUMBER){
+        compiler_error(current_process, "We only support numbers in our subset of C at this time\n");
+    }
+
+    struct node* case_node = node_pop();
+    parser_register_case(history, case_node);
 }
 
 static void parse_default(struct history* history){
