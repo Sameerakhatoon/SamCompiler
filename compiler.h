@@ -396,6 +396,13 @@ struct node {
             struct node* var;
         } _struct;
 
+        // ch99: NODE_TYPE_UNION - same shape as struct.
+        struct _union {
+            const char*  name;
+            struct node* body_n;
+            struct node* var;
+        } _union;
+
         // ch49: NODE_TYPE_BODY - a sequence of statement nodes.
         struct body {
             struct vector* statements;
@@ -546,6 +553,8 @@ struct node* node_create(struct node* _node);
 struct node* node_from_sym(struct symbol* sym);
 struct node* node_from_symbol(struct compile_process* process, const char* name);
 struct node* struct_node_for_name(struct compile_process* process, const char* name);
+struct node* union_node_for_name(struct compile_process* process, const char* name);
+void         make_union_node(const char* name, struct node* body_node);
 
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);

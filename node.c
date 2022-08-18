@@ -111,6 +111,20 @@ void make_struct_node(const char* name, struct node* body_node){
     });
 }
 
+// ch99: NODE_TYPE_UNION mirror of make_struct_node.
+void make_union_node(const char* name, struct node* body_node){
+    int flags = 0;
+    if(!body_node){
+        flags |= NODE_FLAG_IS_FORWARD_DECLARATION;
+    }
+    node_create(&(struct node){
+        .type          = NODE_TYPE_UNION,
+        ._union.body_n = body_node,
+        ._union.name   = name,
+        .flags         = flags,
+    });
+}
+
 // ch65: symbol -> node accessors. Lets the parser resolve `struct foo`
 // references against previously-registered struct definitions.
 struct node* node_from_sym(struct symbol* sym){
@@ -134,6 +148,17 @@ struct node* struct_node_for_name(struct compile_process* process, const char* n
         return 0;
     }
     if(node->type != NODE_TYPE_STRUCT){
+        return 0;
+    }
+    return node;
+}
+
+struct node* union_node_for_name(struct compile_process* process, const char* name){
+    struct node* node = node_from_symbol(process, name);
+    if(!node){
+        return 0;
+    }
+    if(node->type != NODE_TYPE_UNION){
         return 0;
     }
     return node;
@@ -183,9 +208,7 @@ struct node* variable_node(struct node* node){
     switch(node->type){
         case NODE_TYPE_VARIABLE: return node;
         case NODE_TYPE_STRUCT:   return node->_struct.var;
-        case NODE_TYPE_UNION:
-            assert(0 && "Unions are not yet supported");
-            return 0;
+        case NODE_TYPE_UNION:    return node->_union.var;
     }
     return 0;
 }
