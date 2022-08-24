@@ -555,6 +555,9 @@ struct node* node_from_symbol(struct compile_process* process, const char* name)
 struct node* struct_node_for_name(struct compile_process* process, const char* name);
 struct node* union_node_for_name(struct compile_process* process, const char* name);
 void         make_union_node(const char* name, struct node* body_node);
+bool         node_is_expression(struct node* node, const char* op);
+bool         is_array_node(struct node* node);
+bool         is_node_assignment(struct node* node);
 
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);
