@@ -1829,5 +1829,7 @@ int parse(struct compile_process* process){
 
     // ch97: every forward struct reference must resolve by end of parse.
     assert(fixups_resolve(parser_fixup_sys));
+    // ch105: hand the scope back to codegen, which sets up its own root.
+    scope_free_root(process);
     return PARSE_ALL_OK;
 }
