@@ -1,6 +1,6 @@
 OBJECTS  = ./build/compiler.o ./build/cprocess.o \
            ./build/lexer.o ./build/lex_process.o ./build/token.o \
-           ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/fixup.o ./build/array.o ./build/helper.o \
+           ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/codegen.o ./build/fixup.o ./build/array.o ./build/helper.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o
 INCLUDES = -I./
 CFLAGS   = -g -Wall -Wno-unused-variable -Wno-unused-function
@@ -42,6 +42,9 @@ all: ./main
 
 ./build/symresolver.o: ./symresolver.c ./compiler.h ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./symresolver.c -o ./build/symresolver.o
+
+./build/codegen.o: ./codegen.c ./compiler.h
+	gcc ${INCLUDES} ${CFLAGS} -c ./codegen.c -o ./build/codegen.o
 
 ./build/fixup.o: ./fixup.c ./compiler.h ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./fixup.c -o ./build/fixup.o
