@@ -1,5 +1,6 @@
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include "compiler.h"
 #include "helpers/vector.h"
 
@@ -14,6 +15,9 @@ static void          codegen_finish_scope(void);
 static struct node*  codegen_node_next(void);
 static void          asm_push_args(const char* ins, va_list args);
 static void          asm_push(const char* ins, ...);
+static const char*   asm_keyword_for_size(size_t size, char* tmp_buf);
+static void          codegen_generate_global_variable_for_primitive(struct node* node);
+static void          codegen_generate_global_variable(struct node* node);
 static void          codegen_generate_data_section_part(struct node* node);
 static void          codegen_generate_data_section(void);
 static void          codegen_generate_root_node(struct node* node);
@@ -54,9 +58,58 @@ static void asm_push(const char* ins, ...){
     va_end(args);
 }
 
+// ch106: map a primitive's byte size to its NASM "db / dw / dd / dq"
+// keyword. For non-primitive sizes we fall back to "times N db".
+// tmp_buf is supplied by the caller so we don't return a static.
+static const char* asm_keyword_for_size(size_t size, char* tmp_buf){
+    const char* keyword = 0;
+    switch(size){
+        case DATA_SIZE_BYTE:   keyword = "db"; break;
+        case DATA_SIZE_WORD:   keyword = "dw"; break;
+        case DATA_SIZE_DWORD:  keyword = "dd"; break;
+        case DATA_SIZE_DDWORD: keyword = "dq"; break;
+        default:
+            sprintf(tmp_buf, "times %lu db ", (unsigned long)size);
+            return tmp_buf;
+    }
+    strcpy(tmp_buf, keyword);
+    return tmp_buf;
+}
+
+static void codegen_generate_global_variable_for_primitive(struct node* node){
+    char tmp_buf[256];
+    if(node->var.val){
+        // ch106: placeholder for emitting the initializer. Numeric
+        // and string literal handling land in ch111 / ch112.
+    }
+    asm_push("%s: %s 0", node->var.name, asm_keyword_for_size(variable_size(node), tmp_buf));
+}
+
+static void codegen_generate_global_variable(struct node* node){
+    asm_push("; %s %s", node->var.type.type_str, node->var.name);
+    switch(node->var.type.type){
+        case DATA_TYPE_VOID:
+        case DATA_TYPE_CHAR:
+        case DATA_TYPE_SHORT:
+        case DATA_TYPE_INTEGER:
+        case DATA_TYPE_LONG:
+            codegen_generate_global_variable_for_primitive(node);
+            break;
+        case DATA_TYPE_DOUBLE:
+        case DATA_TYPE_FLOAT:
+            compiler_error(current_process, "Doubles and floats are not supported in our subset of C\n");
+            break;
+    }
+}
+
 static void codegen_generate_data_section_part(struct node* node){
-    (void)node;
-    // Per-node global-data emit lands in later chapters (ch106+).
+    switch(node->type){
+        case NODE_TYPE_VARIABLE:
+            codegen_generate_global_variable(node);
+            break;
+        default:
+            break;
+    }
 }
 
 static void codegen_generate_data_section(void){
