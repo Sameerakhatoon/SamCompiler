@@ -196,6 +196,8 @@ struct compile_process_input_file {
     const char* abs_path;
 };
 
+struct code_generator;
+
 struct compile_process {
     // Flags controlling how this file should be compiled.
     int flags;
@@ -230,6 +232,9 @@ struct compile_process {
     } symbols;
 
     FILE* ofile;
+
+    // ch108: codegen state - entry/exit label vectors.
+    struct code_generator* generator;
 };
 
 int                     compile_file(const char* filename, const char* out_filename, int flags);
@@ -566,7 +571,22 @@ enum {
     CODEGEN_GENERAL_ERROR,
 };
 
-int codegen(struct compile_process* process);
+// ch108: entry / exit "label" book-keeping for break / continue.
+struct codegen_entry_point {
+    int id;
+};
+
+struct codegen_exit_point {
+    int id;
+};
+
+struct code_generator {
+    struct vector* entry_points;     // vector of struct codegen_entry_point*
+    struct vector* exit_points;      // vector of struct codegen_exit_point*
+};
+
+int                    codegen(struct compile_process* process);
+struct code_generator* codegenerator_new(struct compile_process* process);
 
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);

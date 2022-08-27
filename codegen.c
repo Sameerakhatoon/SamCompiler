@@ -1,5 +1,7 @@
+#include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
 #include "helpers/vector.h"
@@ -56,6 +58,99 @@ static void asm_push(const char* ins, ...){
     va_start(args, ins);
     asm_push_args(ins, args);
     va_end(args);
+}
+
+// ch108: codegen "label" system. Each break / continue spans the most
+// recent entry / exit point. We model entries (loop start, for goto
+// continue) and exits (loop end, for break) as stacks of small
+// records with an integer id; the asm label is `.entry_point_<id>`
+// or `.exit_point_<id>`.
+
+struct code_generator* codegenerator_new(struct compile_process* process){
+    (void)process;
+    struct code_generator* gen = calloc(1, sizeof(struct code_generator));
+    gen->entry_points = vector_create(sizeof(struct codegen_entry_point*));
+    gen->exit_points  = vector_create(sizeof(struct codegen_exit_point*));
+    return gen;
+}
+
+static int codegen_label_count(void){
+    static int count = 0;
+    count++;
+    return count;
+}
+
+static void codegen_register_exit_point(int exit_point_id){
+    struct code_generator* gen = current_process->generator;
+    struct codegen_exit_point* ep = calloc(1, sizeof(struct codegen_exit_point));
+    ep->id = exit_point_id;
+    vector_push(gen->exit_points, &ep);
+}
+
+static struct codegen_exit_point* codegen_current_exit_point(void){
+    struct code_generator* gen = current_process->generator;
+    return vector_back_ptr_or_null(gen->exit_points);
+}
+
+static void codegen_begin_exit_point(void){
+    codegen_register_exit_point(codegen_label_count());
+}
+
+static void codegen_end_exit_point(void){
+    struct code_generator* gen = current_process->generator;
+    struct codegen_exit_point* ep = codegen_current_exit_point();
+    assert(ep);
+    asm_push(".exit_point_%i:", ep->id);
+    free(ep);
+    vector_pop(gen->exit_points);
+}
+
+static void codegen_goto_exit_point(struct node* node){
+    (void)node;
+    struct codegen_exit_point* ep = codegen_current_exit_point();
+    asm_push("jmp .exit_point_%i", ep->id);
+}
+
+static void codegen_register_entry_point(int entry_point_id){
+    struct code_generator* gen = current_process->generator;
+    struct codegen_entry_point* ep = calloc(1, sizeof(struct codegen_entry_point));
+    ep->id = entry_point_id;
+    vector_push(gen->entry_points, &ep);
+}
+
+static struct codegen_entry_point* codegen_current_entry_point(void){
+    struct code_generator* gen = current_process->generator;
+    return vector_back_ptr_or_null(gen->entry_points);
+}
+
+static void codegen_begin_entry_point(void){
+    int id = codegen_label_count();
+    codegen_register_entry_point(id);
+    asm_push(".entry_point_%i:", id);
+}
+
+static void codegen_end_entry_point(void){
+    struct code_generator* gen = current_process->generator;
+    struct codegen_entry_point* ep = codegen_current_entry_point();
+    assert(ep);
+    free(ep);
+    vector_pop(gen->entry_points);
+}
+
+static void codegen_goto_entry_point(struct node* current_node){
+    (void)current_node;
+    struct codegen_entry_point* ep = codegen_current_entry_point();
+    asm_push("jmp .entry_point_%i", ep->id);
+}
+
+static void codegen_begin_entry_exit_point(void){
+    codegen_begin_entry_point();
+    codegen_begin_exit_point();
+}
+
+static void codegen_end_entry_exit_point(void){
+    codegen_end_entry_point();
+    codegen_end_exit_point();
 }
 
 // ch106: map a primitive's byte size to its NASM "db / dw / dd / dq"
@@ -156,5 +251,12 @@ int codegen(struct compile_process* process){
     codegen_finish_scope();
 
     codegen_generate_rod();
+
+    // ch108: smoke-test the entry / exit machinery on every compile.
+    // This goes away once a real loop emits start / end labels.
+    codegen_begin_entry_exit_point();
+    codegen_goto_exit_point(0);
+    codegen_goto_entry_point(0);
+    codegen_end_entry_exit_point();
     return CODEGEN_ALL_OK;
 }
