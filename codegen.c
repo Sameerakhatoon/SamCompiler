@@ -60,6 +60,21 @@ static void asm_push(const char* ins, ...){
     va_end(args);
 }
 
+// ch110: same as asm_push but does not append the trailing newline.
+// Lets the string emitter assemble one line via several calls.
+static void asm_push_no_nl(const char* ins, ...){
+    va_list args;
+    va_start(args, ins);
+    vfprintf(stdout, ins, args);
+    va_end(args);
+    if(current_process->ofile){
+        va_list args2;
+        va_start(args2, ins);
+        vfprintf(current_process->ofile, ins, args2);
+        va_end(args2);
+    }
+}
+
 // ch108: codegen "label" system. Each break / continue spans the most
 // recent entry / exit point. We model entries (loop start, for goto
 // continue) and exits (loop end, for break) as stacks of small
@@ -69,6 +84,8 @@ static void asm_push(const char* ins, ...){
 struct code_generator* codegenerator_new(struct compile_process* process){
     (void)process;
     struct code_generator* gen = calloc(1, sizeof(struct code_generator));
+    // ch110: string table lives alongside entry/exit stacks.
+    gen->string_table = vector_create(sizeof(struct string_table_element*));
     gen->entry_points = vector_create(sizeof(struct codegen_entry_point*));
     gen->exit_points  = vector_create(sizeof(struct codegen_exit_point*));
     return gen;
@@ -229,8 +246,69 @@ static void codegen_generate_root(void){
     }
 }
 
+// ch110: write escape-sequence chars as their decimal ASCII value
+// (`'\n'` -> `10`). Returns true if c was handled.
+static bool codegen_write_string_char_escaped(char c){
+    const char* c_out = 0;
+    switch(c){
+        case '\n': c_out = "10"; break;
+        case '\t': c_out = "9";  break;
+    }
+    if(c_out){
+        asm_push_no_nl("%s, ", c_out);
+    }
+    return c_out != 0;
+}
+
+static void codegen_write_string(struct string_table_element* element){
+    asm_push_no_nl("%s: db ", element->label);
+    size_t len = strlen(element->str);
+    for(size_t i = 0; i < len; i++){
+        char c = element->str[i];
+        if(codegen_write_string_char_escaped(c)){
+            continue;
+        }
+        asm_push_no_nl("'%c', ", c);
+    }
+    asm_push_no_nl("0");
+    asm_push("");
+}
+
 static void codegen_write_strings(void){
-    // String-table emit lands in ch110+.
+    struct code_generator* gen = current_process->generator;
+    vector_set_peek_pointer(gen->string_table, 0);
+    struct string_table_element* element = vector_peek_ptr(gen->string_table);
+    while(element){
+        codegen_write_string(element);
+        element = vector_peek_ptr(gen->string_table);
+    }
+}
+
+// ch110: look up a registered string by content; returns its label or
+// NULL if not yet seen.
+static const char* codegen_get_label_for_string(const char* str){
+    struct code_generator* gen = current_process->generator;
+    vector_set_peek_pointer(gen->string_table, 0);
+    struct string_table_element* cur = vector_peek_ptr(gen->string_table);
+    while(cur){
+        if(S_EQ(cur->str, str)){
+            return cur->label;
+        }
+        cur = vector_peek_ptr(gen->string_table);
+    }
+    return 0;
+}
+
+static const char* codegen_register_string(const char* str){
+    const char* label = codegen_get_label_for_string(str);
+    if(label){
+        return label;
+    }
+    struct string_table_element* el = calloc(1, sizeof(struct string_table_element));
+    sprintf((char*)el->label, "str_%i", codegen_label_count());
+    el->str = str;
+    vector_push(current_process->generator->string_table, &el);
+    return el->label;
 }
 
 static void codegen_generate_rod(void){
@@ -250,13 +328,14 @@ int codegen(struct compile_process* process){
     codegen_generate_root();
     codegen_finish_scope();
 
-    codegen_generate_rod();
+    // ch110: register a couple of strings so the string table has
+    // content to emit. (Goes away once real expressions feed strings
+    // into the table.) Duplicate registrations should dedupe.
+    codegen_register_string("Hello world!!");
+    codegen_register_string("Hello world!!");
+    codegen_register_string("Hello world!!");
+    codegen_register_string("Abc\n");
 
-    // ch108: smoke-test the entry / exit machinery on every compile.
-    // This goes away once a real loop emits start / end labels.
-    codegen_begin_entry_exit_point();
-    codegen_goto_exit_point(0);
-    codegen_goto_entry_point(0);
-    codegen_end_entry_exit_point();
+    codegen_generate_rod();
     return CODEGEN_ALL_OK;
 }

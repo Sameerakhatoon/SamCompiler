@@ -580,7 +580,15 @@ struct codegen_exit_point {
     int id;
 };
 
+// ch110: each unique string literal gets registered once and given a
+// `str_<N>` label. label is char[] so we can sprintf into it directly.
+struct string_table_element {
+    const char* str;
+    char        label[50];
+};
+
 struct code_generator {
+    struct vector* string_table;     // vector of struct string_table_element*
     struct vector* entry_points;     // vector of struct codegen_entry_point*
     struct vector* exit_points;      // vector of struct codegen_exit_point*
 };
