@@ -191,10 +191,20 @@ static const char* asm_keyword_for_size(size_t size, char* tmp_buf){
 static void codegen_generate_global_variable_for_primitive(struct node* node){
     char tmp_buf[256];
     if(node->var.val){
-        // ch106: placeholder for emitting the initializer. Numeric
-        // and string literal handling land in ch111 / ch112.
+        if(node->var.val->type == NODE_TYPE_STRING){
+            // ch112 lands the string-literal initializer path.
+        } else {
+            // ch111: emit the integer initializer literal.
+            asm_push("%s: %s %lld",
+                node->var.name,
+                asm_keyword_for_size(variable_size(node), tmp_buf),
+                node->var.val->llnum);
+        }
+    } else {
+        asm_push("%s: %s 0",
+            node->var.name,
+            asm_keyword_for_size(variable_size(node), tmp_buf));
     }
-    asm_push("%s: %s 0", node->var.name, asm_keyword_for_size(variable_size(node), tmp_buf));
 }
 
 static void codegen_generate_global_variable(struct node* node){
@@ -327,14 +337,6 @@ int codegen(struct compile_process* process){
     vector_set_peek_pointer(process->node_tree_vec, 0);
     codegen_generate_root();
     codegen_finish_scope();
-
-    // ch110: register a couple of strings so the string table has
-    // content to emit. (Goes away once real expressions feed strings
-    // into the table.) Duplicate registrations should dedupe.
-    codegen_register_string("Hello world!!");
-    codegen_register_string("Hello world!!");
-    codegen_register_string("Hello world!!");
-    codegen_register_string("Abc\n");
 
     codegen_generate_rod();
     return CODEGEN_ALL_OK;

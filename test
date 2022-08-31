@@ -3,5 +3,3 @@ section .data
 x: dd 0
 section .text
 section .rodata
-str_1: db 'H', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', '!', '!', 0
-str_2: db 'A', 'b', 'c', 10, 0
