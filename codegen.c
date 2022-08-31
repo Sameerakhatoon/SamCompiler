@@ -19,6 +19,7 @@ static void          asm_push_args(const char* ins, va_list args);
 static void          asm_push(const char* ins, ...);
 static const char*   asm_keyword_for_size(size_t size, char* tmp_buf);
 static void          codegen_generate_global_variable_for_primitive(struct node* node);
+static const char*   codegen_register_string(const char* str);
 static void          codegen_generate_global_variable(struct node* node);
 static void          codegen_generate_data_section_part(struct node* node);
 static void          codegen_generate_data_section(void);
@@ -192,7 +193,14 @@ static void codegen_generate_global_variable_for_primitive(struct node* node){
     char tmp_buf[256];
     if(node->var.val){
         if(node->var.val->type == NODE_TYPE_STRING){
-            // ch112 lands the string-literal initializer path.
+            // ch112: register the literal in the string table and
+            // emit the label as the variable's value (so the global
+            // holds the address of the string in .rodata).
+            const char* label = codegen_register_string(node->var.val->sval);
+            asm_push("%s: %s %s",
+                node->var.name,
+                asm_keyword_for_size(variable_size(node), tmp_buf),
+                label);
         } else {
             // ch111: emit the integer initializer literal.
             asm_push("%s: %s %lld",
