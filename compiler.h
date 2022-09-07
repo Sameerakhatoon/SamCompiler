@@ -687,6 +687,13 @@ bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
 bool         node_is_struct_or_union_variable(struct node* node);
 struct node* variable_struct_or_union_body_node(struct node* node);
+
+// ch119: array index helpers used by the resolver to compute offsets
+// for array-bracket entities. `array_multiplier` walks brackets after
+// `index` to compute the chunk-size in elements; `array_offset`
+// multiplies that by the element byte size.
+int array_multiplier(struct datatype* dtype, int index, int index_value);
+int array_offset(struct datatype* dtype, int index, int index_value);
 // ch62: pass through for VARIABLE_LIST; else unwrap to underlying var.
 struct node* variable_node_or_list(struct node* node);
 
@@ -823,6 +830,8 @@ struct resolver_scope*   resolver_new_scope(struct resolver_process* resolver, v
 void                     resolver_finish_scope(struct resolver_process* resolver);
 struct resolver_process* resolver_new_process(struct compile_process* compiler, struct resolver_callbacks* callbacks);
 struct resolver_entity*  resolver_create_new_entity(struct resolver_result* result, int type, void* private);
+struct resolver_entity*  resolver_create_new_entity_for_unsupported_node(struct resolver_result* result, struct node* node);
+struct resolver_entity*  resolver_create_new_entity_for_array_bracket(struct resolver_result* result, struct resolver_process* process, struct node* node, struct node* array_index_node, int index, struct datatype* dtype, void* private, struct resolver_scope* scope);
 
 struct resolver_array_data {
     // Vector of struct resolver_entity*.
@@ -883,8 +892,9 @@ struct resolver_entity {
         } var_data;
 
         struct resolver_array {
+            // ch119 dropped `multiplier` here; array_offset
+            // recomputes it from the bracket vector instead.
             struct datatype dtype;
-            int             multiplier;
             struct node*    array_index_node;
             int             index;
         } array;

@@ -76,3 +76,32 @@ int compute_sum_padding(struct vector* vec){
     }
     return total;
 }
+
+// ch119: walk the array bracket vector starting at index+1 and
+// multiply each declared dimension into index_value. Returns the
+// element multiplier for index `index` into a (possibly multi-dim)
+// array. Non-array datatype returns index_value unchanged.
+int array_multiplier(struct datatype* dtype, int index, int index_value){
+    if(!(dtype->flags & DATATYPE_FLAG_IS_ARRAY)){
+        return index_value;
+    }
+    vector_set_peek_pointer(dtype->array.brackets->n_brackets, index + 1);
+    int size_sum = index_value;
+    struct node* bracket = vector_peek_ptr(dtype->array.brackets->n_brackets);
+    while(bracket){
+        assert(bracket->bracket.inner->type == NODE_TYPE_NUMBER);
+        int declared = bracket->bracket.inner->llnum;
+        size_sum *= declared;
+        bracket = vector_peek_ptr(dtype->array.brackets->n_brackets);
+    }
+    return size_sum;
+}
+
+// ch119: byte offset for the index-th access into dtype.
+int array_offset(struct datatype* dtype, int index, int index_value){
+    if(!(dtype->flags & DATATYPE_FLAG_IS_ARRAY)
+       || (index == (int)vector_count(dtype->array.brackets->n_brackets) - 1)){
+        return index_value * datatype_element_size(dtype);
+    }
+    return array_multiplier(dtype, index, index_value) * datatype_element_size(dtype);
+}
