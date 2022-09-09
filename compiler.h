@@ -842,6 +842,17 @@ struct resolver_entity*  resolver_create_new_entity_for_var_node(struct resolver
 struct resolver_entity*  resolver_new_entity_for_var_node_no_push(struct resolver_process* process, struct node* var_node, void* private, int offset, struct resolver_scope* scope);
 struct resolver_entity*  resolver_new_entity_for_var_node(struct resolver_process* process, struct node* var_node, void* private, int offset);
 
+// resolver_new_entity_for_rule moved below struct resolver_entity
+// because the nested rule struct is only complete after the
+// enclosing definition is parsed.
+struct resolver_entity*  resolver_make_entity(struct resolver_process* process, struct resolver_result* result, struct datatype* custom_dtype, struct node* node, struct resolver_entity* guided_entity, struct resolver_scope* scope);
+struct resolver_entity*  resolver_create_new_entity_for_function_call(struct resolver_result* result, struct resolver_process* process, struct resolver_entity* left_operand_entity, void* private);
+struct resolver_entity*  resolver_regster_function(struct resolver_process* process, struct node* func_node, void* private);
+struct resolver_entity*  resolver_get_entity_in_scope_with_entity_type(struct resolver_result* result, struct resolver_process* resolver, struct resolver_scope* scope, const char* entity_name, int entity_type);
+
+// ch124: struct_offset lands later; declared here so ch122 can compile.
+int                      struct_offset(struct compile_process* compiler, const char* struct_name, const char* var_name, struct node** out_node_out, int last_pos, int flags);
+
 struct resolver_array_data {
     // Vector of struct resolver_entity*.
     struct vector* array_entities;
@@ -935,6 +946,9 @@ struct resolver_entity {
     struct resolver_entity*  next;
     struct resolver_entity*  prev;
 };
+
+// ch122: declared here so struct resolver_entity_rule is fully visible.
+void resolver_new_entity_for_rule(struct resolver_process* process, struct resolver_result* result, struct resolver_entity_rule* rule);
 
 // ============================================================================
 // Datatypes (ch33+)

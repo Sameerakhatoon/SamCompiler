@@ -350,3 +350,79 @@ struct resolver_entity* resolver_new_entity_for_var_node(struct resolver_process
     vector_push(process->scope.current->entities, &entity);
     return entity;
 }
+
+// ch122: RULE entity. Carries left/right rule flags so codegen can
+// constrain how neighboring entities merge.
+void resolver_new_entity_for_rule(struct resolver_process* process, struct resolver_result* result, struct resolver_entity_rule* rule){
+    (void)process;
+    struct resolver_entity* entity_rule = resolver_create_new_entity(result, RESOLVER_ENTITY_TYPE_RULE, 0);
+    entity_rule->rule = *rule;
+    resolver_result_entity_push(result, entity_rule);
+}
+
+// ch122: build a new entity inheriting offset + flags from
+// guided_entity. VARIABLE nodes route to var_node_no_push;
+// everything else becomes a GENERAL unknown. The result is private-
+// stamped via the user-supplied make_private callback.
+struct resolver_entity* resolver_make_entity(struct resolver_process* process, struct resolver_result* result, struct datatype* custom_dtype, struct node* node, struct resolver_entity* guided_entity, struct resolver_scope* scope){
+    struct resolver_entity* entity = 0;
+    int offset = guided_entity->offset;
+    int flags  = guided_entity->flags;
+    switch(node->type){
+        case NODE_TYPE_VARIABLE:
+            entity = resolver_new_entity_for_var_node_no_push(process, node, 0, offset, scope);
+            break;
+        default:
+            entity = resolver_create_new_unknown_entity(process, result, custom_dtype, node, scope, offset);
+    }
+    if(entity){
+        entity->flags |= flags;
+        if(custom_dtype){
+            entity->dtype = *custom_dtype;
+        }
+        entity->private = process->callbacks.make_private(entity, node, offset, scope);
+    }
+    return entity;
+}
+
+struct resolver_entity* resolver_create_new_entity_for_function_call(struct resolver_result* result, struct resolver_process* process, struct resolver_entity* left_operand_entity, void* private){
+    (void)process;
+    struct resolver_entity* entity = resolver_create_new_entity(result, RESOLVER_ENTITY_TYPE_FUNCTION_CALL, private);
+    if(!entity){
+        return 0;
+    }
+    entity->dtype = left_operand_entity->dtype;
+    entity->func_call_data.arguments = vector_create(sizeof(struct node*));
+    return entity;
+}
+
+// ch122: preserve book typo "regster" verbatim.
+struct resolver_entity* resolver_regster_function(struct resolver_process* process, struct node* func_node, void* private){
+    struct resolver_entity* entity = resolver_create_new_entity(0, RESOLVER_ENTITY_TYPE_FUNCTION, private);
+    if(!entity){
+        return 0;
+    }
+    entity->name  = func_node->func.name;
+    entity->node  = func_node;
+    entity->dtype = func_node->func.rtype;
+    entity->scope = resolver_process_scope_current(process);
+    vector_push(process->scope.root->entities, &entity);
+    return entity;
+}
+
+// ch122: lookup helper. The struct / union path uses ch124's
+// struct_offset; the function body is incomplete in the book (no
+// return statement), and we preserve that verbatim. -Wreturn-type
+// produces a warning but the code is unreachable until later
+// chapters wire callers.
+struct resolver_entity* resolver_get_entity_in_scope_with_entity_type(struct resolver_result* result, struct resolver_process* resolver, struct resolver_scope* scope, const char* entity_name, int entity_type){
+    (void)scope; (void)entity_type;
+    if(result && result->last_struct_union_entity){
+        struct resolver_scope* sscope = result->last_struct_union_entity->scope;
+        (void)sscope;
+        struct node* out_node = 0;
+        struct datatype* node_var_datatype = &result->last_struct_union_entity->dtype;
+        int offset = struct_offset(resolver_compiler(resolver), node_var_datatype->type_str, entity_name, &out_node, 0, 0);
+        (void)offset;
+    }
+}
