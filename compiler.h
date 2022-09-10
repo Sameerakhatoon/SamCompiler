@@ -850,8 +850,17 @@ struct resolver_entity*  resolver_create_new_entity_for_function_call(struct res
 struct resolver_entity*  resolver_regster_function(struct resolver_process* process, struct node* func_node, void* private);
 struct resolver_entity*  resolver_get_entity_in_scope_with_entity_type(struct resolver_result* result, struct resolver_process* resolver, struct resolver_scope* scope, const char* entity_name, int entity_type);
 
-// ch124: struct_offset lands later; declared here so ch122 can compile.
+// ch124: struct_offset + helpers (declared earlier so ch122 compiled).
 int                      struct_offset(struct compile_process* compiler, const char* struct_name, const char* var_name, struct node** out_node_out, int last_pos, int flags);
+struct node*             body_largest_variable_node(struct node* body_node);
+struct node*             variable_struct_or_union_largest_variable_node(struct node* var_node);
+bool                     node_is_struct_or_union(struct node* node);
+
+// ch124: struct_offset flags.
+enum {
+    STRUCT_ACCESS_BACKWARDS       = 0b00000001,
+    STRUCT_STOP_AT_POINTER_ACCESS = 0b00000010,
+};
 
 struct resolver_array_data {
     // Vector of struct resolver_entity*.

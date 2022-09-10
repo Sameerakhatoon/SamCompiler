@@ -201,6 +201,11 @@ bool node_is_struct_or_union_variable(struct node* node){
     return datatype_is_struct_or_union(&node->var.type);
 }
 
+// ch124: structural test used by struct_offset.
+bool node_is_struct_or_union(struct node* node){
+    return node->type == NODE_TYPE_STRUCT || node->type == NODE_TYPE_UNION;
+}
+
 // Get the variable node behind a struct / union / variable. For
 // NODE_TYPE_VARIABLE the node itself; for NODE_TYPE_STRUCT, the
 // attached var pointer; UNION not yet implemented.
