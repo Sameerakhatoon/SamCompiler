@@ -419,10 +419,75 @@ struct resolver_entity* resolver_get_entity_in_scope_with_entity_type(struct res
     (void)scope; (void)entity_type;
     if(result && result->last_struct_union_entity){
         struct resolver_scope* sscope = result->last_struct_union_entity->scope;
-        (void)sscope;
         struct node* out_node = 0;
         struct datatype* node_var_datatype = &result->last_struct_union_entity->dtype;
         int offset = struct_offset(resolver_compiler(resolver), node_var_datatype->type_str, entity_name, &out_node, 0, 0);
-        (void)offset;
+        if(node_var_datatype->type == DATA_TYPE_UNION){
+            offset = 0;
+        }
+        return resolver_make_entity(resolver, result, 0, out_node,
+            &(struct resolver_entity){
+                .type   = RESOLVER_ENTITY_TYPE_VARIABLE,
+                .offset = offset,
+            }, sscope);
     }
+
+    // Primitive lookup: walk the scope's entities top-down looking
+    // for one whose name (and optional type) matches.
+    vector_set_peek_pointer_end(scope->entities);
+    vector_set_flag(scope->entities, VECTOR_FLAG_PEEK_DECREMENT);
+    struct resolver_entity* current = vector_peek_ptr(scope->entities);
+    while(current){
+        if(entity_type != -1 && current->type != entity_type){
+            current = vector_peek_ptr(scope->entities);
+            continue;
+        }
+        if(S_EQ(current->name, entity_name)){
+            break;
+        }
+        current = vector_peek_ptr(scope->entities);
+    }
+    return current;
+}
+
+// ch125: book ships these with typo'd struct types ("resoler_entity",
+// "reoslver_result"). Per our convention we preserve book typos
+// EXCEPT when they actively break the build; here the typo'd names
+// would prevent every caller from compiling, so we use the correct
+// struct names. See docs/125-resolver-part6.md for the deviation.
+struct resolver_entity* resolver_get_entity_for_type(struct resolver_result* result, struct resolver_process* resolver, const char* entity_name, int entity_type){
+    struct resolver_scope* scope = resolver->scope.current;
+    struct resolver_entity* entity = 0;
+    while(scope){
+        entity = resolver_get_entity_in_scope_with_entity_type(result, resolver, scope, entity_name, entity_type);
+        if(entity){
+            break;
+        }
+        scope = scope->prev;
+    }
+    if(entity){
+        memset(&entity->last_resolve, 0, sizeof(entity->last_resolve));
+    }
+    return entity;
+}
+
+struct resolver_entity* resolver_get_entity(struct resolver_result* result, struct resolver_process* resolver, const char* entity_name){
+    return resolver_get_entity_for_type(result, resolver, entity_name, -1);
+}
+
+struct resolver_entity* resolver_get_entity_in_scope(struct resolver_result* result, struct resolver_process* resolver, struct resolver_scope* scope, const char* entity_name){
+    return resolver_get_entity_in_scope_with_entity_type(result, resolver, scope, entity_name, -1);
+}
+
+struct resolver_entity* resolver_get_variable(struct resolver_result* result, struct resolver_process* resolver, const char* var_name){
+    return resolver_get_entity_for_type(result, resolver, var_name, RESOLVER_ENTITY_TYPE_VARIABLE);
+}
+
+struct resolver_entity* resolver_get_function_in_scope(struct resolver_result* result, struct resolver_process* resolver, const char* func_name, struct resolver_scope* scope){
+    (void)scope;
+    return resolver_get_entity_for_type(result, resolver, func_name, RESOLVER_ENTITY_TYPE_FUNCTION);
+}
+
+struct resolver_entity* resolver_get_function(struct resolver_result* result, struct resolver_process* resolver, const char* func_name){
+    return resolver_get_function_in_scope(result, resolver, func_name, resolver->scope.root);
 }
