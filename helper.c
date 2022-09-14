@@ -153,6 +153,36 @@ int struct_offset(struct compile_process* compile_proc, const char* struct_name,
     return position;
 }
 
+// ch127: access / array / parens operator + node predicates. Moved
+// is_array_node here so all three families live together.
+bool is_access_operator(const char* op){
+    return S_EQ(op, "->") || S_EQ(op, ".");
+}
+
+bool is_access_node(struct node* node){
+    return node->type == NODE_TYPE_EXPRESSION && is_access_operator(node->exp.op);
+}
+
+bool is_access_node_with_op(struct node* node, const char* op){
+    return is_access_node(node) && S_EQ(node->exp.op, op);
+}
+
+bool is_array_operator(const char* op){
+    return S_EQ(op, "[]");
+}
+
+bool is_array_node(struct node* node){
+    return node->type == NODE_TYPE_EXPRESSION && is_array_operator(node->exp.op);
+}
+
+bool is_parentheses_operator(const char* op){
+    return S_EQ(op, "()");
+}
+
+bool is_parentheses_node(struct node* node){
+    return node->type == NODE_TYPE_EXPRESSION && is_parentheses_operator(node->exp.op);
+}
+
 // ch119: byte offset for the index-th access into dtype.
 int array_offset(struct datatype* dtype, int index, int index_value){
     if(!(dtype->flags & DATATYPE_FLAG_IS_ARRAY)
