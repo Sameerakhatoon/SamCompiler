@@ -546,12 +546,80 @@ struct resolver_entity* resolver_follow_struct_exp(struct resolver_process* reso
     return 0;
 }
 
-// ch127: NODE_TYPE_EXPRESSION dispatch. Only access (`.` / `->`)
-// lands here; arrays / parens / arithmetic come later.
+// ch128: `a[i]` follow path. Walk left (a), then walk right (i).
+struct resolver_entity* resolver_follow_array(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    resolver_follow_part(resolver, node->exp.left, result);
+    struct resolver_entity* left_entity = resolver_result_peek(result);
+    resolver_follow_part(resolver, node->exp.right, result);
+    return left_entity;
+}
+
+// ch128: drive the resolver to find the datatype of an arbitrary
+// expression / identifier / variable.
+struct datatype* resolver_get_datatype(struct resolver_process* resolver, struct node* node){
+    struct resolver_result* result = resolver_follow(resolver, node);
+    if(!resolver_result_ok(result)){
+        return 0;
+    }
+    return &result->last_entity->dtype;
+}
+
+// ch128: walk a (possibly nested) argument expression and push each
+// leaf onto func_call_entity->func_call_data.arguments while
+// summing the byte cost into *total_size_out.
+void resolver_build_function_call_arguments(struct resolver_process* resolver, struct node* argument_node, struct resolver_entity* root_func_call_entity, size_t* total_size_out){
+    if(is_argument_node(argument_node)){
+        resolver_build_function_call_arguments(resolver, argument_node->exp.left,  root_func_call_entity, total_size_out);
+        resolver_build_function_call_arguments(resolver, argument_node->exp.right, root_func_call_entity, total_size_out);
+    } else if(argument_node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        resolver_build_function_call_arguments(resolver, argument_node->parenthesis.exp, root_func_call_entity, total_size_out);
+    } else if(node_valid(argument_node)){
+        vector_push(root_func_call_entity->func_call_data.arguments, &argument_node);
+        size_t stack_change = DATA_SIZE_DWORD;
+        struct datatype* dtype = resolver_get_datatype(resolver, argument_node);
+        if(dtype){
+            stack_change = datatype_element_size(dtype);
+            if(stack_change < DATA_SIZE_DWORD){
+                stack_change = DATA_SIZE_DWORD;
+            }
+            stack_change = align_value(stack_change, DATA_SIZE_DWORD);
+        }
+        *total_size_out += stack_change;
+    }
+}
+
+// ch128: function-call follow path. Walk the callee (left), build a
+// FUNCTION_CALL entity, then build the argument list from the right.
+struct resolver_entity* resolver_follow_function_call(struct resolver_process* resolver, struct resolver_result* result, struct node* node){
+    resolver_follow_part(resolver, node->exp.left, result);
+    struct resolver_entity* left_entity = resolver_result_peek(result);
+    struct resolver_entity* func_call_entity = resolver_create_new_entity_for_function_call(result, resolver, left_entity, 0);
+    assert(func_call_entity);
+    func_call_entity->flags |= RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_NEXT_ENTITY | RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_LEFT_ENTITY;
+    resolver_build_function_call_arguments(resolver, node->exp.right, func_call_entity, &func_call_entity->func_call_data.stack_size);
+    resolver_result_entity_push(result, func_call_entity);
+    return func_call_entity;
+}
+
+// ch128: parentheses follow path. If the left of the `()` expression
+// is an identifier, this is a function call; otherwise it's just a
+// grouped expression.
+struct resolver_entity* resolver_follow_parentheses(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    if(node->exp.left->type == NODE_TYPE_IDENTIFIER){
+        return resolver_follow_function_call(resolver, result, node);
+    }
+    return resolver_follow_exp(resolver, node->parenthesis.exp, result);
+}
+
+// ch127/128: NODE_TYPE_EXPRESSION dispatch. Access / array / parens.
 struct resolver_entity* resolver_follow_exp(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
     struct resolver_entity* entity = 0;
     if(is_access_node(node)){
         entity = resolver_follow_struct_exp(resolver, node, result);
+    } else if(is_array_node(node)){
+        entity = resolver_follow_array(resolver, node, result);
+    } else if(is_parentheses_node(node)){
+        entity = resolver_follow_parentheses(resolver, node, result);
     }
     return entity;
 }

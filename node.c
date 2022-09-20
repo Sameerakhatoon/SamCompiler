@@ -391,3 +391,8 @@ bool is_node_assignment(struct node* node){
         || S_EQ(node->exp.op, "/=")
         || S_EQ(node->exp.op, "*=");
 }
+
+// ch128: skip BLANK sentinels used for empty parens.
+bool node_valid(struct node* node){
+    return node && node->type != NODE_TYPE_BLANK;
+}
