@@ -57,3 +57,8 @@ int array_total_indexes(struct datatype* dtype){
     assert(dtype->flags & DATATYPE_FLAG_IS_ARRAY);
     return vector_count(dtype->array.brackets->n_brackets);
 }
+
+// ch129: bracket count of an array dtype.
+size_t array_brackets_count(struct datatype* dtype){
+    return vector_count(dtype->array.brackets->n_brackets);
+}

@@ -620,6 +620,8 @@ bool         is_parentheses_node(struct node* node);
 bool         is_argument_operator(const char* op);
 bool         is_argument_node(struct node* node);
 bool         node_valid(struct node* node);
+void         datatype_decrement_pointer(struct datatype* dtype);
+size_t       array_brackets_count(struct datatype* dtype);
 bool         is_node_assignment(struct node* node);
 
 // ch104: codegen entry point + status enum. Module 2/3 fills in the
@@ -987,6 +989,8 @@ struct datatype*         resolver_get_datatype(struct resolver_process* resolver
 void                     resolver_build_function_call_arguments(struct resolver_process* resolver, struct node* argument_node, struct resolver_entity* root_func_call_entity, size_t* total_size_out);
 struct resolver_entity*  resolver_follow_function_call(struct resolver_process* resolver, struct resolver_result* result, struct node* node);
 struct resolver_entity*  resolver_follow_parentheses(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+void                     resolver_array_bracket_set_flags(struct resolver_entity* bracket_entity, struct datatype* dtype, struct node* bracket_node, int index);
+struct resolver_entity*  resolver_follow_array_bracket(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_part_return_entity(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_follow_part(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_execute_rules(struct resolver_process* resolver, struct resolver_result* result);
