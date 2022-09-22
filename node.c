@@ -396,3 +396,12 @@ bool is_node_assignment(struct node* node){
 bool node_valid(struct node* node){
     return node && node->type != NODE_TYPE_BLANK;
 }
+
+// ch130: NODE_TYPE_UNARY constructor.
+void make_unary_node(const char* op, struct node* operand_node){
+    node_create(&(struct node){
+        .type          = NODE_TYPE_UNARY,
+        .unary.op      = op,
+        .unary.operand = operand_node,
+    });
+}

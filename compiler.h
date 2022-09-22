@@ -524,6 +524,18 @@ struct node {
             struct node*    operand;
         } cast;
 
+        // ch130: NODE_TYPE_UNARY. For `**p` the op is "*" and the
+        // indirection.depth captures the chain length.
+        struct unary {
+            const char*  op;
+            struct node* operand;
+            union {
+                struct indirection {
+                    int depth;
+                } indirection;
+            };
+        } unary;
+
         // ch71: NODE_TYPE_FUNCTION payload.
         struct function {
             int             flags;
@@ -622,6 +634,9 @@ bool         is_argument_node(struct node* node);
 bool         node_valid(struct node* node);
 void         datatype_decrement_pointer(struct datatype* dtype);
 size_t       array_brackets_count(struct datatype* dtype);
+bool         is_unary_operator(const char* op);
+bool         op_is_indirection(const char* op);
+void         make_unary_node(const char* op, struct node* operand_node);
 bool         is_node_assignment(struct node* node);
 
 // ch104: codegen entry point + status enum. Module 2/3 fills in the

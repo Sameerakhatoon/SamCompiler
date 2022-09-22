@@ -192,6 +192,16 @@ bool is_argument_node(struct node* node){
     return node->type == NODE_TYPE_EXPRESSION && is_argument_operator(node->exp.op);
 }
 
+// ch130: unary operator predicates.
+bool is_unary_operator(const char* op){
+    return S_EQ(op, "-") || S_EQ(op, "!") || S_EQ(op, "~")
+        || S_EQ(op, "*") || S_EQ(op, "&");
+}
+
+bool op_is_indirection(const char* op){
+    return S_EQ(op, "*");
+}
+
 // ch129: drop one level of pointer-depth; clear IS_POINTER once we
 // fall to 0 or below.
 void datatype_decrement_pointer(struct datatype* dtype){
