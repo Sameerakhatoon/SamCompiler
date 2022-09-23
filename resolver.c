@@ -681,6 +681,41 @@ struct resolver_entity* resolver_follow_cast(struct resolver_process* resolver, 
     return cast_entity;
 }
 
+// ch132: `**a.b` / `*a.b` / `*****k` - walk the operand, then push a
+// UNARY_INDIRECTION entity at the recorded depth.
+struct resolver_entity* resolver_follow_indirection(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    resolver_follow_part(resolver, node->unary.operand, result);
+    struct resolver_entity* last_entity = resolver_result_peek(result);
+    if(!last_entity){
+        last_entity = resolver_follow_unsupported_node(resolver, node->unary.operand, result);
+    }
+    (void)last_entity;
+    struct resolver_entity* unary_ind = resolver_create_new_unary_indirection_entity(resolver, result, node, node->unary.indirection.depth);
+    resolver_result_entity_push(result, unary_ind);
+    return unary_ind;
+}
+
+// ch132: `&a.b.c` - walk the operand, then push a UNARY_GET_ADDRESS
+// entity carrying the operand's dtype / scope / offset.
+struct resolver_entity* resolver_follow_unary_address(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    resolver_follow_part(resolver, node->unary.operand, result);
+    struct resolver_entity* last_entity = resolver_result_peek(result);
+    struct resolver_entity* addr = resolver_create_new_unary_get_address_entity(resolver, result, &last_entity->dtype, node, last_entity->scope, last_entity->offset);
+    resolver_result_entity_push(result, addr);
+    return addr;
+}
+
+// ch132: NODE_TYPE_UNARY dispatch by op string.
+struct resolver_entity* resolver_follow_unary(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    struct resolver_entity* entity = 0;
+    if(op_is_indirection(node->unary.op)){
+        entity = resolver_follow_indirection(resolver, node, result);
+    } else if(op_is_address(node->unary.op)){
+        entity = resolver_follow_unary_address(resolver, node, result);
+    }
+    return entity;
+}
+
 // ch129: NODE_TYPE_BRACKET follow path. Inherits scope + dtype from
 // the most recent non-rule entity; bumps the bracket index when
 // already inside an ARRAY_BRACKET chain. Shrinks the recorded array
@@ -737,8 +772,19 @@ struct resolver_entity* resolver_follow_part_return_entity(struct resolver_proce
         case NODE_TYPE_CAST:
             entity = resolver_follow_cast(resolver, node, result);
             break;
+        // ch132: unary + everything-else fallback.
+        case NODE_TYPE_UNARY:
+            entity = resolver_follow_unary(resolver, node, result);
+            break;
+        default:
+            entity = resolver_follow_unsupported_node(resolver, node, result);
+            break;
     }
-    (void)entity;
+    if(entity){
+        entity->result   = result;
+        entity->resolver = resolver;
+    }
+    return entity;
 }
 
 void resolver_follow_part(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
