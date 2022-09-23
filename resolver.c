@@ -791,8 +791,50 @@ void resolver_follow_part(struct resolver_process* resolver, struct node* node, 
     resolver_follow_part_return_entity(resolver, node, result);
 }
 
+// ch133: fold a RULE entity's left/right flag set onto the neighbors
+// it sits between in the result chain.
+static void resolver_rule_apply_rules(struct resolver_entity* rule_entity, struct resolver_entity* left_entity, struct resolver_entity* right_entity){
+    assert(rule_entity->type == RESOLVER_ENTITY_TYPE_RULE);
+    if(left_entity){
+        left_entity->flags |= rule_entity->rule.left.flags;
+    }
+    if(right_entity){
+        right_entity->flags |= rule_entity->rule.right.flags;
+    }
+}
+
+// ch133: push every element of `vec` (a stack-shaped helper buffer)
+// back onto the result chain, top-down so order is preserved.
+static void resolver_push_vector_of_entities(struct resolver_result* result, struct vector* vec){
+    vector_set_peek_pointer_end(vec);
+    vector_set_flag(vec, VECTOR_FLAG_PEEK_DECREMENT);
+    struct resolver_entity* entity = vector_peek_ptr(vec);
+    while(entity){
+        resolver_result_entity_push(result, entity);
+        entity = vector_peek_ptr(vec);
+    }
+}
+
+// ch133: walk the result chain top-down, popping each entity. When
+// we hit a RULE, pop its left neighbor too and apply the rule's
+// flags to (left, last_processed). Save survivors to a helper vector,
+// then push them back to restore order with rules consumed.
 void resolver_execute_rules(struct resolver_process* resolver, struct resolver_result* result){
-    (void)resolver; (void)result;
+    (void)resolver;
+    struct vector* saved = vector_create(sizeof(struct resolver_entity*));
+    struct resolver_entity* entity = resolver_result_pop(result);
+    struct resolver_entity* last_processed = 0;
+    while(entity){
+        if(entity->type == RESOLVER_ENTITY_TYPE_RULE){
+            struct resolver_entity* left = resolver_result_pop(result);
+            resolver_rule_apply_rules(entity, left, last_processed);
+            entity = left;
+        }
+        vector_push(saved, &entity);
+        last_processed = entity;
+        entity = resolver_result_pop(result);
+    }
+    resolver_push_vector_of_entities(result, saved);
 }
 
 void resolver_merge_compile_times(struct resolver_process* resolver, struct resolver_result* result){
