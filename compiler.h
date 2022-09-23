@@ -1006,6 +1006,10 @@ struct resolver_entity*  resolver_follow_function_call(struct resolver_process* 
 struct resolver_entity*  resolver_follow_parentheses(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_array_bracket_set_flags(struct resolver_entity* bracket_entity, struct datatype* dtype, struct node* bracket_node, int index);
 struct resolver_entity*  resolver_follow_array_bracket(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_exp_parenthesis(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_unsupported_unary_node(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_unsupported_node(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_cast(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_part_return_entity(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_follow_part(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_execute_rules(struct resolver_process* resolver, struct resolver_result* result);
