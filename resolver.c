@@ -837,8 +837,63 @@ void resolver_execute_rules(struct resolver_process* resolver, struct resolver_r
     resolver_push_vector_of_entities(result, saved);
 }
 
+// ch134: try to merge two neighboring entities by delegating to the
+// user's `merge_entities` callback. NO_MERGE flags on either side
+// abort.
+static struct resolver_entity* resolver_merge_compile_time_result(struct resolver_process* resolver, struct resolver_result* result, struct resolver_entity* left_entity, struct resolver_entity* right_entity){
+    if(left_entity && right_entity){
+        if((left_entity->flags  & RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_NEXT_ENTITY) ||
+           (right_entity->flags & RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_LEFT_ENTITY)){
+            goto no_merge_possible;
+        }
+        struct resolver_entity* merged = resolver->callbacks.merge_entities(resolver, result, left_entity, right_entity);
+        if(!merged){
+            goto no_merge_possible;
+        }
+        return merged;
+    }
+no_merge_possible:
+    return 0;
+}
+
+// ch134: one merge pass over the result chain. Pop a (right, left)
+// pair; if they merge, push the merged entity back; otherwise mark
+// the right as "no-merge-with-left" so we don't re-try it, save it
+// off, and put the left back so the next iteration can try it with
+// its predecessor.
+static void _resolver_merge_compile_times(struct resolver_process* resolver, struct resolver_result* result){
+    struct vector* saved = vector_create(sizeof(struct resolver_entity*));
+    while(1){
+        struct resolver_entity* right = resolver_result_pop(result);
+        struct resolver_entity* left  = resolver_result_pop(result);
+        if(!right){
+            break;
+        }
+        if(!left){
+            resolver_result_entity_push(result, right);
+            break;
+        }
+        struct resolver_entity* merged = resolver_merge_compile_time_result(resolver, result, left, right);
+        if(merged){
+            resolver_result_entity_push(result, merged);
+            continue;
+        }
+        right->flags |= RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_LEFT_ENTITY;
+        vector_push(saved, &right);
+        resolver_result_entity_push(result, left);
+    }
+    resolver_push_vector_of_entities(result, saved);
+    vector_free(saved);
+}
+
+// ch134: repeat the merge pass until either the chain collapses to a
+// single entity or a pass makes no progress.
 void resolver_merge_compile_times(struct resolver_process* resolver, struct resolver_result* result){
-    (void)resolver; (void)result;
+    size_t total = 0;
+    do {
+        total = result->count;
+        _resolver_merge_compile_times(resolver, result);
+    } while(total != 1 && total != result->count);
 }
 
 void resolver_finalize_result(struct resolver_process* resolver, struct resolver_result* result){
