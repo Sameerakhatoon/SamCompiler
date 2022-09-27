@@ -397,6 +397,21 @@ bool node_valid(struct node* node){
     return node && node->type != NODE_TYPE_BLANK;
 }
 
+// ch137: function-node accessors used by codegen.
+size_t function_node_stack_size(struct node* node){
+    assert(node->type == NODE_TYPE_FUNCTION);
+    return node->func.stack_size;
+}
+
+bool function_node_is_prototype(struct node* node){
+    return node->func.body_n == 0;
+}
+
+struct vector* function_node_argument_vec(struct node* node){
+    assert(node->type == NODE_TYPE_FUNCTION);
+    return node->func.args.vector;
+}
+
 // ch130: NODE_TYPE_UNARY constructor.
 void make_unary_node(const char* op, struct node* operand_node){
     node_create(&(struct node){

@@ -10,7 +10,29 @@
 // asm sections (.data, .text, .rodata) - the per-node emit hooks are
 // still placeholders; the bodies fill in across the rest of Module 2.
 
-static struct compile_process* current_process = 0;
+static struct compile_process* current_process  = 0;
+// ch137: function being emitted. Asm push/pop helpers tag stack
+// frame elements against this.
+static struct node*            current_function = 0;
+
+// ch137: codegen-side history. Separate from the parser history but
+// carries equivalent flags (IS_ALONE_STATEMENT etc.).
+struct history {
+    int flags;
+};
+
+static struct history* codegen_history_begin(int flags){
+    struct history* h = calloc(1, sizeof(struct history));
+    h->flags = flags;
+    return h;
+}
+
+static struct history* codegen_history_down(struct history* h, int flags){
+    struct history* n = calloc(1, sizeof(struct history));
+    memcpy(n, h, sizeof(struct history));
+    n->flags = flags;
+    return n;
+}
 
 static void          codegen_new_scope(int flags);
 static void          codegen_finish_scope(void);
@@ -28,14 +50,13 @@ static void          codegen_generate_root(void);
 static void          codegen_write_strings(void);
 static void          codegen_generate_rod(void);
 
-// ch105: placeholders. The resolver (Module 3) is what these will
-// delegate to once we have one; for now we just keep the call sites
-// in place.
+// ch137: now delegate to the default resolver.
 static void codegen_new_scope(int flags){
-    (void)flags;
+    resolver_default_new_scope(current_process->resolver, flags);
 }
 
 static void codegen_finish_scope(void){
+    resolver_default_finish_scope(current_process->resolver);
 }
 
 static struct node* codegen_node_next(void){
@@ -74,6 +95,129 @@ static void asm_push_no_nl(const char* ins, ...){
         vfprintf(current_process->ofile, ins, args2);
         va_end(args2);
     }
+}
+
+// ch137: emit a `push <fmt>` line and record a matching stack-frame
+// element on the current function. The stack-frame model tracks every
+// push so we can assert frame balance on return.
+static void asm_push_ins_push(const char* fmt, int stack_entity_type, const char* stack_entity_name, ...){
+    char tmp_buf[200];
+    sprintf(tmp_buf, "push %s", fmt);
+    va_list args;
+    va_start(args, stack_entity_name);
+    asm_push_args(tmp_buf, args);
+    va_end(args);
+    assert(current_function);
+    stackframe_push(current_function, &(struct stack_frame_element){
+        .type = stack_entity_type, .name = stack_entity_name,
+    });
+}
+
+// ch137: matching pop that asserts the top stack-frame element has
+// the expected type/name. Returns the popped element's flags.
+static int asm_push_ins_pop(const char* fmt, int expecting_stack_entity_type, const char* expecting_stack_entity_name, ...){
+    char tmp_buf[200];
+    sprintf(tmp_buf, "pop %s", fmt);
+    va_list args;
+    va_start(args, expecting_stack_entity_name);
+    asm_push_args(tmp_buf, args);
+    va_end(args);
+    assert(current_function);
+    struct stack_frame_element* el = stackframe_back(current_function);
+    int flags = el->flags;
+    stackframe_pop_expecting(current_function, expecting_stack_entity_type, expecting_stack_entity_name);
+    return flags;
+}
+
+static void asm_push_ebp(void){
+    asm_push_ins_push("ebp", STACK_FRAME_ELEMENT_TYPE_SAVED_BP, "function_entry_saved_ebp");
+}
+
+static void asm_pop_ebp(void){
+    asm_push_ins_pop("ebp", STACK_FRAME_ELEMENT_TYPE_SAVED_BP, "function_entry_saved_ebp");
+}
+
+// ch137: bump esp down (allocate locals). The stack-frame ledger
+// gets `amount/STACK_PUSH_SIZE` UNKNOWN entries pushed so it matches
+// what codegen will pop on exit.
+static void codegen_stack_sub_with_name(size_t stack_size, const char* name){
+    if(stack_size != 0){
+        stackframe_sub(current_function, STACK_FRAME_ELEMENT_TYPE_UNKNOWN, name, stack_size);
+        asm_push("sub esp, %lu", (unsigned long)stack_size);
+    }
+}
+
+static void codegen_stack_sub(size_t stack_size){
+    codegen_stack_sub_with_name(stack_size, "literal_stack_change");
+}
+
+static void codegen_stack_add_with_name(size_t stack_size, const char* name){
+    if(stack_size != 0){
+        stackframe_add(current_function, STACK_FRAME_ELEMENT_TYPE_UNKNOWN, name, stack_size);
+        asm_push("add esp, %lu", (unsigned long)stack_size);
+    }
+}
+
+static void codegen_stack_add(size_t stack_size){
+    codegen_stack_add_with_name(stack_size, "literal_stack_change");
+}
+
+static struct resolver_entity* codegen_new_scope_entity(struct node* var_node, int offset, int flags){
+    return resolver_default_new_scope_entity(current_process->resolver, var_node, offset, flags);
+}
+
+static struct resolver_entity* codegen_register_function(struct node* func_node, int flags){
+    return resolver_default_register_function(current_process->resolver, func_node, flags);
+}
+
+static void codegen_generate_function_prototype(struct node* node){
+    codegen_register_function(node, 0);
+    asm_push("extern %s", node->func.name);
+}
+
+static void codegen_generate_function_arguments(struct vector* argument_vector){
+    vector_set_peek_pointer(argument_vector, 0);
+    struct node* current = vector_peek_ptr(argument_vector);
+    while(current){
+        codegen_new_scope_entity(current, current->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
+        current = vector_peek_ptr(argument_vector);
+    }
+}
+
+// ch137: body emit lands later; for now keep the call site.
+static void codegen_generate_body(struct node* node, struct history* history){
+    (void)node; (void)history;
+}
+
+static void codegen_generate_function_with_body(struct node* node){
+    codegen_register_function(node, 0);
+    asm_push("global %s", node->func.name);
+    asm_push("; %s function", node->func.name);
+    asm_push("%s:", node->func.name);
+
+    asm_push_ebp();
+    asm_push("mov ebp, esp");
+    codegen_stack_sub(C_ALIGN(function_node_stack_size(node)));
+    codegen_new_scope(RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
+    codegen_generate_function_arguments(function_node_argument_vec(node));
+
+    codegen_generate_body(node->func.body_n, codegen_history_begin(IS_ALONE_STATEMENT));
+    codegen_finish_scope();
+    codegen_stack_add(C_ALIGN(function_node_stack_size(node)));
+    asm_pop_ebp();
+    stackframe_assert_empty(current_function);
+    asm_push("ret");
+}
+
+static void codegen_generate_function(struct node* node){
+    current_function = node;
+    // ch137: each function gets a fresh stack-frame element vector.
+    node->func.frame.elements = vector_create(sizeof(struct stack_frame_element));
+    if(function_node_is_prototype(node)){
+        codegen_generate_function_prototype(node);
+        return;
+    }
+    codegen_generate_function_with_body(node);
 }
 
 // ch108: codegen "label" system. Each break / continue spans the most
@@ -252,8 +396,16 @@ static void codegen_generate_data_section(void){
 }
 
 static void codegen_generate_root_node(struct node* node){
-    (void)node;
-    // Per-node function emit lands in later chapters.
+    switch(node->type){
+        case NODE_TYPE_VARIABLE:
+            // Already emitted during the .data pass.
+            break;
+        case NODE_TYPE_FUNCTION:
+            codegen_generate_function(node);
+            break;
+        default:
+            break;
+    }
 }
 
 static void codegen_generate_root(void){

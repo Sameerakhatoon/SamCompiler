@@ -20,6 +20,10 @@ struct pos {
     const char* filename;
 };
 
+// ch137: C stack alignment + rounding macro for function prologue.
+#define C_STACK_ALIGNMENT 16
+#define C_ALIGN(size) ((size) % C_STACK_ALIGNMENT) ? (size) + (C_STACK_ALIGNMENT - ((size) % C_STACK_ALIGNMENT)) : (size)
+
 // Compact switch-case helper for "is this an ASCII digit". Used by the
 // lexer's read_next_token dispatch.
 #define NUMERIC_CASE \
@@ -197,6 +201,7 @@ struct compile_process_input_file {
 };
 
 struct code_generator;
+struct resolver_process;
 
 struct compile_process {
     // Flags controlling how this file should be compiled.
@@ -235,6 +240,8 @@ struct compile_process {
 
     // ch108: codegen state - entry/exit label vectors.
     struct code_generator* generator;
+    // ch137: resolver, owned by compile_process_create.
+    struct resolver_process* resolver;
 };
 
 int                     compile_file(const char* filename, const char* out_filename, int flags);
@@ -909,6 +916,15 @@ enum {
     STRUCT_ACCESS_BACKWARDS       = 0b00000001,
     STRUCT_STOP_AT_POINTER_ACCESS = 0b00000010,
 };
+
+// ch137: codegen history flags.
+enum {
+    IS_ALONE_STATEMENT = 0b00000001,
+};
+
+bool          function_node_is_prototype(struct node* node);
+size_t        function_node_stack_size(struct node* node);
+struct vector* function_node_argument_vec(struct node* node);
 
 struct resolver_array_data {
     // Vector of struct resolver_entity*.
