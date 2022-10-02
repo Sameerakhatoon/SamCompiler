@@ -656,6 +656,13 @@ enum {
     CODEGEN_GENERAL_ERROR,
 };
 
+// ch143: compile-process flags driving the post-compile pipeline
+// (run NASM + link, or just emit the .o).
+enum {
+    COMPILE_PROCESS_EXECUTE_NASM     = 0b00000001,
+    COMPILE_PROCESS_EXPORT_AS_OBJECT = 0b00000010,
+};
+
 // ch108: entry / exit "label" book-keeping for break / continue.
 struct codegen_entry_point {
     int id;

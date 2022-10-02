@@ -7,6 +7,7 @@
 mv ./test.c ./test.c.bak
 trap 'mv ./test.c.bak ./test.c 2>/dev/null || true' EXIT
 
-out="$(./main)"
+# ch143: main now exits non-zero on compile failure; wrap with `|| true`.
+out="$(./main 2>&1 || true)"
 assert_contains "$out" "Compile failed" "main output"
 pass
