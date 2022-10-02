@@ -797,6 +797,13 @@ static void parser_datatype_init_type_and_size(struct token* datatype_token,
         default:
             compiler_error(current_process, "BUG: Unsupported datatype expectation\n");
     }
+
+    // ch144: when the declarator has pointer stars on it, stamp
+    // IS_POINTER + the recorded depth onto the datatype.
+    if(pointer_depth > 0){
+        datatype_out->flags        |= DATATYPE_FLAG_IS_POINTER;
+        datatype_out->pointer_depth = pointer_depth;
+    }
 }
 
 static void parser_datatype_init(struct token* datatype_token,
