@@ -665,8 +665,22 @@ static void codegen_generate_exp_node_for_arithmetic(struct node* node, struct h
     struct datatype last_dtype = datatype_for_numeric();
     asm_datatype_back(&last_dtype);
     if(codegen_can_gen_math(op_flags)){
+        // ch146: pull both side dtypes off the ledger (right is on top).
+        struct datatype right_dtype = datatype_for_numeric();
+        asm_datatype_back(&right_dtype);
         asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        struct datatype left_dtype = datatype_for_numeric();
+        asm_datatype_back(&left_dtype);
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        // ch146: pointer arithmetic - scale the non-pointer side by
+        // sizeof(*pointer) so `p + 1` advances one element. Byte
+        // pointers need no scaling.
+        struct datatype* pointer_dtype = datatype_thats_a_pointer(&left_dtype, &right_dtype);
+        if(pointer_dtype && datatype_size(datatype_pointer_reduce(pointer_dtype, 1)) > DATA_SIZE_BYTE){
+            const char* reg = (pointer_dtype == &right_dtype) ? "eax" : "ecx";
+            asm_push("imul %s, %i", reg,
+                (int)datatype_size(datatype_pointer_reduce(pointer_dtype, 1)));
+        }
         codegen_gen_math_for_value("eax", "ecx", op_flags, last_dtype.flags & DATATYPE_FLAG_IS_SIGNED);
     }
     asm_push_ins_push_with_data("eax",
