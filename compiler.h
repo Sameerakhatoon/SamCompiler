@@ -609,6 +609,8 @@ bool   datatype_is_struct_or_union_non_pointer(struct datatype* dtype);
 struct datatype datatype_for_numeric(void);
 struct datatype* datatype_thats_a_pointer(struct datatype* d1, struct datatype* d2);
 struct datatype* datatype_pointer_reduce(struct datatype* datatype, int by);
+bool is_logical_operator(const char* op);
+bool is_logical_node(struct node* node);
 
 // ch52: size helpers that look at variable nodes (not datatypes).
 size_t       variable_size(struct node* var_node);
@@ -725,6 +727,8 @@ enum {
     EXPRESSION_IS_BITWISE_AND |           \
     EXPRESSION_IS_BITWISE_XOR)
 
+// ch147: EXPRESSION_IN_LOGICAL_EXPRESSION is intentionally NOT in
+// this mask - it must propagate down nested logical sub-expressions.
 #define EXPRESSION_UNINHERITABLE_FLAGS (                                                 \
     EXPRESSION_FLAG_RIGHT_NODE | EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS |                 \
     EXPRESSION_IS_ADDITION | EXPRESSION_IS_MODULAS | EXPRESSION_IS_SUBTRACTION |         \

@@ -215,6 +215,15 @@ struct datatype* datatype_thats_a_pointer(struct datatype* d1, struct datatype* 
     return 0;
 }
 
+// ch147: logical operator predicates.
+bool is_logical_operator(const char* op){
+    return S_EQ(op, "&&") || S_EQ(op, "||");
+}
+
+bool is_logical_node(struct node* node){
+    return node->type == NODE_TYPE_EXPRESSION && is_logical_operator(node->exp.op);
+}
+
 // ch146: clone dtype, drop pointer_depth by `by`, and clear
 // IS_POINTER once we hit zero or below.
 struct datatype* datatype_pointer_reduce(struct datatype* datatype, int by){
