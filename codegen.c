@@ -1111,6 +1111,19 @@ static void codegen_generate_global_variable_for_primitive(struct node* node){
     }
 }
 
+// ch149: struct-typed global var. We don't support struct
+// initializers yet, just emit zero-initialized bytes of the right
+// total size.
+static void codegen_generate_global_variable_for_struct(struct node* node){
+    if(node->var.val){
+        compiler_error(current_process, "We dont yet support values for structures");
+        return;
+    }
+    char tmp_buf[256];
+    asm_push("%s: %s 0", node->var.name,
+        asm_keyword_for_size(variable_size(node), tmp_buf));
+}
+
 static void codegen_generate_global_variable(struct node* node){
     asm_push("; %s %s", node->var.type.type_str, node->var.name);
     switch(node->var.type.type){
@@ -1121,6 +1134,9 @@ static void codegen_generate_global_variable(struct node* node){
         case DATA_TYPE_LONG:
             codegen_generate_global_variable_for_primitive(node);
             break;
+        case DATA_TYPE_STRUCT:
+            codegen_generate_global_variable_for_struct(node);
+            break;
         case DATA_TYPE_DOUBLE:
         case DATA_TYPE_FLOAT:
             compiler_error(current_process, "Doubles and floats are not supported in our subset of C\n");
@@ -1128,10 +1144,24 @@ static void codegen_generate_global_variable(struct node* node){
     }
 }
 
+// ch149: top-level struct definition with an attached variable
+// (`struct foo { ... } v;`) emits the variable; the body itself was
+// already captured by the parser.
+static void codegen_generate_struct(struct node* node){
+    if(node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED){
+        codegen_generate_global_variable(node->_struct.var);
+    }
+}
+
 static void codegen_generate_data_section_part(struct node* node){
     switch(node->type){
         case NODE_TYPE_VARIABLE:
             codegen_generate_global_variable(node);
+            break;
+        // ch149: top-level struct (`struct foo {...} v;`) emits its
+        // attached variable into .data.
+        case NODE_TYPE_STRUCT:
+            codegen_generate_struct(node);
             break;
         default:
             break;

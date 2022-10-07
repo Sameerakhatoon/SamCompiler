@@ -1037,6 +1037,10 @@ static void make_variable_node_and_register(struct history* history,
         parser_new_scope_entity(var_node, var_node->var.aoffset, 0),
         var_node->var.type.size);
 
+    // ch149: also register on the resolver side so codegen can find
+    // the variable by name later.
+    resolver_default_new_scope_entity(current_process->resolver, var_node, var_node->var.aoffset, 0);
+
     node_push(var_node);
 }
 
@@ -1131,6 +1135,8 @@ static void parse_variable_full(struct history* history){
 static void parse_function(struct datatype* ret_type, struct token* name_token, struct history* history){
     struct vector* arguments_vector = 0;
     parser_scope_new();
+    // ch149: open the matching resolver-side scope.
+    resolver_default_new_scope(current_process->resolver, 0);
     make_function_node(ret_type, name_token->sval, 0, 0);
     struct node* function_node = node_peek();
     parser_current_function = function_node;
@@ -1160,6 +1166,8 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
     }
 
     parser_current_function = 0;
+    // ch149: close the resolver-side scope first.
+    resolver_default_finish_scope(current_process->resolver);
     parser_scope_finish();
 }
 
@@ -1332,6 +1340,8 @@ static void parse_body_multiple_statements(size_t* variable_size,
 // Body entry. Single-statement (ch49) or { ... } (ch62).
 static void parse_body(size_t* variable_size, struct history* history){
     parser_scope_new();
+    // ch149: open a matching resolver-side scope for the body.
+    resolver_default_new_scope(current_process->resolver, 0);
     size_t tmp_size = 0;
     if(!variable_size){
         variable_size = &tmp_size;
@@ -1339,10 +1349,12 @@ static void parse_body(size_t* variable_size, struct history* history){
     struct vector* body_vec = vector_create(sizeof(struct node*));
     if(!token_next_is_symbol('{')){
         parse_body_single_statement(variable_size, body_vec, history);
+        resolver_default_finish_scope(current_process->resolver);
         parser_scope_finish();
         return;
     }
     parse_body_multiple_statements(variable_size, body_vec, history);
+    resolver_default_finish_scope(current_process->resolver);
     parser_scope_finish();
 
     // ch100: when this body sits inside a function, bubble its
@@ -1397,9 +1409,12 @@ static void parse_struct(struct datatype* dtype){
     bool is_forward_declaration = !token_is_symbol(token_peek_next(), '{');
     if(!is_forward_declaration){
         parser_scope_new();
+        // ch149: keep the resolver scope in lockstep with the parser one.
+        resolver_default_new_scope(current_process->resolver, 0);
     }
     parse_struct_no_new_scope(dtype, is_forward_declaration);
     if(!is_forward_declaration){
+        resolver_default_finish_scope(current_process->resolver);
         parser_scope_finish();
     }
 }
@@ -1435,9 +1450,12 @@ static void parse_union(struct datatype* dtype){
     bool is_forward_declaration = !token_is_symbol(token_peek_next(), '{');
     if(!is_forward_declaration){
         parser_scope_new();
+        // ch149: matching resolver-side scope.
+        resolver_default_new_scope(current_process->resolver, 0);
     }
     parse_union_no_scope(dtype, is_forward_declaration);
     if(!is_forward_declaration){
+        resolver_default_finish_scope(current_process->resolver);
         parser_scope_finish();
     }
 }
@@ -1848,9 +1866,20 @@ static void parse_expressionable(struct history* history){
 // ch42 variables push a real node. ch47 added bare `struct foo {};`
 // which pushes nothing, so guard the pop/push.
 static void parse_keyword_for_global(void){
-    parse_keyword(history_begin(0));
+    // ch149: top-level parse runs under HISTORY_FLAG_IS_GLOBAL_SCOPE
+    // and we register variable / function / struct / union names with
+    // the symbol resolver so codegen can look them up.
+    parse_keyword(history_begin(HISTORY_FLAG_IS_GLOBAL_SCOPE));
     if(!vector_empty(current_process->node_vec)){
         struct node* node = node_pop();
+        switch(node->type){
+            case NODE_TYPE_VARIABLE:
+            case NODE_TYPE_FUNCTION:
+            case NODE_TYPE_STRUCT:
+            case NODE_TYPE_UNION:
+                symresolver_build_for_node(current_process, node);
+                break;
+        }
         node_push(node);
     }
 }
