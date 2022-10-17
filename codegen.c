@@ -412,6 +412,8 @@ static void codegen_generate_entity_access_for_variable_or_general(struct resolv
 static void codegen_generate_entity_access_for_function_call(struct resolver_result* result, struct resolver_entity* entity);
 static void codegen_generate_entity_access_for_unary_indirection_for_assignment_left_operand(struct resolver_result* result, struct resolver_entity* entity, struct history* history);
 static void codegen_generate_entity_access_for_unary_get_address(struct resolver_result* result, struct resolver_entity* entity);
+// ch155: forward decl - shared between LHS and read-side dispatchers.
+static void codegen_generate_entity_access_for_unsupported(struct resolver_result* result, struct resolver_entity* entity);
 
 // ch154: codegen rules for an entity in the access chain. Used by
 // the indirection / get-address paths.
@@ -461,8 +463,9 @@ static void codegen_generate_entity_access_for_entity_for_assignment_left_operan
         case RESOLVER_ENTITY_TYPE_UNARY_GET_ADDRESS:
             codegen_generate_entity_access_for_unary_get_address(result, entity);
             break;
+        // ch155: UNSUPPORTED falls back to emitting the wrapped node.
         case RESOLVER_ENTITY_TYPE_UNSUPPORTED:
-            // todo: unsupported
+            codegen_generate_entity_access_for_unsupported(result, entity);
             break;
         case RESOLVER_ENTITY_TYPE_CAST:
             // todo: cast
@@ -470,6 +473,13 @@ static void codegen_generate_entity_access_for_entity_for_assignment_left_operan
         default:
             compiler_error(current_process, "COMPILER BUG: unexpected entity type in assignment LHS\n");
     }
+}
+
+// ch155: UNSUPPORTED entity in the access chain - hand the wrapped
+// AST node off to the regular expressionable emitter.
+static void codegen_generate_entity_access_for_unsupported(struct resolver_result* result, struct resolver_entity* entity){
+    (void)result;
+    codegen_generate_expressionable(entity->node, codegen_history_begin(0));
 }
 
 // ch154: LHS unary indirection. Pop the address, walk
