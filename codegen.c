@@ -280,6 +280,9 @@ static int  codegen_label_count(void);
 static void codegen_generate_unary(struct node* node, struct history* history);
 // ch154: forward decl for asm_datatype_back (real impl lives below).
 static bool asm_datatype_back(struct datatype* dtype_out);
+// ch157: forward decl for the body emitter so the if-stmt helpers
+// can call it before it's defined.
+static void codegen_generate_body(struct node* node, struct history* history);
 
 // ch150: forward decls for the structure helpers (real impls live
 // further down).
@@ -1254,6 +1257,47 @@ static void codegen_generate_statement_return_exp(struct node* node){
     asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
 }
 
+// ch157 fwd decl - the if-statement helpers need to refer to each
+// other before they're defined.
+static void _codegen_generate_if_stmt(struct node* node, int end_label_id);
+
+// ch157: emit the body of an `else` block.
+static void codegen_generate_else_stmt(struct node* node){
+    codegen_generate_body(node->stmt.else_stmt.body_node, codegen_history_begin(0));
+}
+
+static void codegen_generate_else_or_else_if(struct node* node, int end_label_id){
+    if(node->type == NODE_TYPE_STATEMENT_IF){
+        _codegen_generate_if_stmt(node, end_label_id);
+    } else if(node->type == NODE_TYPE_STATEMENT_ELSE){
+        codegen_generate_else_stmt(node);
+    } else {
+        compiler_error(current_process, "Unexpected keyword compiler bug");
+    }
+}
+
+// ch157: condition -> pop eax -> cmp/je .if_N -> body -> jmp end ->
+// .if_N: -> recurse into else/else-if chain.
+static void _codegen_generate_if_stmt(struct node* node, int end_label_id){
+    int if_label_id = codegen_label_count();
+    codegen_generate_expressionable(node->stmt.if_stmt.cond_node, codegen_history_begin(0));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("cmp eax, 0");
+    asm_push("je .if_%i", if_label_id);
+    codegen_generate_body(node->stmt.if_stmt.body_node, codegen_history_begin(IS_ALONE_STATEMENT));
+    asm_push("jmp .if_end_%i", end_label_id);
+    asm_push(".if_%i:", if_label_id);
+    if(node->stmt.if_stmt.next){
+        codegen_generate_else_or_else_if(node->stmt.if_stmt.next, end_label_id);
+    }
+}
+
+static void codegen_generate_if_stmt(struct node* node){
+    int end_label_id = codegen_label_count();
+    _codegen_generate_if_stmt(node, end_label_id);
+    asm_push(".if_end_%i:", end_label_id);
+}
+
 // ch156: real `return [expr];` emit. Drops the frame WITHOUT touching
 // the compile-time ledger (the ledger only finalises at the function
 // epilogue assertion), then `pop ebp; ret`.
@@ -1284,6 +1328,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // ch156: return statement.
         case NODE_TYPE_STATEMENT_RETURN:
             codegen_generate_statement_return(node);
+            break;
+        // ch157: if statement.
+        case NODE_TYPE_STATEMENT_IF:
+            codegen_generate_if_stmt(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
