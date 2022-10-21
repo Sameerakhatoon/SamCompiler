@@ -283,6 +283,10 @@ static bool asm_datatype_back(struct datatype* dtype_out);
 // ch157: forward decl for the body emitter so the if-stmt helpers
 // can call it before it's defined.
 static void codegen_generate_body(struct node* node, struct history* history);
+// ch158: forward decls for the entry/exit point helpers (real impls
+// live in the label-system block below).
+static void codegen_begin_entry_exit_point(void);
+static void codegen_end_entry_exit_point(void);
 
 // ch150: forward decls for the structure helpers (real impls live
 // further down).
@@ -1298,6 +1302,29 @@ static void codegen_generate_if_stmt(struct node* node){
     asm_push(".if_end_%i:", end_label_id);
 }
 
+// ch158: while loop. Open an entry/exit point so break/continue can
+// hook in later, then emit the canonical
+//   .while_start_N:
+//     <cond>; pop eax; cmp eax, 0; je .while_end_M
+//     <body>
+//     jmp .while_start_N
+//   .while_end_M:
+// pattern.
+static void codegen_generate_while_stmt(struct node* node){
+    codegen_begin_entry_exit_point();
+    int while_start_id = codegen_label_count();
+    int while_end_id   = codegen_label_count();
+    asm_push(".while_start_%i:", while_start_id);
+    codegen_generate_expressionable(node->stmt.while_stmt.exp_node, codegen_history_begin(0));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("cmp eax, 0");
+    asm_push("je .while_end_%i", while_end_id);
+    codegen_generate_body(node->stmt.while_stmt.body_node, codegen_history_begin(IS_ALONE_STATEMENT));
+    asm_push("jmp .while_start_%i", while_start_id);
+    asm_push(".while_end_%i:", while_end_id);
+    codegen_end_entry_exit_point();
+}
+
 // ch156: real `return [expr];` emit. Drops the frame WITHOUT touching
 // the compile-time ledger (the ledger only finalises at the function
 // epilogue assertion), then `pop ebp; ret`.
@@ -1332,6 +1359,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // ch157: if statement.
         case NODE_TYPE_STATEMENT_IF:
             codegen_generate_if_stmt(node);
+            break;
+        // ch158: while loop.
+        case NODE_TYPE_STATEMENT_WHILE:
+            codegen_generate_while_stmt(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
