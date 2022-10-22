@@ -1325,6 +1325,20 @@ static void codegen_generate_while_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
+// ch159: do/while - body first, then condition; jump back to start
+// when condition is non-zero.
+static void codegen_generate_do_while_stmt(struct node* node){
+    codegen_begin_entry_exit_point();
+    int do_while_start_id = codegen_label_count();
+    asm_push(".do_while_start_%i:", do_while_start_id);
+    codegen_generate_body(node->stmt.do_while_stmt.body_node, codegen_history_begin(IS_ALONE_STATEMENT));
+    codegen_generate_expressionable(node->stmt.do_while_stmt.exp_node, codegen_history_begin(0));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("cmp eax, 0");
+    asm_push("jne .do_while_start_%i", do_while_start_id);
+    codegen_end_entry_exit_point();
+}
+
 // ch156: real `return [expr];` emit. Drops the frame WITHOUT touching
 // the compile-time ledger (the ledger only finalises at the function
 // epilogue assertion), then `pop ebp; ret`.
@@ -1363,6 +1377,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // ch158: while loop.
         case NODE_TYPE_STATEMENT_WHILE:
             codegen_generate_while_stmt(node);
+            break;
+        // ch159: do/while loop.
+        case NODE_TYPE_STATEMENT_DO_WHILE:
+            codegen_generate_do_while_stmt(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
