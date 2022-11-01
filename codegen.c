@@ -1348,16 +1348,32 @@ static void codegen_generate_while_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
-// ch160: for loop. init -> .for_loop<N>: -> cond? -> body? ->
-// loop? -> jmp .for_loop<N> -> .for_loop_end<M>. Any of the four
-// parts may be missing.
+// ch160/163: for loop.
+//   init
+//   jmp .for_loop<N>             ; skip incrementer on first pass
+//   .entry_point_M:              ; continue lands here, then runs
+//     incrementer                ;   the incrementer too
+//   .for_loop<N>:                ; tail jump + first-pass land here
+//     cond? cmp + je .for_loop_end<M>
+//     body
+//     incrementer (again)         ; book ships incrementer twice -
+//                                 ;   once on continue, once on tail
+//     jmp .for_loop<N>
+//   .for_loop_end<M>:
+// Any of the four parts may be missing.
 static void codegen_generate_for_stmt(struct node* node){
     struct for_stmt* fs = &node->stmt.for_stmt;
-    codegen_begin_entry_exit_point();
     int for_loop_start_id = codegen_label_count();
     int for_loop_end_id   = codegen_label_count();
     if(fs->init_node){
         codegen_generate_expressionable(fs->init_node, codegen_history_begin(0));
+        asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    }
+    // ch163: skip past the entry-point incrementer on the first pass.
+    asm_push("jmp .for_loop%i", for_loop_start_id);
+    codegen_begin_entry_exit_point();
+    if(fs->loop_node){
+        codegen_generate_expressionable(fs->loop_node, codegen_history_begin(0));
         asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
     asm_push(".for_loop%i:", for_loop_start_id);
