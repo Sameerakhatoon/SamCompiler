@@ -28,13 +28,11 @@ enum {
     HISTORY_FLAG_PARENTHESES_IS_NOT_A_FUNCTION_CALL   = 0b01000000,
 };
 
-// ch94: switch-case registration. Each `case <expr>:` inside a switch
+// ch94/166: parsed_switch_case is defined in compiler.h so codegen
+// can iterate switch cases too. Each `case <expr>:` inside a switch
 // body becomes one of these, attached to the parser_history_switch
 // hanging off the active history. The index is the literal value of
 // the case expression (we only allow integer-constant cases for now).
-struct parsed_switch_case {
-    int index;
-};
 
 struct history_cases {
     struct vector* cases;             // vector of parsed_switch_case

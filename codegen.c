@@ -308,6 +308,12 @@ static void codegen_begin_entry_exit_point(void);
 static void codegen_end_entry_exit_point(void);
 // ch161: forward decl for the goto-exit-point helper.
 static void codegen_goto_exit_point(struct node* node);
+// ch166: forward decl for the maintain-stack variant.
+static void codegen_goto_exit_point_maintain_stack(struct node* node);
+// ch166: forward decls for the switch bookkeeping helpers.
+static void codegen_begin_switch_statement(void);
+static void codegen_end_switch_statement(void);
+static int  codegen_switch_id(void);
 // ch162: forward decl for the goto-entry-point helper.
 static void codegen_goto_entry_point(struct node* node);
 
@@ -1395,6 +1401,49 @@ static void codegen_generate_for_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
+// ch166: switch `default:` label.
+static void codegen_generate_switch_default_stmt(struct node* node){
+    (void)node;
+    asm_push("; DEFAULT CASE");
+    struct code_generator* gen = current_process->generator;
+    asm_push(".switch_stmt_%i_case_default:", gen->_switch.current.id);
+}
+
+// ch166: jump table built before the body. For each parsed case
+// emit cmp+je; default falls through to the body, otherwise jmp to
+// the exit point.
+static void codegen_generate_switch_stmt_case_jumps(struct node* node){
+    vector_set_peek_pointer(node->stmt.switch_stmt.cases, 0);
+    struct parsed_switch_case* sc = vector_peek(node->stmt.switch_stmt.cases);
+    while(sc){
+        asm_push("cmp eax, %i", sc->index);
+        asm_push("je .switch_stmt_%i_case_%i", codegen_switch_id(), sc->index);
+        sc = vector_peek(node->stmt.switch_stmt.cases);
+    }
+    if(node->stmt.switch_stmt.has_default_case){
+        // G06: book writes `codegen_switch_id` without `()`, passing
+        // the function pointer to printf as `%i`. Preserved verbatim
+        // (with a cast to silence the warning); the resulting
+        // truncated address means the default jump targets a bogus
+        // switch id. We'll patch in a gotcha when we have a test
+        // that exercises it.
+        asm_push("jmp .switch_stmt_%i_case_default", (int)(long)codegen_switch_id);
+        return;
+    }
+    codegen_goto_exit_point_maintain_stack(node);
+}
+
+static void codegen_generate_switch_stmt(struct node* node){
+    codegen_begin_entry_exit_point();
+    codegen_begin_switch_statement();
+    codegen_generate_expressionable(node->stmt.switch_stmt.exp, codegen_history_begin(0));
+    asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    codegen_generate_switch_stmt_case_jumps(node);
+    codegen_generate_body(node->stmt.switch_stmt.body, codegen_history_begin(IS_ALONE_STATEMENT));
+    codegen_end_switch_statement();
+    codegen_end_entry_exit_point();
+}
+
 // ch161: `break;` - jumps to the innermost exit point (the loop's
 // .while_end / .for_loop_end / etc.).
 static void codegen_generate_break_stmt(struct node* node){
@@ -1477,6 +1526,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // ch162: continue statement.
         case NODE_TYPE_STATEMENT_CONTINUE:
             codegen_generate_continue_stmt(node);
+            break;
+        // ch166: switch statement.
+        case NODE_TYPE_STATEMENT_SWITCH:
+            codegen_generate_switch_stmt(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
@@ -1587,6 +1640,15 @@ static void codegen_end_exit_point(void){
 }
 
 static void codegen_goto_exit_point(struct node* node){
+    (void)node;
+    struct codegen_exit_point* ep = codegen_current_exit_point();
+    asm_push("jmp .exit_point_%i", ep->id);
+}
+
+// ch166: switch-case jump-table variant. Currently identical to the
+// plain goto_exit_point; the book reserves it for future stack-
+// frame maintenance (hence the name).
+static void codegen_goto_exit_point_maintain_stack(struct node* node){
     (void)node;
     struct codegen_exit_point* ep = codegen_current_exit_point();
     asm_push("jmp .exit_point_%i", ep->id);
