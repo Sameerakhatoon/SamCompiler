@@ -310,10 +310,13 @@ static void codegen_end_entry_exit_point(void);
 static void codegen_goto_exit_point(struct node* node);
 // ch166: forward decl for the maintain-stack variant.
 static void codegen_goto_exit_point_maintain_stack(struct node* node);
-// ch166: forward decls for the switch bookkeeping helpers.
+// ch166/167: forward decls for the switch bookkeeping helpers.
 static void codegen_begin_switch_statement(void);
 static void codegen_end_switch_statement(void);
 static int  codegen_switch_id(void);
+static void codegen_begin_case_statement(int index);
+static void codegen_end_case_statement(void);
+static void codegen_generate_switch_default_stmt(struct node* node);
 // ch162: forward decl for the goto-entry-point helper.
 static void codegen_goto_entry_point(struct node* node);
 
@@ -1444,6 +1447,16 @@ static void codegen_generate_switch_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
+// ch167: `case N:` - emits the `.switch_stmt_<id>_case_N:` label
+// and a comment marker. Body statements follow normally.
+static void codegen_generate_switch_case_stmt(struct node* node){
+    struct node* case_exp = node->stmt._case.exp;
+    assert(case_exp->type == NODE_TYPE_NUMBER);
+    codegen_begin_case_statement(case_exp->llnum);
+    asm_push("; CASE %i", (int)case_exp->llnum);
+    codegen_end_case_statement();
+}
+
 // ch161: `break;` - jumps to the innermost exit point (the loop's
 // .while_end / .for_loop_end / etc.).
 static void codegen_generate_break_stmt(struct node* node){
@@ -1530,6 +1543,13 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // ch166: switch statement.
         case NODE_TYPE_STATEMENT_SWITCH:
             codegen_generate_switch_stmt(node);
+            break;
+        // ch167: case and default labels.
+        case NODE_TYPE_STATEMENT_CASE:
+            codegen_generate_switch_case_stmt(node);
+            break;
+        case NODE_TYPE_STATEMENT_DEFAULT:
+            codegen_generate_switch_default_stmt(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
