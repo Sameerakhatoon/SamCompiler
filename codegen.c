@@ -298,6 +298,8 @@ static void codegen_generate_string(struct node* node, struct history* history);
 // stripper (real impl lives further down with the other ch142 helpers).
 static void codegen_generate_exp_parenthesis_node(struct node* node, struct history* history);
 static int  codegen_remove_uninheritable_flags(int flags);
+// ch172: forward decl for the ternary emitter.
+static void codegen_generate_tenary(struct node* node, struct history* history);
 // ch147: forward decl - real impl lives in the label-system block below.
 static int  codegen_label_count(void);
 // ch151: forward decl for the UNARY codegen used by the dispatcher
@@ -361,6 +363,10 @@ static void codegen_generate_expressionable(struct node* node, struct history* h
         // ch151: UNARY in expression position (e.g. `&x`).
         case NODE_TYPE_UNARY:
             codegen_generate_unary(node, history);
+            break;
+        // ch172: ternary.
+        case NODE_TYPE_TENARY:
+            codegen_generate_tenary(node, history);
             break;
     }
 }
@@ -834,6 +840,29 @@ static void codegen_generate_string(struct node* node, struct history* history){
 static void codegen_generate_exp_parenthesis_node(struct node* node, struct history* history){
     codegen_generate_expressionable(node->parenthesis.exp,
         codegen_history_down(history, codegen_remove_uninheritable_flags(history->flags)));
+}
+
+// ch172: ternary `cond ? T : F`. The cond was already evaluated and
+// is on top of the stack. Pop it, compare against 0, emit T or F
+// branch, store the chosen value via the usual result_value push.
+static void codegen_generate_tenary(struct node* node, struct history* history){
+    int true_label_id       = codegen_label_count();
+    int false_label_id      = codegen_label_count();
+    int tenary_end_label_id = codegen_label_count();
+
+    struct datatype last_dtype;
+    assert(asm_datatype_back(&last_dtype));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("cmp eax, 0");
+    asm_push("je .tenary_false_%i", false_label_id);
+    asm_push(".tenary_true_%i:", true_label_id);
+    codegen_generate_expressionable(node->tenary.true_node, codegen_history_down(history, 0));
+    asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("jmp .tenary_end_%i", tenary_end_label_id);
+    asm_push(".tenary_false_%i:", false_label_id);
+    codegen_generate_expressionable(node->tenary.false_node, codegen_history_down(history, 0));
+    asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push(".tenary_end_%i:", tenary_end_label_id);
 }
 
 // ch151/154: NODE_TYPE_UNARY codegen dispatch.
