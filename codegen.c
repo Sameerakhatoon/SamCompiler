@@ -294,6 +294,10 @@ static void codegen_generate_exp_node(struct node* node, struct history* history
 static void codegen_generate_identifier(struct node* node, struct history* history);
 // ch170: forward decl for the string literal emitter.
 static void codegen_generate_string(struct node* node, struct history* history);
+// ch171: forward decls for the parens emitter + the inheritable-flag
+// stripper (real impl lives further down with the other ch142 helpers).
+static void codegen_generate_exp_parenthesis_node(struct node* node, struct history* history);
+static int  codegen_remove_uninheritable_flags(int flags);
 // ch147: forward decl - real impl lives in the label-system block below.
 static int  codegen_label_count(void);
 // ch151: forward decl for the UNARY codegen used by the dispatcher
@@ -349,6 +353,10 @@ static void codegen_generate_expressionable(struct node* node, struct history* h
             break;
         case NODE_TYPE_EXPRESSION:
             codegen_generate_exp_node(node, history);
+            break;
+        // ch171: `(expr)` - strip uninheritable flags then walk inner.
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            codegen_generate_exp_parenthesis_node(node, history);
             break;
         // ch151: UNARY in expression position (e.g. `&x`).
         case NODE_TYPE_UNARY:
@@ -819,6 +827,13 @@ static void codegen_generate_string(struct node* node, struct history* history){
     asm_push_ins_push_with_data("eax",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
         &(struct stack_frame_data){.dtype = datatype_for_string()});
+}
+
+// ch171: NODE_TYPE_EXPRESSION_PARENTHESES - thin pass-through that
+// strips uninheritable flags before walking the inner expression.
+static void codegen_generate_exp_parenthesis_node(struct node* node, struct history* history){
+    codegen_generate_expressionable(node->parenthesis.exp,
+        codegen_history_down(history, codegen_remove_uninheritable_flags(history->flags)));
 }
 
 // ch151/154: NODE_TYPE_UNARY codegen dispatch.
