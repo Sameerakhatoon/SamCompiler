@@ -248,6 +248,18 @@ struct datatype datatype_for_numeric(void){
     return dtype;
 }
 
+// ch170: synthetic datatype for string literals - `const char*`
+// flagged IS_LITERAL.
+struct datatype datatype_for_string(void){
+    struct datatype dtype = {0};
+    dtype.type          = DATA_TYPE_INTEGER;
+    dtype.type_str      = "char";
+    dtype.flags        |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_LITERAL;
+    dtype.pointer_depth = 1;
+    dtype.size          = DATA_SIZE_DWORD;
+    return dtype;
+}
+
 // ch129: drop one level of pointer-depth; clear IS_POINTER once we
 // fall to 0 or below.
 void datatype_decrement_pointer(struct datatype* dtype){

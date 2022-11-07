@@ -292,6 +292,8 @@ static bool codegen_is_exp_root(struct history* history){
 static void codegen_generate_exp_node(struct node* node, struct history* history);
 // ch145: forward decl for the identifier value-load path.
 static void codegen_generate_identifier(struct node* node, struct history* history);
+// ch170: forward decl for the string literal emitter.
+static void codegen_generate_string(struct node* node, struct history* history);
 // ch147: forward decl - real impl lives in the label-system block below.
 static int  codegen_label_count(void);
 // ch151: forward decl for the UNARY codegen used by the dispatcher
@@ -335,6 +337,10 @@ static void codegen_generate_expressionable(struct node* node, struct history* h
     switch(node->type){
         case NODE_TYPE_NUMBER:
             codegen_generate_number_node(node, history);
+            break;
+        // ch170: string literal in expression position.
+        case NODE_TYPE_STRING:
+            codegen_generate_string(node, history);
             break;
         // ch145: identifiers take the value-load path; (sub)expressions
         // route back through the expression dispatcher.
@@ -796,6 +802,23 @@ static void codegen_generate_normal_unary(struct node* node, struct history* his
     } else if(S_EQ(node->unary.op, "*")){
         codegen_generate_unary_indirection(node, history);
     }
+}
+
+// ch170: emit a mov of an arbitrary value into a register.
+static void codegen_gen_mov_for_value(const char* reg, const char* value, const char* datatype, int flags){
+    (void)datatype; (void)flags;
+    asm_push("mov %s, %s", reg, value);
+}
+
+// ch170: NODE_TYPE_STRING in expression position. Register the
+// string literal in .rodata, mov its label into eax, push as the
+// typed result_value with dtype = `const char*`.
+static void codegen_generate_string(struct node* node, struct history* history){
+    const char* label = codegen_register_string(node->sval);
+    codegen_gen_mov_for_value("eax", label, "dword", history->flags);
+    asm_push_ins_push_with_data("eax",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = datatype_for_string()});
 }
 
 // ch151/154: NODE_TYPE_UNARY codegen dispatch.
