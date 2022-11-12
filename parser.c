@@ -335,7 +335,9 @@ static void parser_reorder_expression(struct node** node_out){
 // indirection.depth carries the chain length.
 static void parse_for_indirection_unary(void){
     int depth = parser_get_pointer_depth();
-    parse_expressionable(history_begin(0));
+    // ch176: flag this descent EXPRESSION_IS_UNARY so the operator
+    // parser knows to stop before unrelated operators.
+    parse_expressionable(history_begin(EXPRESSION_IS_UNARY));
     struct node* operand = node_pop();
     make_unary_node("*", operand);
     struct node* unary = node_pop();
@@ -346,7 +348,9 @@ static void parse_for_indirection_unary(void){
 // ch130: any other unary (-, !, ~, &).
 static void parse_for_normal_unary(void){
     const char* op = token_next()->sval;
-    parse_expressionable(history_begin(0));
+    // ch176: same as the indirection path - flag the descent so the
+    // operator parser knows where to stop.
+    parse_expressionable(history_begin(EXPRESSION_IS_UNARY));
     struct node* operand = node_pop();
     make_unary_node(op, operand);
 }
@@ -512,6 +516,14 @@ static void parse_for_comma(struct history* history){
 }
 
 static int parse_exp(struct history* history){
+    // ch176: when we're parsing a unary's operand, bail out as soon
+    // as we hit an operator that isn't a continuation (access, array
+    // bracket, or call parens). Anything else - including the `=` in
+    // `*p = ...` - is for the outer expression parser to handle.
+    if((history->flags & EXPRESSION_IS_UNARY)
+       && !unary_operand_compatible(token_peek_next())){
+        return -1;
+    }
     if(S_EQ(token_peek_next()->sval, "(")){
         parse_for_parentheses(history);
     } else if(S_EQ(token_peek_next()->sval, "[")){
@@ -1846,8 +1858,9 @@ static int parse_expressionable_single(struct history* history){
             break;
 
         case TOKEN_TYPE_OPERATOR:
-            parse_exp(history);
-            res = 0;
+            // ch176: forward parse_exp's return so the caller knows
+            // when the unary-operand check bailed.
+            res = parse_exp(history);
             break;
 
         case TOKEN_TYPE_KEYWORD:
