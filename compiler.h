@@ -709,6 +709,10 @@ struct code_generator {
     // ch142: response stack used by codegen to communicate result
     // info up through recursive expression emit.
     struct vector* responses;
+    // ch187: extra `.data` lines emitted during codegen and flushed
+    // right before `.rodata`. Used for things like per-call function
+    // pointer slots.
+    struct vector* custom_data_section;
 };
 
 // ch142: codegen response system. Each call may push a response onto

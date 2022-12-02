@@ -188,6 +188,19 @@ static void asm_pop_ebp(void){
     asm_push_ins_pop("ebp", STACK_FRAME_ELEMENT_TYPE_SAVED_BP, "function_entry_saved_ebp");
 }
 
+// ch187: queue a line to be flushed into the .data section on its
+// own pass at the end of codegen. Used for per-call function
+// pointer slots so we can `call [slot]` after stashing the target
+// before pushing arguments.
+static void codegen_data_section_add(const char* data, ...){
+    va_list args;
+    va_start(args, data);
+    char* new_data = malloc(256);
+    vsprintf(new_data, data, args);
+    va_end(args);
+    vector_push(current_process->generator->custom_data_section, &new_data);
+}
+
 // ch160: pop variant that no-ops when the top ledger element isn't
 // the expected one. Used by the for-loop emitter so init/cond/loop
 // expressionables that don't push a value don't crash the pop.
@@ -1062,8 +1075,13 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
     vector_set_flag(entity->func_call_data.arguments, VECTOR_FLAG_PEEK_DECREMENT);
     vector_set_peek_pointer_end(entity->func_call_data.arguments);
     struct node* node = vector_peek_ptr(entity->func_call_data.arguments);
+    // ch187: stash the callee into a freshly-allocated .data slot
+    // before pushing arguments. Otherwise an argument that is itself
+    // a function call would clobber ecx between here and the call.
+    int function_call_label_id = codegen_label_count();
+    codegen_data_section_add("function_call_%i: dd 0", function_call_label_id);
     asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-    asm_push("mov ecx, ebx");
+    asm_push("mov dword [function_call_%i], ebx", function_call_label_id);
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
         // ch150: caller allocates the return slot; push a pointer to
         // it as the hidden first argument the callee will write to.
@@ -1075,7 +1093,7 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
         codegen_generate_expressionable(node, codegen_history_begin(EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS));
         node = vector_peek_ptr(entity->func_call_data.arguments);
     }
-    asm_push("call ecx");
+    asm_push("call [function_call_%i]", function_call_label_id);
     size_t stack_size = entity->func_call_data.stack_size;
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
         stack_size += DATA_SIZE_DWORD;
@@ -1804,6 +1822,8 @@ struct code_generator* codegenerator_new(struct compile_process* process){
     gen->responses    = vector_create(sizeof(struct response*));
     // ch164: nested-switch bookkeeping vector.
     gen->_switch.swtiches = vector_create(sizeof(struct generator_switch_stmt_entity));
+    // ch187: custom .data add-ons (per-call function pointer slots).
+    gen->custom_data_section = vector_create(sizeof(const char*));
     return gen;
 }
 
@@ -2195,6 +2215,19 @@ static void codegen_generate_rod(void){
     codegen_write_strings();
 }
 
+// ch187: re-open `.data` and flush every `codegen_data_section_add`
+// line. Runs after `.text` so the function-call slots' labels are
+// known by the time the assembler resolves them.
+static void codegen_generate_data_section_add_ons(void){
+    asm_push("section .data");
+    vector_set_peek_pointer(current_process->generator->custom_data_section, 0);
+    const char* str = vector_peek_ptr(current_process->generator->custom_data_section);
+    while(str){
+        asm_push(str);
+        str = vector_peek_ptr(current_process->generator->custom_data_section);
+    }
+}
+
 int codegen(struct compile_process* process){
     current_process = process;
     scope_create_root(process);
@@ -2207,6 +2240,9 @@ int codegen(struct compile_process* process){
     codegen_generate_root();
     codegen_finish_scope();
 
+    // ch187: flush queued .data lines (per-call function pointer
+    // slots etc.) before .rodata.
+    codegen_generate_data_section_add_ons();
     codegen_generate_rod();
     return CODEGEN_ALL_OK;
 }
