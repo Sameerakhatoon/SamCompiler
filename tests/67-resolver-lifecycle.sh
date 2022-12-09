@@ -22,7 +22,7 @@ static int delete_scope_calls = 0;
 static void del_scope(struct resolver_scope* s){ (void)s; delete_scope_calls++; }
 static void del_entity(struct resolver_entity* e){ (void)e; }
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", 0, 0);
+    struct compile_process* cp = compile_process_create("${scratch}", 0, 0, NULL);
     struct resolver_callbacks cb = { .delete_scope = del_scope, .delete_entity = del_entity };
     struct resolver_process* rp = resolver_new_process(cp, &cb);
     printf("root=%d cur_is_root=%d\n",

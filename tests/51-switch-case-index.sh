@@ -21,7 +21,7 @@ cat > "$probe" <<EOF
 // ch166: parsed_switch_case now lives in compiler.h; no local redef.
 extern struct lex_process_functions compiler_lex_functions;
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_g03_out", 0);
+    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_g03_out", 0, NULL);
     struct lex_process* lp = lex_process_create(cp, &compiler_lex_functions, 0);
     lex(lp);
     cp->token_vec = lex_process_tokens(lp);

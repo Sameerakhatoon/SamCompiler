@@ -19,7 +19,7 @@ cat > "$probe" <<EOF
 static void del_scope(struct resolver_scope* s){ (void)s; }
 static void del_ent(struct resolver_entity* e){ (void)e; }
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", 0, 0);
+    struct compile_process* cp = compile_process_create("${scratch}", 0, 0, NULL);
     struct resolver_callbacks cb = { .delete_scope = del_scope, .delete_entity = del_ent };
     struct resolver_process* rp = resolver_new_process(cp, &cb);
 

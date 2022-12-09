@@ -21,7 +21,7 @@ cat > "$probe" <<EOF
 #include "helpers/vector.h"
 
 int main(void){
-    struct compile_process* cp = compile_process_create("${dummy}", "/tmp/sam_ch20_out", 0);
+    struct compile_process* cp = compile_process_create("${dummy}", "/tmp/sam_ch20_out", 0, NULL);
     if(!cp){ printf("FAIL cp\n"); return 1; }
 
     struct lex_process* lp = tokens_build_for_string(cp, "int x = 42");

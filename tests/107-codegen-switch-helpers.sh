@@ -17,7 +17,7 @@ cat > "$probe" <<EOF
 #include "compiler.h"
 #include "helpers/vector.h"
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", 0, 0);
+    struct compile_process* cp = compile_process_create("${scratch}", 0, 0, NULL);
     int has = cp && cp->generator && cp->generator->_switch.swtiches != NULL;
     int empty = has && vector_count(cp->generator->_switch.swtiches) == 0;
     printf("has=%d empty=%d id=%d\n", has, empty, cp->generator->_switch.current.id);

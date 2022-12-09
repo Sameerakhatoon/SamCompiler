@@ -22,7 +22,7 @@ extern struct lex_process_functions compiler_lex_functions;
 int main(void){
     // Replicate what compile_file does, end-to-end, then poke at
     // process->token_vec.
-    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_ch22_out", 0);
+    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_ch22_out", 0, NULL);
     struct lex_process* lp = lex_process_create(cp, &compiler_lex_functions, 0);
     if(lex(lp) != LEXICAL_ANALYSIS_ALL_OK){ printf("FAIL lex\n"); return 1; }
     cp->token_vec = lex_process_tokens(lp);

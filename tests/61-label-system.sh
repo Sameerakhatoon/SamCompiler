@@ -19,7 +19,7 @@ cat > "$probe" <<EOF
 #include <stdio.h>
 #include "compiler.h"
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", "${outfile}", 0);
+    struct compile_process* cp = compile_process_create("${scratch}", "${outfile}", 0, NULL);
     printf("gen=%d ep=%d xp=%d\n",
         cp->generator != NULL,
         cp->generator && cp->generator->entry_points != NULL,

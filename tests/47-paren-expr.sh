@@ -18,7 +18,7 @@ cat > "$probe" <<EOF
 #include "helpers/vector.h"
 extern struct lex_process_functions compiler_lex_functions;
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_ch77_out", 0);
+    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_ch77_out", 0, NULL);
     struct lex_process* lp = lex_process_create(cp, &compiler_lex_functions, 0);
     lex(lp);
     cp->token_vec = lex_process_tokens(lp);
