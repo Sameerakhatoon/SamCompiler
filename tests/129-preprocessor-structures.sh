@@ -33,6 +33,7 @@ enum {
     PREPROCESSOR_KEYWORD_NODE,
     PREPROCESSOR_UNARY_NODE,
     PREPROCESSOR_EXPRESSION_NODE,
+    PREPROCESSOR_PARENTHESES_NODE,
     PREPROCESSOR_JOINED_NODE,
     PREPROCESSOR_TENARY_NODE,
 };
@@ -41,18 +42,19 @@ enum {
 };
 
 int main(void){
-    printf("std=%d struct=%d num=%d id=%d kw=%d un=%d ex=%d jn=%d tn=%d flag=%d\n",
+    printf("std=%d struct=%d num=%d id=%d kw=%d un=%d ex=%d pa=%d jn=%d tn=%d flag=%d\n",
         TYPEDEF_TYPE_STANDARD, TYPEDEF_TYPE_STRUCTURE_TYPEDEF,
         PREPROCESSOR_NUMBER_NODE, PREPROCESSOR_IDENTIFIER_NODE,
         PREPROCESSOR_KEYWORD_NODE, PREPROCESSOR_UNARY_NODE,
-        PREPROCESSOR_EXPRESSION_NODE, PREPROCESSOR_JOINED_NODE,
-        PREPROCESSOR_TENARY_NODE, PREPROCESSOR_FLAG_EVALUATE_NODE);
+        PREPROCESSOR_EXPRESSION_NODE, PREPROCESSOR_PARENTHESES_NODE,
+        PREPROCESSOR_JOINED_NODE, PREPROCESSOR_TENARY_NODE,
+        PREPROCESSOR_FLAG_EVALUATE_NODE);
     return 0;
 }
 EOF
 
 gcc "$probe" -o "$bin" 2>/dev/null || fail "ch199 probe failed to compile"
 got="$("$bin")"
-assert_contains "$got" "std=0 struct=1 num=0 id=1 kw=2 un=3 ex=4 jn=5 tn=6 flag=1" \
+assert_contains "$got" "std=0 struct=1 num=0 id=1 kw=2 un=3 ex=4 pa=5 jn=6 tn=7 flag=1" \
     "typedef + preprocessor node enums have the expected values"
 pass
