@@ -82,5 +82,5 @@ EOF
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || fail "ch217 probe failed to compile"
 got="$("$bin")"
 # Expect: int y = x + x ; -> 6 tokens, x ident appears twice, + once, no DBL.
-assert_contains "$got" "n=7 x=2 plus=1 dbl=0" "DBL(7) macro call expands to body x + x (substitution lands in part 3)"
+assert_contains "$got" "n=7 x=0 plus=1 dbl=0" "DBL(7) macro call expands. (NB: ch217 originally pushed the body verbatim; ch218 added argument substitution which retroactively makes this test expect the substituted form 7+7.)"
 pass
