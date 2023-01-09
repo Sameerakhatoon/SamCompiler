@@ -77,6 +77,9 @@ static char nextc(void){
     // quote the raw expression.
     if(lex_is_in_expression()){
         buffer_write(lex_process->parentheses_buffer, c);
+        if(lex_process->argument_string_buffer){
+            buffer_write(lex_process->argument_string_buffer, c);
+        }
     }
     lex_process->pos.col += 1;
     if(c == '\n'){
@@ -106,7 +109,11 @@ static struct token* token_create(struct token* _token){
     memcpy(&tmp_token, _token, sizeof(struct token));
     tmp_token.pos = lex_file_position();
     if(lex_is_in_expression()){
+        assert(lex_process->parentheses_buffer);
         tmp_token.between_brackets = buffer_ptr(lex_process->parentheses_buffer);
+        if(lex_process->argument_string_buffer){
+            tmp_token.between_arguments = buffer_ptr(lex_process->argument_string_buffer);
+        }
     }
     return &tmp_token;
 }
@@ -299,6 +306,15 @@ static void lex_new_expression(void){
     if(lex_process->current_expression_count == 1){
         lex_process->parentheses_buffer = buffer_create();
     }
+
+    // ch220 macro-strings part 2: if the previous token was an
+    // identifier or a comma, we're entering a function-call arg
+    // list. Track the literal substring per argument in this
+    // separate buffer so #x stringification can quote it later.
+    struct token* last_token = lexer_last_token();
+    if(last_token && (last_token->type == TOKEN_TYPE_IDENTIFIER || token_is_operator(last_token, ","))){
+        lex_process->argument_string_buffer = buffer_create();
+    }
 }
 
 static void lex_finish_expression(void){
@@ -424,10 +440,15 @@ struct token* handle_comment(void){
 }
 
 static struct token* token_make_symbol(void){
-    char c = nextc();
+    // ch220 macro-strings part 2: peek first so lex_finish_expression
+    // fires before the token is built. That ensures the closing `)`
+    // for a macro call's args isn't itself recorded into the
+    // argument_string_buffer.
+    char c = peekc();
     if(c == ')'){
         lex_finish_expression();
     }
+    nextc();
     return token_create(&(struct token){ .type = TOKEN_TYPE_SYMBOL, .cval = c });
 }
 
@@ -644,6 +665,7 @@ struct token* read_next_token(void){
 int lex(struct lex_process* process){
     process->current_expression_count = 0;
     process->parentheses_buffer       = 0;
+    process->argument_string_buffer   = 0;
     lex_process                       = process;
     process->pos.filename             = process->compiler->cfile.abs_path;
 
