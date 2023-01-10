@@ -97,6 +97,30 @@ struct preprocessor_node
 
 void preprocessor_handle_token(struct compile_process *compiler, struct token *token);
 int preprocessor_parse_evaluate(struct compile_process *compiler, struct vector *token_vec);
+int preprocessor_evaluate_unary(struct compile_process *compiler, struct preprocessor_node *node)
+{
+    int res = 0;
+    const char *op = node->unary_node.op;
+    struct preprocessor_node *right_operand = node->unary_node.operand_node;
+    if (S_EQ(op, "!"))
+    {
+        res = !preprocessor_evaluate(compiler, right_operand);
+    }
+    else if (S_EQ(op, "~"))
+    {
+        res = ~preprocessor_evaluate(compiler, right_operand);
+    }
+    else if (S_EQ(op, "-"))
+    {
+        res = -preprocessor_evaluate(compiler, right_operand);
+    }
+    else
+    {
+        compiler_error(compiler, "The operator is not supported");
+    }
+    return res;
+}
+
 int preprocessor_evaluate(struct compile_process *compiler, struct preprocessor_node *root_node);
 int preprocessor_handle_identifier_for_token_vector(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec, struct token *token);
 struct vector *preprocessor_definition_value(struct preprocessor_definition *definition);
@@ -1338,6 +1362,10 @@ int preprocessor_evaluate(struct compile_process *compiler, struct preprocessor_
 
     case PREPROCESSOR_IDENTIFIER_NODE:
         result = preprocessor_evaluate_identifier(compiler, current);
+        break;
+
+    case PREPROCESSOR_UNARY_NODE:
+        result = preprocessor_evaluate_unary(compiler, current);
         break;
 
     case PREPROCESSOR_EXPRESSION_NODE:
