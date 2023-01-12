@@ -121,6 +121,11 @@ int preprocessor_evaluate_unary(struct compile_process *compiler, struct preproc
     return res;
 }
 
+int preprocessor_evaluate_parentheses(struct compile_process *compiler, struct preprocessor_node *node)
+{
+    return preprocessor_evaluate(compiler, node->parenthesis.exp);
+}
+
 int preprocessor_evaluate(struct compile_process *compiler, struct preprocessor_node *root_node);
 int preprocessor_handle_identifier_for_token_vector(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec, struct token *token);
 struct vector *preprocessor_definition_value(struct preprocessor_definition *definition);
@@ -1370,6 +1375,10 @@ int preprocessor_evaluate(struct compile_process *compiler, struct preprocessor_
 
     case PREPROCESSOR_EXPRESSION_NODE:
         result = preprocessor_evaluate_exp(compiler, current);
+        break;
+
+    case PREPROCESSOR_PARENTHESES_NODE:
+        result = preprocessor_evaluate_parentheses(compiler, current);
         break;
     }
     return result;
