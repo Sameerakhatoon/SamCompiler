@@ -11,6 +11,9 @@
 #define S_EQ(str, str2) \
     (str && str2 && (strcmp(str, str2) == 0))
 
+// ch226: assertion-based bailout with an attached message.
+#define FAIL_ERR(message) assert(0 == 1 && message)
+
 typedef struct pos pos_t;
 typedef struct token token_t;
 
@@ -693,6 +696,12 @@ bool token_is_symbol(struct token* token, char c);
 bool token_is_nl_or_comment_or_newline_seperator(struct token* token);
 bool keyword_is_datatype(const char* str);
 bool token_is_primitive_keyword(struct token* token);
+
+// ch226: serialize a token vector into a string and re-lex it. Used
+// by the preprocessor's ## concat to collapse adjacent tokens.
+void tokens_join_buffer_write_token(struct buffer* fmt_buf, struct token* token);
+struct vector* tokens_join_vector(struct compile_process* compiler, struct vector* token_vec);
+struct lex_process* tokens_build_for_string(struct compile_process* compiler, const char* str);
 bool token_is_operator(struct token* token, const char* val);
 bool is_operator_token(struct token* token);
 bool datatype_is_struct_or_union_for_name(const char* name);

@@ -684,6 +684,9 @@ int lex(struct lex_process* process){
 // expansions and similar in-memory text without round-tripping to disk.
 // ============================================================================
 
+// ch226: alternate lex source - read from a string buffer instead of
+// the compile_process's FILE*. Used by tokens_join_vector to re-lex
+// a freshly concatenated token stream.
 char lexer_string_buffer_next_char(struct lex_process* process){
     struct buffer* buf = lex_process_private(process);
     return buffer_read(buf);
@@ -708,12 +711,12 @@ struct lex_process_functions lexer_string_buffer_functions = {
 struct lex_process* tokens_build_for_string(struct compile_process* compiler, const char* str){
     struct buffer* buffer = buffer_create();
     buffer_printf(buffer, "%s", str);
-    struct lex_process* lp = lex_process_create(compiler, &lexer_string_buffer_functions, buffer);
-    if(!lp){
-        return 0;
+    struct lex_process* lex_process = lex_process_create(compiler, &lexer_string_buffer_functions, buffer);
+    if(!lex_process){
+        return NULL;
     }
-    if(lex(lp) != LEXICAL_ANALYSIS_ALL_OK){
-        return 0;
+    if(lex(lex_process) != LEXICAL_ANALYSIS_ALL_OK){
+        return NULL;
     }
-    return lp;
+    return lex_process;
 }
