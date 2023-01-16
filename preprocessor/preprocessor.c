@@ -779,12 +779,17 @@ struct vector *preprocessor_definition_value_for_typedef(struct preprocessor_def
     return preprocessor_definition_value_for_typedef_or_other(definition);
 }
 
+struct vector *preprocessor_definition_value_for_native(struct preprocessor_definition *definition,
+                                                        struct preprocessor_function_arguments *arguments)
+{
+    return definition->native.value(definition, arguments);
+}
+
 struct vector *preprocessor_definition_value_with_arguments(struct preprocessor_definition *definition, struct preprocessor_function_arguments *arguments)
 {
     if (definition->type == PREPROCESSOR_DEFINITION_NATIVE_CALLBACK)
     {
-#warning "implement definition value for native.
-        return NULL;
+        return preprocessor_definition_value_for_native(definition, arguments);
     }
     else if (definition->type == PREPROCESSOR_DEFINITION_TYPEDEF)
     {
@@ -820,6 +825,12 @@ int preprocessor_definition_evaluated_value_for_standard(struct preprocessor_def
     return token->llnum;
 }
 
+int preprocessor_definition_evaluated_value_for_native(struct preprocessor_definition *definition,
+                                                       struct preprocessor_function_arguments *arguments)
+{
+    return definition->native.evaluate(definition, arguments);
+}
+
 int preprocessor_definition_evaluated_value(struct preprocessor_definition *definition, struct preprocessor_function_arguments *arguments)
 {
     if (definition->type == PREPROCESSOR_DEFINITION_STANDARD)
@@ -828,11 +839,11 @@ int preprocessor_definition_evaluated_value(struct preprocessor_definition *defi
     }
     else if (definition->type == PREPROCESSOR_DEFINITION_NATIVE_CALLBACK)
     {
-#warning "implement native callbacks.
-        return -1;
+        return preprocessor_definition_evaluated_value_for_native(definition, arguments);
     }
 
     compiler_error(definition->preprocessor->compiler, "The definition cannot be evaluated into a number");
+    return -1;
 }
 bool preprocessor_is_next_macro_arguments(struct compile_process *compiler)
 {
