@@ -64,8 +64,9 @@ int main(void){
 
     preprocessor_run(cp);
 
-    int n_defs = vector_count(cp->preprocessor->definitions);
-    vector_set_peek_pointer(cp->preprocessor->definitions, 0);
+    // ch227's __LINE__ native lives at index 0 so user defs land at >0.
+    int n_defs = vector_count(cp->preprocessor->definitions) - 1;
+    vector_set_peek_pointer(cp->preprocessor->definitions, 1);
     struct preprocessor_definition* d = vector_peek_ptr(cp->preprocessor->definitions);
     int name_ok = d && S_EQ(d->name, "P");
     int type_ok = d && d->type == PREPROCESSOR_DEFINITION_TYPEDEF;

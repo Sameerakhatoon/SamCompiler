@@ -46,8 +46,10 @@ int main(void){
 
     preprocessor_run(cp);
 
+    // ch227's __LINE__ native lives at index 0 so user defs land at >0.
     int n_defs = vector_count(cp->preprocessor->definitions);
-    vector_set_peek_pointer(cp->preprocessor->definitions, 0);
+    int user_defs = n_defs - 1;
+    vector_set_peek_pointer(cp->preprocessor->definitions, 1);
     struct preprocessor_definition* d = vector_peek_ptr(cp->preprocessor->definitions);
     int name_ok = d && S_EQ(d->name, "FOO");
     int type_ok = d && d->type == PREPROCESSOR_DEFINITION_STANDARD;
@@ -59,7 +61,7 @@ int main(void){
         struct token* t = vector_peek(d->standard.value);
         if (t) val0 = t->llnum;
     }
-    printf("defs=%d name=%d type=%d back=%d valN=%d v0=%lld\n", n_defs, name_ok, type_ok, back_ok, val_n, val0);
+    printf("defs=%d name=%d type=%d back=%d valN=%d v0=%lld\n", user_defs, name_ok, type_ok, back_ok, val_n, val0);
     return 0;
 }
 EOF
