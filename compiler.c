@@ -35,6 +35,57 @@ static void compiler_emit_pos(struct compile_process* compiler){
         compiler->pos.line, compiler->pos.col, file);
 }
 
+// ch229: try to open + lex + preprocess `<include_dir>/<filename>`
+// (or the bare filename if the joined path doesn't exist). Returns
+// the resulting compile_process on success, NULL on any failure.
+// Only lex + preprocess run; parse + codegen stay with the outer
+// translation unit.
+struct compile_process* compile_include_for_include_dir(const char* include_dir, const char* filename, struct compile_process* parent_process){
+    char tmp_filename[512];
+    sprintf(tmp_filename, "%s/%s", include_dir, filename);
+    if(file_exists(tmp_filename)){
+        filename = tmp_filename;
+    }
+    struct compile_process* process = compile_process_create(filename, NULL, parent_process->flags, parent_process);
+    if(!process){
+        return NULL;
+    }
+
+    struct lex_process* lex_process = lex_process_create(process, &compiler_lex_functions, NULL);
+    if(!lex_process){
+        return NULL;
+    }
+
+    if(lex(lex_process) != LEXICAL_ANALYSIS_ALL_OK){
+        return NULL;
+    }
+
+    process->token_vec_original = lex_process_tokens(lex_process);
+    if(preprocessor_run(process) < 0){
+        return NULL;
+    }
+
+    return process;
+}
+
+/**
+ * @brief Includes a file to be compiled, returns a new compile process that
+ *        represents the file to be compiled. Walks parent_process->include_dirs.
+ *
+ * Only lexical analysis + preprocessing run; parsing and codegen are
+ * excluded since they happen on the parent.
+ */
+struct compile_process* compile_include(const char* filename, struct compile_process* parent_process){
+    struct compile_process* new_process = NULL;
+    const char* include_dir = compiler_include_dir_begin(parent_process);
+    while(include_dir && !new_process){
+        new_process = compile_include_for_include_dir(include_dir, filename, parent_process);
+        include_dir = compiler_include_dir_next(parent_process);
+    }
+
+    return new_process;
+}
+
 int compile_file(const char* filename, const char* out_filename, int flags){
     int                     res         = COMPILER_FILE_COMPILED_OK;
     struct compile_process* process     = 0;

@@ -328,3 +328,13 @@ long arithmetic(struct compile_process* compiler, long left_operand, long right_
     }
     return result;
 }
+
+// ch229: probe whether a path refers to an openable file.
+bool file_exists(const char* filename){
+    FILE* f = fopen(filename, "r");
+    if(!f){
+        return false;
+    }
+    fclose(f);
+    return true;
+}

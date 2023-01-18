@@ -3,6 +3,33 @@
 #include "compiler.h"
 #include "helpers/vector.h"
 
+// ch229: ordered list of default include directories tried by
+// compile_include when the source uses <foo.h> / "foo.h".
+const char* default_include_dirs[] = {
+    "./pc_includes",
+    "../pc_includes",
+    "/usr/include/peach-includes",
+    "/usr/include",
+};
+
+const char* compiler_include_dir_begin(struct compile_process* process){
+    vector_set_peek_pointer(process->include_dirs, 0);
+    const char* dir = vector_peek_ptr(process->include_dirs);
+    return dir;
+}
+
+const char* compiler_include_dir_next(struct compile_process* process){
+    const char* dir = vector_peek_ptr(process->include_dirs);
+    return dir;
+}
+
+void compiler_setup_default_include_directories(struct vector* include_vec){
+    size_t total = sizeof(default_include_dirs) / sizeof(const char*);
+    for(int i = 0; i < (int)total; i++){
+        vector_push(include_vec, &default_include_dirs[i]);
+    }
+}
+
 struct compile_process* compile_process_create(const char* filename, const char* filename_out, int flags, struct compile_process* parent_process){
     struct compile_process* process = 0;
     FILE* file     = 0;
@@ -55,7 +82,8 @@ struct compile_process* compile_process_create(const char* filename, const char*
     else{
         process->preprocessor = preprocessor_create(process);
         process->include_dirs = vector_create(sizeof(const char*));
-        // setup default include dirs...
+        // ch229: load the default include directories.
+        compiler_setup_default_include_directories(process->include_dirs);
     }
 
     return process;
