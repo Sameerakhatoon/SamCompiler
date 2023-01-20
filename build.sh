@@ -6,5 +6,5 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 make clean >/dev/null 2>&1 || true
-mkdir -p build/helpers
+mkdir -p build/helpers build/static-includes
 make all

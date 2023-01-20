@@ -2,6 +2,7 @@ OBJECTS  = ./build/compiler.o ./build/cprocess.o \
            ./build/lexer.o ./build/lex_process.o ./build/token.o \
            ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/resolver.o ./build/rdefault.o ./build/codegen.o ./build/stackframe.o ./build/fixup.o ./build/array.o ./build/helper.o \
            ./build/preprocessor.o ./build/native.o \
+           ./build/static-include.o ./build/static-includes/stdarg.o ./build/static-includes/stddef.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o
 INCLUDES = -I./
 CFLAGS   = -g -Wall -Wno-unused-variable -Wno-unused-function
@@ -70,6 +71,17 @@ all: ./main
 
 ./build/native.o: ./preprocessor/native.c ./compiler.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./preprocessor/native.c -o ./build/native.o
+
+./build/static-include.o: ./preprocessor/static-include.c ./compiler.h
+	gcc ${INCLUDES} ${CFLAGS} -c ./preprocessor/static-include.c -o ./build/static-include.o
+
+./build/static-includes/stdarg.o: ./preprocessor/static-includes/stdarg.c ./compiler.h
+	mkdir -p ./build/static-includes
+	gcc ${INCLUDES} ${CFLAGS} -c ./preprocessor/static-includes/stdarg.c -o ./build/static-includes/stdarg.o
+
+./build/static-includes/stddef.o: ./preprocessor/static-includes/stddef.c ./compiler.h
+	mkdir -p ./build/static-includes
+	gcc ${INCLUDES} ${CFLAGS} -c ./preprocessor/static-includes/stddef.c -o ./build/static-includes/stddef.o
 
 ./build/helpers/buffer.o: ./helpers/buffer.c ./helpers/buffer.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./helpers/buffer.c -o ./build/helpers/buffer.o

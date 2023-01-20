@@ -224,6 +224,9 @@ struct preprocessor_function_argument;
 struct preprocessor_included_file;
 
 typedef void (*PREPROCESSOR_STATIC_INCLUDE_HANDLER_POST_CREATION)(struct preprocessor* preprocessor, struct preprocessor_included_file* included_file);
+// ch231: lookup table for static (built-in) includes such as
+// stddef-internal.h / stdarg-internal.h.
+PREPROCESSOR_STATIC_INCLUDE_HANDLER_POST_CREATION preprocessor_static_include_handler_for(const char* filename);
 
 enum {
     PREPROCESSOR_DEFINITION_STANDARD,
