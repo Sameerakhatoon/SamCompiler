@@ -15,6 +15,32 @@ static struct compile_process* current_process  = 0;
 // frame elements against this.
 static struct node*            current_function = 0;
 
+// ch236: forward decls + the global x86 generator v-table. native
+// functions live behind this so #include <stdarg.h> can plug into
+// codegen without the codegen module knowing anything about them.
+// asm_push itself is static in this file (ch143); codegen_asm_push
+// is a non-static shim so the v-table can take its address.
+void codegen_asm_push(const char* ins, ...);
+struct _x86_generator_private* x86_generator_private(struct generator* generator);
+void codegen_gen_exp(struct generator* generator, struct node* node, int flags);
+void codegen_end_exp(struct generator* generator);
+void codegen_entity_address(struct generator* generator, struct resolver_entity* entity, struct generator_entity_address* address_out);
+
+struct history;
+struct _x86_generator_private {
+    struct x86_generator_remembered {
+        struct history* history;
+    } remembered;
+} _x86_generator_private;
+
+struct generator x86_codegen = {
+    .asm_push       = codegen_asm_push,
+    .gen_exp        = codegen_gen_exp,
+    .end_exp        = codegen_end_exp,
+    .entity_address = codegen_entity_address,
+    .private        = &_x86_generator_private,
+};
+
 // ch154: codegen entity-rule flags for the entity-access dispatchers.
 enum {
     CODEGEN_ENTITY_RULE_IS_STRUCT_OR_UNION_NON_POINTER = 0b00000001,
@@ -442,6 +468,16 @@ static void codegen_generate_assignment_instruction_for_operator(const char* mov
 
 static struct resolver_default_entity_data* codegen_entity_private(struct resolver_entity* entity){
     return resolver_default_entity_private(entity);
+}
+
+// ch236: native generator hook - fill out a generator_entity_address
+// view of a resolver_entity (stack-vs-data, offset, address, base).
+void codegen_entity_address(struct generator* generator, struct resolver_entity* entity, struct generator_entity_address* address_out){
+    struct resolver_default_entity_data* data = codegen_entity_private(entity);
+    address_out->address      = data->address;
+    address_out->base_address = data->base_address;
+    address_out->is_stack     = data->flags & RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK;
+    address_out->offset       = data->offset;
 }
 
 // ch138: a local variable declaration. Register it as a scope entity
@@ -2236,8 +2272,31 @@ static void codegen_generate_data_section_add_ons(void){
     }
 }
 
+// ch236: native generator helpers - drive expression codegen
+// through the v-table so native functions can recurse back in.
+struct _x86_generator_private* x86_generator_private(struct generator* generator){
+    return generator->private;
+}
+
+void codegen_asm_push(const char* ins, ...){
+    va_list args;
+    va_start(args, ins);
+    asm_push_args(ins, args);
+    va_end(args);
+}
+
+void codegen_gen_exp(struct generator* generator, struct node* node, int flags){
+    codegen_generate_expressionable(node, codegen_history_down(x86_generator_private(generator)->remembered.history, flags));
+}
+
+void codegen_end_exp(struct generator* generator){
+    // currently a no-op; reserved for future bookkeeping.
+}
+
 int codegen(struct compile_process* process){
     current_process = process;
+    // ch236: bind the global x86 v-table to the active compile_process.
+    x86_codegen.compiler = current_process;
     scope_create_root(process);
 
     vector_set_peek_pointer(process->node_tree_vec, 0);
