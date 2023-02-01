@@ -52,7 +52,8 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 [ -x "$bin" ] || fail "ch122 probe failed to compile"
 got="$("$bin")"
 # GENERAL = 6; the offset / flags propagate; make_private fires once.
-assert_contains "$got" "type=6 off=42 flag_stack=1 priv=0xcafe calls=1" "make_entity NUMBER -> GENERAL with inherited offset/flags + private"
-# FUNCTION_CALL = 3.
-assert_contains "$got" "fc_type=3 fc_args=1" "function_call entity has args vector"
+# ch237 shifts later enum values by +1 (NATIVE_FUNCTION inserted).
+assert_contains "$got" "type=7 off=42 flag_stack=1 priv=0xcafe calls=1" "make_entity NUMBER -> GENERAL=7 (post-ch237)"
+# FUNCTION_CALL = 4 post-ch237.
+assert_contains "$got" "fc_type=4 fc_args=1" "function_call entity has args vector"
 pass

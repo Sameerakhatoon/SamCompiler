@@ -53,6 +53,6 @@ EOF
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 [ -x "$bin" ] || fail "ch132 probe failed to compile"
 got="$("$bin")"
-# UNARY_INDIRECTION=8
-assert_contains "$got" "type=8 res_set=1 resv_set=1" "follow_unary -> UNARY_INDIRECTION with result+resolver stamped"
+# UNARY_INDIRECTION=9 post-ch237 (NATIVE_FUNCTION inserted before).
+assert_contains "$got" "type=9 res_set=1 resv_set=1" "follow_unary -> UNARY_INDIRECTION with result+resolver stamped"
 pass
