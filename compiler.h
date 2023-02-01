@@ -216,6 +216,8 @@ struct code_generator;
 struct resolver_process;
 struct generator;
 struct native_function;
+struct node;
+struct resolver_entity;
 
 struct generator_entity_address {
     bool        is_stack;
