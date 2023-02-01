@@ -218,6 +218,7 @@ struct generator;
 struct native_function;
 struct node;
 struct resolver_entity;
+struct datatype;
 
 struct generator_entity_address {
     bool        is_stack;
@@ -230,16 +231,18 @@ struct generator_entity_address {
 #define GENERATOR_END_EXPRESSION(gen) gen->end_exp(gen)
 
 typedef void (*ASM_PUSH_PROTOTYPE)(const char* ins, ...);
-typedef void (*NATIVE_FUNCTION_CALL)(struct generator* generator, struct node* orinating_function, struct native_function* func, struct vector* arguments);
+typedef void (*NATIVE_FUNCTION_CALL)(struct generator* generator, struct native_function* func, struct vector* arguments);
 typedef void (*GENERATOR_GENERATE_EXPRESSION)(struct generator* generator, struct node* node, int flags);
 typedef void (*GENERATOR_ENTITY_ADDRESS)(struct generator* generator, struct resolver_entity* entity, struct generator_entity_address* address_out);
 typedef void (*GENERATOR_END_EXPRESSION)(struct generator* generator);
+typedef void (*GENERATOR_FUNCTION_RETURN)(struct datatype* dtype, const char* fmt, ...);
 
 struct generator {
     ASM_PUSH_PROTOTYPE            asm_push;
     GENERATOR_GENERATE_EXPRESSION gen_exp;
     GENERATOR_END_EXPRESSION      end_exp;
     GENERATOR_ENTITY_ADDRESS      entity_address;
+    GENERATOR_FUNCTION_RETURN     ret;
 
     struct compile_process* compiler;
 
@@ -258,6 +261,7 @@ struct native_function {
 
 struct symbol* native_create_function(struct compile_process* compiler, const char* name,
                                       struct native_function_callbacks* callbacks);
+struct native_function* native_function_get(struct compile_process* compiler, const char* name);
 
 // ch200: preprocessor scaffolding. Definitions, included files, the
 // preprocessor itself - all live in their own structs so the
@@ -771,6 +775,7 @@ struct lex_process* tokens_build_for_string(struct compile_process* compiler, co
 bool token_is_operator(struct token* token, const char* val);
 bool is_operator_token(struct token* token);
 bool datatype_is_struct_or_union_for_name(const char* name);
+void datatype_set_void(struct datatype* dtype);
 bool datatype_is_struct_or_union(struct datatype* dtype);
 
 // ch51: size helpers used by codegen + resolver later.
@@ -1054,6 +1059,7 @@ enum {
 enum {
     RESOLVER_ENTITY_TYPE_VARIABLE,
     RESOLVER_ENTITY_TYPE_FUNCTION,
+    RESOLVER_ENTITY_TYPE_NATIVE_FUNCTION,
     RESOLVER_ENTITY_TYPE_STRUCTURE,
     RESOLVER_ENTITY_TYPE_FUNCTION_CALL,
     RESOLVER_ENTITY_TYPE_ARRAY_BRACKET,
@@ -1327,6 +1333,12 @@ struct resolver_entity {
         struct resolver_indirection {
             int depth;
         } indirection;
+
+        // ch237: NATIVE_FUNCTION entities carry the symbol they resolved
+        // from so codegen can chase back to the registered callbacks.
+        struct resolver_native_function {
+            struct symbol* symbol;
+        } native_func;
     };
 
     struct entity_last_resolve {

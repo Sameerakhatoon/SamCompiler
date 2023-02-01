@@ -61,3 +61,11 @@ bool datatype_is_struct_or_union_non_pointer(struct datatype* dtype){
         && !datatype_is_primitive(dtype)
         && !(dtype->flags & DATATYPE_FLAG_IS_POINTER);
 }
+
+// ch237: set a datatype struct to void. Native functions use this as a
+// default return type since we will never look at it from the caller.
+void datatype_set_void(struct datatype* dtype){
+    dtype->type     = DATA_TYPE_VOID;
+    dtype->type_str = "void";
+    dtype->size     = 0;
+}
