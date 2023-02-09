@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# Ch237: implementing native functions - part 2. Wires the
-# resolver + codegen so an identifier that names a previously-
-# registered native function (e.g. `test` from
-# preprocessor_stdarg_internal_include) actually dispatches to
-# its registered callback at codegen time.
-#
-# Test: compile a source that #include <stdarg-internal.h> +
-# calls `test();` and confirm the emitted asm contains both
-# `; NATIVE FUNCTION test` (codegen dispatch tag) and the
-# native callback's `; TEST FUNCTION ACTIVATED!` payload.
+# Ch237: implementing native functions - part 2. The original
+# test used the `test` stub; ch238 replaces that with the real
+# va_start native. We update this test in place to verify the
+# same dispatch path through va_start instead - both NATIVE
+# FUNCTION dispatch and the registered callback firing are still
+# under test.
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
@@ -18,19 +14,27 @@ asm=$(mktemp /tmp/sam_ch237_asm.XXXXXX.asm)
 trap 'rm -f "$src" "$asm"' EXIT
 
 cat > "$src" <<'EOF'
-#include <stdarg-internal.h>
+#include <stdarg.h>
+
+int sum(int num, ...) {
+    int result = 0;
+    va_list list;
+    va_start(list, num);
+    return result;
+}
+
 int main() {
-    test();
+    return sum(3, 20, 30, 40);
 }
 EOF
 
 out=$("$REPO_ROOT/main" "$src" "$asm" 2>&1 || true)
 case "$out" in
-    *"; NATIVE FUNCTION test"*) ;;
-    *) fail "expected '; NATIVE FUNCTION test' tag in asm output; got: $out" ;;
+    *"; NATIVE FUNCTION va_start"*) ;;
+    *) fail "expected '; NATIVE FUNCTION va_start' tag in asm output; got: $out" ;;
 esac
 case "$out" in
-    *"; TEST FUNCTION ACTIVATED!"*) ;;
-    *) fail "expected native callback to emit '; TEST FUNCTION ACTIVATED!'; got: $out" ;;
+    *"; va_start on variable num"*) ;;
+    *) fail "expected va_start callback's '; va_start on variable num' line; got: $out" ;;
 esac
 pass
