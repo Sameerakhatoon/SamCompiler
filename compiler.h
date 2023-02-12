@@ -420,6 +420,7 @@ bool file_exists(const char* filename);
 
 void compiler_error(struct compile_process* compiler, const char* msg, ...);
 void compiler_warning(struct compile_process* compiler, const char* msg, ...);
+void compiler_node_error(struct node* node, const char* msg, ...);
 
 // FILE*-backed adapters that plug into lex_process_functions.
 char compile_process_next_char(struct lex_process* lex_process);
