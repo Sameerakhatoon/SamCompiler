@@ -1377,6 +1377,7 @@ struct resolver_entity* resolver_get_entity_for_type(struct resolver_result* res
 struct resolver_entity* resolver_get_entity(struct resolver_result* result, struct resolver_process* resolver, const char* entity_name);
 struct resolver_entity* resolver_get_entity_in_scope(struct resolver_result* result, struct resolver_process* resolver, struct resolver_scope* scope, const char* entity_name);
 struct resolver_entity* resolver_get_variable(struct resolver_result* result, struct resolver_process* resolver, const char* var_name);
+struct resolver_entity* resolver_get_variable_from_local_scope(struct resolver_process* resolver, const char* var_name);
 struct resolver_entity* resolver_get_function_in_scope(struct resolver_result* result, struct resolver_process* resolver, const char* func_name, struct resolver_scope* scope);
 struct resolver_entity* resolver_get_function(struct resolver_result* result, struct resolver_process* resolver, const char* func_name);
 

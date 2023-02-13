@@ -506,6 +506,14 @@ struct resolver_entity* resolver_get_variable(struct resolver_result* result, st
     return resolver_get_entity_for_type(result, resolver, var_name, RESOLVER_ENTITY_TYPE_VARIABLE);
 }
 
+// ch256: search ONLY the current resolver scope for a variable by
+// name. Used by the validator to catch same-scope redeclarations
+// without false-positiving on shadowing in an outer scope.
+struct resolver_entity* resolver_get_variable_from_local_scope(struct resolver_process* resolver, const char* var_name){
+    struct resolver_result* result = resolver_new_result(resolver);
+    return resolver_get_entity_in_scope(result, resolver, resolver_scope_current(resolver), var_name);
+}
+
 struct resolver_entity* resolver_get_function_in_scope(struct resolver_result* result, struct resolver_process* resolver, const char* func_name, struct resolver_scope* scope){
     (void)scope;
     struct resolver_entity* entity = resolver_get_entity_for_type(result, resolver, func_name, RESOLVER_ENTITY_TYPE_FUNCTION);
