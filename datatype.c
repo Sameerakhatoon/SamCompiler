@@ -69,3 +69,10 @@ void datatype_set_void(struct datatype* dtype){
     dtype->type_str = "void";
     dtype->size     = 0;
 }
+
+// ch257: helper for the validator's return-statement check. True
+// when the dtype is `void` with no pointer indirection (so callers
+// returning a value into it are a compile error).
+bool datatype_is_void_no_ptr(struct datatype* dtype){
+    return S_EQ(dtype->type_str, "void") && !(dtype->flags & DATATYPE_FLAG_IS_POINTER);
+}

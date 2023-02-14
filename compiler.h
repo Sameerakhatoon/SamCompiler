@@ -789,6 +789,7 @@ bool token_is_operator(struct token* token, const char* val);
 bool is_operator_token(struct token* token);
 bool datatype_is_struct_or_union_for_name(const char* name);
 void datatype_set_void(struct datatype* dtype);
+bool datatype_is_void_no_ptr(struct datatype* dtype);
 bool datatype_is_struct_or_union(struct datatype* dtype);
 
 // ch51: size helpers used by codegen + resolver later.
