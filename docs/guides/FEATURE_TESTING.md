@@ -92,21 +92,18 @@ pipeline works end-to-end for every feature listed in the matrix.
 
 ## Run every sample as a binary
 
-This step requires `gcc-multilib`. Once installed:
+This step requires `gcc-multilib`. Once installed, use the
+runner shipped under `samples/`:
 
 ```bash
-for src in samples/*.c; do
-    base=$(basename "$src" .c)
-    bin="samples/${base}.bin"
-    expected=$(grep -oP 'EXPECTED EXIT: \K[0-9]+' "$src" | head -1)
-    if ./main "$src" "$bin" >/dev/null 2>&1 && [ -x "$bin" ]; then
-        ./"$bin"
-        echo "$base ... exit=$? expected=$expected"
-    else
-        echo "$base ... compile/link failed"
-    fi
-done
+bash samples/run_all.sh           # from repo root
+bash run_all.sh                   # from inside samples/
 ```
+
+It rebuilds `./main` if missing, walks `samples/*.c`, compiles
+each, runs the produced binary, tabulates exit-code vs
+expected, and prints a summary line. Non-zero exit on any
+mismatch.
 
 Expected output:
 
