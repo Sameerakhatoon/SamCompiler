@@ -144,6 +144,33 @@ Two reliable workarounds:
 - Avoid `bash -c "..."` wrapping a heredoc entirely; write the
   whole script to a file first, then `bash /tmp/script.sh`.
 
+## The five build-time warnings
+
+`./build.sh` historically printed five gcc warnings. None of them
+block the build (the script does not pass `-Werror`) and the
+final `gcc main.c ... -o ./main` line always succeeds. Each one
+is either a false positive or an upstream-verbatim deviation we
+explicitly preserve:
+
+| File:Line | Warning | Why |
+|---|---|---|
+| `parser.c:684` | `sizeof` on `strncpy` source | False positive. `tmp_name` is `char[25]` and the destination was `malloc(sizeof tmp_name)` so both are 25 bytes; gcc doesn't trace through the malloc. |
+| `resolver.c:546` | `&&` within `\|\|` | Upstream verbatim. See the `// Book ships this with \|\| mis-grouped against &&; we replicate verbatim.` comment in the source. |
+| `stackframe.c:24` | `&&` within `\|\|` | Upstream verbatim, same shape as resolver.c. |
+| `preprocessor/preprocessor.c:565` | `&&` within `\|\|` | Documented in `docs/202-preprocessor-define.md`: upstream missed the parentheses; preserved so `\|\|` short-circuits any IDENTIFIER through, which is the exact behavior the rest of the chapters depend on. |
+| `helpers/vector.c:325` | control reaches end of non-void function (`vector_pop_value`) | Upstream verbatim bug - declared `int` but no `return`. Callers don't read the return value, so it's harmless in practice. |
+
+To get a quiet build (Makefile `CFLAGS`):
+
+```
+-Wno-parentheses -Wno-return-type -Wno-sizeof-pointer-memaccess
+```
+
+These suppress exactly the five lines above. The
+`-Wno-unused-variable` and `-Wno-unused-function` that are
+already in `CFLAGS` cover incidental dead code from work-in-
+progress chapters.
+
 ## Debugging workflow
 
 When a chapter test fails the routine is:
