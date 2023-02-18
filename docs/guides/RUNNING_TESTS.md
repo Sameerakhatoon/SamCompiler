@@ -168,6 +168,9 @@ that fixed it in place.
 
 ## See also
 
+- `USING_THE_COMPILER.md` for how to drive `./main` against your
+  own `.c` file (CLI patterns, what each pipeline stage does,
+  the `nasm` + `gcc -m32` shell-out)
 - `DEBUGGING.md` for failure shapes and how to investigate them
 - `FEATURE_TESTING.md` for end-to-end feature verification using
   the sample programs in `samples/`

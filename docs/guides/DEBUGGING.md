@@ -192,5 +192,13 @@ When a chapter test fails the routine is:
    `docs/NN-...md` BEFORE you commit. Future-you reading the
    commit log will need it.
 
-See also `RUNNING_TESTS.md` for how to run the suite and what the
-per-test output looks like.
+## See also
+
+- `USING_THE_COMPILER.md` for how `./main` actually works under
+  the hood (lex / preproc / validate / parse / codegen +
+  the `nasm` + `gcc -m32` shell-out) and how to drive the CLI
+  on your own `.c` file
+- `RUNNING_TESTS.md` for how to run the suite and what the
+  per-test output looks like
+- `FEATURE_TESTING.md` for the sample programs that exercise
+  features end to end
