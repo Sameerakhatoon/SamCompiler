@@ -43,11 +43,11 @@ int main(void){
     struct node* var = *pp;
     resolver_new_entity_for_var_node(rp, var, NULL, 0);
 
-    // ch125 ships var lookup broken (see G05) because the var-node
+    // ch125 ships var lookup broken because the var-node
     // factory stamps NODE_TYPE_VARIABLE instead of
     // RESOLVER_ENTITY_TYPE_VARIABLE. fn lookup works because
     // resolver_register_function uses the right constant. Test only
-    // what's working at this chapter; G05 adds the var test.
+    // what's working at this chapter; a later fix adds the var test.
     struct resolver_entity* got_fn   = resolver_get_function(NULL, rp, "foo");
     struct resolver_entity* missing  = resolver_get_entity(NULL, rp, "nope");
     printf("fn=%s missing=%d\n",

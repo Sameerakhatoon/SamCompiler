@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G05: resolver_get_variable now finds variables registered via
+# resolver_get_variable now finds variables registered via
 # resolver_new_entity_for_var_node (the factory used to stamp
 # NODE_TYPE_VARIABLE instead of RESOLVER_ENTITY_TYPE_VARIABLE).
 . "$(dirname "$0")/lib.sh"

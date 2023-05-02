@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G04: fixup_sys_new / fixup_register / fixups_resolve. We register
+# fixup_sys_new / fixup_register / fixups_resolve. We register
 # two fixups: one resolves immediately, one has a countdown that needs
 # two passes. Confirms both vector-slot-size and resolve-loop fixes.
 . "$(dirname "$0")/lib.sh"

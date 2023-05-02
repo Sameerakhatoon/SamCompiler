@@ -11,7 +11,7 @@
 # Note: upstream has `assert(left_node_type = 0)` (typo:
 # assignment, not comparison) which would fire on every binary
 # expression. We deviate to `>= 0` so the suite stays green.
-# See docs/194.
+#
 #
 # This chapter's test walks the precedence lookup helpers
 # directly; tree-shape reorder is exercised by the next deep

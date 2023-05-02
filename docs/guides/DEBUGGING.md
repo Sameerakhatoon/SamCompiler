@@ -18,7 +18,7 @@ git log.
 | Enum value shift | Hard-coded `type=8` expectations break when a chapter inserts an enum slot | Bump every later expectation by the offset and add a comment |
 | Forward decl warning | `struct X declared inside parameter list will not be visible` | Add a forward `struct X;` before the typedef block |
 | Heredoc shell escape | `cat >> file <<EOF ... CHEOF` mangles `'` / `(` inside the body | Use Write tool to a tmp file then `cat tmp >> target` |
-| Upstream bug | Chapter ships an `assert(x = 0)` typo, missing closing quote, double-pushed brace, etc. | Deviate, document under `docs/NN-...md`, move on |
+| Upstream bug | Chapter ships an `assert(x = 0)` typo, missing closing quote, double-pushed brace, etc. | Deviate, write down why, move on |
 
 ## Concrete incidents
 
@@ -102,7 +102,7 @@ __LINE__ default definition" in the git log.
 ### 6. Upstream code we couldn't ship verbatim
 
 The book ships some chapters with bugs that prevent the project
-from building or running. We deviate, write a `docs/NN-...md`
+from building or running. We deviate, write a
 note explaining what we changed and why, and keep going. The
 running list:
 
@@ -157,7 +157,7 @@ explicitly preserve:
 | `parser.c:684` | `sizeof` on `strncpy` source | False positive. `tmp_name` is `char[25]` and the destination was `malloc(sizeof tmp_name)` so both are 25 bytes; gcc doesn't trace through the malloc. |
 | `resolver.c:546` | `&&` within `\|\|` | Upstream verbatim. See the `// Book ships this with \|\| mis-grouped against &&; we replicate verbatim.` comment in the source. |
 | `stackframe.c:24` | `&&` within `\|\|` | Upstream verbatim, same shape as resolver.c. |
-| `preprocessor/preprocessor.c:565` | `&&` within `\|\|` | Documented in `docs/202-preprocessor-define.md`: upstream missed the parentheses; preserved so `\|\|` short-circuits any IDENTIFIER through, which is the exact behavior the rest of the chapters depend on. |
+| `preprocessor/preprocessor.c:565` | `&&` within `\|\|` | Upstream missed the parentheses; preserved so `\|\|` short-circuits any IDENTIFIER through, which is the exact behavior the rest of the chapters depend on. |
 | `helpers/vector.c:325` | control reaches end of non-void function (`vector_pop_value`) | Upstream verbatim bug - declared `int` but no `return`. Callers don't read the return value, so it's harmless in practice. |
 
 To get a quiet build (Makefile `CFLAGS`):
@@ -189,7 +189,7 @@ When a chapter test fails the routine is:
    differences from upstream are easy to spot, so are typos.
 5. **Add a deviation note.** If you have to depart from upstream
    verbatim, write the deviation into the chapter's
-   `docs/NN-...md` BEFORE you commit. Future-you reading the
+   note BEFORE you commit. Future-you reading the
    commit log will need it.
 
 ## See also

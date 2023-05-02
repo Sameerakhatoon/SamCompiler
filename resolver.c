@@ -62,7 +62,7 @@ struct resolver_scope* resolver_process_scope_current(struct resolver_process* p
 
 void resolver_runtime_needed(struct resolver_result* result, struct resolver_entity* last_entity){
     result->entity = last_entity;
-    // G06 candidate: book ANDs with `~FLAG`, clearing the bit it just
+    // book ANDs with `~FLAG`, clearing the bit it just
     // declared the path needs. We replicate verbatim; the actual fix
     // (set, not clear) belongs to whichever later chapter actually
     // exercises this path.
@@ -308,7 +308,7 @@ struct resolver_entity* resolver_create_new_cast_entity(struct resolver_process*
 // to a specific scope (custom-scope variant for closures over a
 // non-current scope; the wrapper below uses the resolver's current
 // scope).
-// G05: book stamps NODE_TYPE_VARIABLE here, breaking
+// book stamps NODE_TYPE_VARIABLE here, breaking
 // resolver_get_variable (it filters by RESOLVER_ENTITY_TYPE_VARIABLE).
 // Use the right resolver type.
 struct resolver_entity* resolver_create_new_entity_for_var_node_custom_scope(struct resolver_process* process, struct node* var_node, void* private, struct resolver_scope* scope, int offset){
@@ -477,7 +477,7 @@ struct resolver_entity* resolver_get_entity_in_scope_with_entity_type(struct res
 // "reoslver_result"). Per our convention we preserve book typos
 // EXCEPT when they actively break the build; here the typo'd names
 // would prevent every caller from compiling, so we use the correct
-// struct names. See docs/125-resolver-part6.md for the deviation.
+// struct names.
 struct resolver_entity* resolver_get_entity_for_type(struct resolver_result* result, struct resolver_process* resolver, const char* entity_name, int entity_type){
     struct resolver_scope* scope = resolver->scope.current;
     struct resolver_entity* entity = 0;

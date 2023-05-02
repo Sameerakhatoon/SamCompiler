@@ -1212,7 +1212,6 @@ void preprocessor_handle_typedef_body_for_struct_or_union(struct compile_process
             // for_brackets re-fetches it via next_token and pushes a
             // second "{" before reading the body. Consume here so
             // for_brackets starts at the first real body token. See
-            // docs/220.
             preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
             preprocessor_handle_typedef_body_for_brackets(compiler, token_vec, src_vec, overflow_use_token_vec);
             token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);

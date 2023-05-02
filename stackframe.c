@@ -16,7 +16,7 @@ struct stack_frame_element* stackframe_back(struct node* func_node){
     return vector_back_or_null(func_node->func.frame.elements);
 }
 
-// G05-flagged: the book's parens make the type check trump the
+// the book's parens make the type check trump the
 // short-circuit, so this returns the wrong thing for a NULL element.
 // We replicate verbatim and fix in g05.
 struct stack_frame_element* stackframe_back_expect(struct node* func_node, int expecting_type, const char* expecting_name){

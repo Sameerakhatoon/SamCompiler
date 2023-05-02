@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G03: switch case registration assigns each case's literal value to
+# switch case registration assigns each case's literal value to
 # parsed_switch_case.index. Verifies that parse_case re-pushes the case
 # node so the body doesn't crash, and that the switch.cases vector
 # carries indexes 1, 2, 7 in order.

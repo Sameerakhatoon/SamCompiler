@@ -13,8 +13,7 @@ resolver, code generator, and semantic validator.
 | `cprocess.c`     | `compile_process` create/teardown (input/output streams). |
 | `helpers/`       | `buffer` (dynamic byte buffer), `vector` (dynamic array). |
 | `tests/`         | Bash end-to-end tests, numbered, one per meaningful step. |
-| `docs/`          | Chapter notes and gotchas.                                |
-| `docs/gotchas/`  | Per-bug write-ups, one file per `Gxx` follow-up commit.   |
+| `docs/`          | User guides.                                              |
 
 ## Build
 

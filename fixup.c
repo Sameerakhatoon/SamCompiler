@@ -11,7 +11,7 @@
 
 struct fixup_system* fixup_sys_new(void){
     struct fixup_system* system = calloc(1, sizeof(struct fixup_system));
-    // G04: book sizes the vector for inline structs but pushes pointers,
+    // book sizes the vector for inline structs but pushes pointers,
     // which makes the system unusable. Each slot holds a struct fixup*.
     system->fixups = vector_create(sizeof(struct fixup*));
     return system;
@@ -68,7 +68,7 @@ struct fixup* fixup_register(struct fixup_system* system, struct fixup_config* c
     struct fixup* fixup = calloc(1, sizeof(struct fixup));
     memcpy(&fixup->config, config, sizeof(struct fixup_config));
     fixup->system = system;
-    // G04: push the pointer, not the struct contents.
+    // push the pointer, not the struct contents.
     vector_push(system->fixups, &fixup);
     return fixup;
 }
@@ -89,7 +89,7 @@ bool fixups_resolve(struct fixup_system* system){
     fixup_start_iteration(system);
     struct fixup* fixup = fixup_next(system);
     while(fixup){
-        // G04: book `continue`s without advancing the iterator when a
+        // book `continue`s without advancing the iterator when a
         // fixup is already resolved, which spins forever after the
         // first resolve. Walk past it instead.
         if(fixup->flags & FIXUP_FLAG_RESOLVED){

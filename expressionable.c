@@ -213,7 +213,7 @@ void expressionable_parser_reorder_expression(struct expressionable* expressiona
     // Upstream verbatim is `assert(left_node_type = 0)` (typo:
     // assignment, not comparison) which fires unconditionally. Both
     // node-type checks here just guard against negative junk, so
-    // we keep the right-side >= 0 form for both. See docs/194.
+    // we keep the right-side >= 0 form for both.
     assert(left_node_type >= 0);
     assert(right_node_type >= 0);
 

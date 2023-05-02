@@ -3,7 +3,7 @@
 # gains a parent_process param; compile_file now stashes lex output
 # in token_vec_original and runs preprocessor_run, which copies
 # tokens into token_vec via the default switch case (deviation from
-# upstream verbatim, see docs/200).
+# upstream verbatim).
 #
 # Adds compile_process->token_vec_original, ->include_dirs,
 # ->preprocessor; struct preprocessor / preprocessor_definition /

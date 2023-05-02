@@ -545,8 +545,7 @@ static int parse_exp(struct history* history){
 }
 
 // g01: assert compares a token's type with TOKEN_TYPE_IDENTIFIER,
-// not NODE_TYPE_IDENTIFIER. The book ships this wrong; see
-// docs/gotchas/G01-token-type-vs-node-type.md.
+// not NODE_TYPE_IDENTIFIER. The book ships this wrong.
 static void parse_identifier(struct history* history){
     assert(token_peek_next()->type == TOKEN_TYPE_IDENTIFIER);
     parse_single_token_to_node();
@@ -1720,7 +1719,7 @@ static void parse_case(struct history* history){
 
     struct node* case_node = node_pop();
     parser_register_case(history, case_node);
-    // G03: book forgets to push the case node back, so the enclosing
+    // book forgets to push the case node back, so the enclosing
     // body's `node_pop()` blows up on the first `case` it sees. Push
     // it back so the case appears as a body statement too.
     node_push(case_node);

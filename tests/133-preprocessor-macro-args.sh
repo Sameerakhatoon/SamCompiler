@@ -86,7 +86,7 @@ int main(void){
     // Upstream pushes arg strings via `vector_push(args, (void*)next_token->sval)`
     // which copies the first sizeof(char*) bytes of the string contents
     // into the vector slot rather than the pointer. So the stored slot is
-    // garbage and dereferencing it would crash. We just count, per docs/203.
+    // garbage and dereferencing it would crash. We just count.
 
     printf("defs=%d name=%d type=%d argsN=%d valN=%d\n",
         n_defs, name_ok, type_ok, args_n, val_n);
