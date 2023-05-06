@@ -3,6 +3,19 @@
 #include "helpers/vector.h"
 #include "compiler.h"
 
+static const char* main_x86_link_cmd(void);
+
+// gcc-multilib (needed by `gcc -m32`) cannot be installed next to the
+// aarch64 and riscv64 cross gcc's on Ubuntu, so prefer the i686 cross
+// gcc when it is there. -static because the cross package ships no
+// i386 dynamic loader on the host.
+static const char* main_x86_link_cmd(void){
+    if(system("command -v i686-linux-gnu-gcc >/dev/null 2>&1") == 0){
+        return "i686-linux-gnu-gcc -static";
+    }
+    return "gcc -m32";
+}
+
 // ch143: CLI driver. Reads input/output paths from argv and decides
 // whether to run NASM + link (default) or just stop at the .asm.
 int main(int argc, char** argv){
@@ -39,8 +52,8 @@ int main(int argc, char** argv){
                 "nasm -f elf32 %s -o %s", output_file, nasm_output_file);
         } else {
             snprintf(nasm_cmd, sizeof(nasm_cmd),
-                "nasm -f elf32 %s -o %s && gcc -m32 %s -o %s",
-                output_file, nasm_output_file, nasm_output_file, output_file);
+                "nasm -f elf32 %s -o %s && %s %s -o %s",
+                output_file, nasm_output_file, main_x86_link_cmd(), nasm_output_file, output_file);
         }
         printf("%s\n", nasm_cmd);
         int rc = system(nasm_cmd);
