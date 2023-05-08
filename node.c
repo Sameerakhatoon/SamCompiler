@@ -174,8 +174,10 @@ struct node* make_function_node(struct datatype* ret_type, const char* name,
         .func.args.vector      = arguments,
         .func.body_n           = body_node,
         .func.rtype            = *ret_type,
-        // Default stack_addition = sizeof(void*) for the return EIP.
-        .func.args.stack_addition = DATA_SIZE_DDWORD,
+        // Default stack_addition = the frame header between the frame
+        // pointer and the first argument (saved ebp + return eip on
+        // x86). Taken from the target.
+        .func.args.stack_addition = target_current()->frame_header_size,
     });
     return func_node;
 }

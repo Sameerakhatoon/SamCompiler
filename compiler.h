@@ -357,9 +357,51 @@ struct preprocessor_definition* preprocessor_definition_create_native(const char
     PREPROCESSOR_DEFINITION_NATIVE_CALL_VALUE    value,
     struct preprocessor* preprocessor);
 
+// everything that differs between the machines we emit code
+// for. One static instance per target lives in target.c; the
+// compile_process points at the one it compiles for, and include
+// processes inherit it from their parent.
+struct target {
+    const char* name;
+
+    // Data model. int stays 4 bytes on every target.
+    size_t pointer_size;
+    size_t long_size;
+
+    // Bytes one push of the codegen expression stack takes.
+    size_t stack_slot_size;
+    // Bytes between the frame pointer and the first argument slot
+    // (saved frame pointer + return address).
+    size_t frame_header_size;
+    // Bytes one argument occupies at the callee side.
+    size_t arg_slot_size;
+    size_t stack_align;
+    // Arguments passed in registers. 0 means all on the stack.
+    int    max_reg_args;
+
+    // Emits the asm for a whole translation unit.
+    int (*backend)(struct compile_process* process);
+
+    // printf formats run by the driver: asm_cmd takes (asm, obj),
+    // link_cmd takes (obj, out). link_fallback_cmd is used when the
+    // first word of link_cmd is not on the PATH.
+    const char* asm_cmd;
+    const char* link_cmd;
+    const char* link_fallback_cmd;
+    // Prefix for running a linked binary on the host, "" if native.
+    const char* run_cmd;
+};
+
+const struct target* target_x86(void);
+const struct target* target_current(void);
+void                 target_set_current(const struct target* target);
+
 struct compile_process {
     // Flags controlling how this file should be compiled.
     int flags;
+
+    // the machine this file is compiled for.
+    const struct target* target;
 
     struct pos                        pos;
     struct compile_process_input_file cfile;
@@ -548,7 +590,9 @@ struct stack_frame_element {
     struct stack_frame_data data;
 };
 
-#define STACK_PUSH_SIZE 4
+// one expression-stack push, taken from the current target
+// (4 bytes on x86).
+#define STACK_PUSH_SIZE (target_current()->stack_slot_size)
 
 enum {
     STACK_FRAME_ELEMENT_TYPE_LOCAL_VARIABLE,

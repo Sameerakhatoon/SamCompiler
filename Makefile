@@ -1,6 +1,6 @@
 OBJECTS  = ./build/compiler.o ./build/cprocess.o ./build/validator.o \
            ./build/lexer.o ./build/lex_process.o ./build/token.o \
-           ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/resolver.o ./build/rdefault.o ./build/codegen.o ./build/stackframe.o ./build/fixup.o ./build/array.o ./build/helper.o \
+           ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/resolver.o ./build/rdefault.o ./build/codegen.o ./build/target.o ./build/stackframe.o ./build/fixup.o ./build/array.o ./build/helper.o \
            ./build/preprocessor.o ./build/native.o \
            ./build/static-include.o ./build/static-includes/stdarg.o ./build/static-includes/stddef.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o
@@ -57,6 +57,9 @@ all: ./main
 
 ./build/codegen.o: ./codegen.c ./compiler.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./codegen.c -o ./build/codegen.o
+
+./build/target.o: ./target.c ./compiler.h
+	gcc ${INCLUDES} ${CFLAGS} -c ./target.c -o ./build/target.o
 
 ./build/stackframe.o: ./stackframe.c ./compiler.h ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./stackframe.c -o ./build/stackframe.o

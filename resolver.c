@@ -632,14 +632,16 @@ void resolver_build_function_call_arguments(struct resolver_process* resolver, s
         resolver_build_function_call_arguments(resolver, argument_node->parenthesis.exp, root_func_call_entity, total_size_out);
     } else if(node_valid(argument_node)){
         vector_push(root_func_call_entity->func_call_data.arguments, &argument_node);
-        size_t stack_change = DATA_SIZE_DWORD;
+        // every argument takes at least one target arg slot.
+        size_t arg_slot_size = resolver->compiler->target->arg_slot_size;
+        size_t stack_change = arg_slot_size;
         struct datatype* dtype = resolver_get_datatype(resolver, argument_node);
         if(dtype){
             stack_change = datatype_element_size(dtype);
-            if(stack_change < DATA_SIZE_DWORD){
-                stack_change = DATA_SIZE_DWORD;
+            if(stack_change < arg_slot_size){
+                stack_change = arg_slot_size;
             }
-            stack_change = align_value(stack_change, DATA_SIZE_DWORD);
+            stack_change = align_value(stack_change, arg_slot_size);
         }
         *total_size_out += stack_change;
     }

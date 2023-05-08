@@ -749,7 +749,8 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
         datatype_out->size = DATA_SIZE_DWORD;
     } else if(S_EQ(datatype_token->sval, "long")){
         datatype_out->type = DATA_TYPE_LONG;
-        datatype_out->size = DATA_SIZE_DWORD;
+        // 4 bytes on ILP32 x86, 8 on the LP64 targets.
+        datatype_out->size = current_process->target->long_size;
     } else if(S_EQ(datatype_token->sval, "float")){
         datatype_out->type = DATA_TYPE_FLOAT;
         datatype_out->size = DATA_SIZE_DWORD;
@@ -832,13 +833,16 @@ static void parser_datatype_init(struct token* datatype_token,
                                        datatype_out, pointer_depth, expected_type);
     datatype_out->type_str = datatype_token->sval;
 
-    // 64-bit `long long` not supported; warn and clamp to 32-bit.
+    // `long long` is clamped to the target's long. On x86 that is 32
+    // bits, so warn; on the LP64 targets long is already 64 bits.
     if(S_EQ(datatype_token->sval, "long")
        && datatype_secondary_token
        && S_EQ(datatype_secondary_token->sval, "long")){
-        compiler_warning(current_process,
-            "Our compiler does not support 64 bit longs, therefore your long long is defaulting to 32 bits\n");
-        datatype_out->size = DATA_SIZE_DWORD;
+        if(current_process->target->long_size < DATA_SIZE_DDWORD){
+            compiler_warning(current_process,
+                "Our compiler does not support 64 bit longs, therefore your long long is defaulting to 32 bits\n");
+        }
+        datatype_out->size = current_process->target->long_size;
     }
 }
 
@@ -1161,9 +1165,9 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
 
     // For functions returning struct/union by value, the caller pushes
     // a hidden first arg (pointer to result), so the real args start
-    // one slot further along.
+    // one slot further along. One target arg slot.
     if(datatype_is_struct_or_union(ret_type)){
-        function_node->func.args.stack_addition += DATA_SIZE_DWORD;
+        function_node->func.args.stack_addition += current_process->target->arg_slot_size;
     }
 
     expect_op("(");

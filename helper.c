@@ -267,7 +267,8 @@ struct datatype datatype_for_string(void){
     dtype.type_str      = "char";
     dtype.flags        |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_LITERAL;
     dtype.pointer_depth = 1;
-    dtype.size          = DATA_SIZE_DWORD;
+    // a pointer, so the target pointer size.
+    dtype.size          = target_current()->pointer_size;
     return dtype;
 }
 

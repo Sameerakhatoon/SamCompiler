@@ -53,6 +53,10 @@ struct compile_process* compile_process_create(const char* filename, const char*
     }
 
     process->flags                = flags;
+    // includes compile for the same machine as their parent;
+    // a top-level process takes the current target (x86 unless the
+    // driver chose another).
+    process->target               = parent_process ? parent_process->target : target_current();
     process->cfile.fp             = file;
     process->cfile.abs_path       = filename;
     process->ofile                = out_file;
