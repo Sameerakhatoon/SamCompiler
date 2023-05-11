@@ -352,6 +352,7 @@ int                  preprocessor_run(struct compile_process* compiler);
 void                  preprocessor_create_definitions(struct preprocessor* preprocessor);
 struct token*         preprocessor_previous_token(struct compile_process* compiler);
 struct vector*        preprocessor_build_value_vector_for_integer(int value);
+struct preprocessor_definition* preprocessor_definition_create(const char* name, struct vector* value_vec, struct vector* arguments, struct preprocessor* preprocessor);
 struct preprocessor_definition* preprocessor_definition_create_native(const char* name,
     PREPROCESSOR_DEFINITION_NATIVE_CALL_EVALUATE evaluate,
     PREPROCESSOR_DEFINITION_NATIVE_CALL_VALUE    value,
@@ -390,9 +391,19 @@ struct target {
     const char* link_fallback_cmd;
     // Prefix for running a linked binary on the host, "" if native.
     const char* run_cmd;
+
+    // macros the preprocessor predefines for this target,
+    // ended by a { 0 } entry.
+    const struct target_macro* macros;
+};
+
+struct target_macro {
+    const char* name;
+    int         value;
 };
 
 const struct target* target_x86(void);
+const struct target* target_for_name(const char* name);
 const struct target* target_current(void);
 void                 target_set_current(const struct target* target);
 

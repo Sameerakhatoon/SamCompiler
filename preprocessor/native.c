@@ -29,9 +29,24 @@ struct vector* preprocessor_line_macro_value(struct preprocessor_definition* def
     return preprocessor_build_value_vector_for_integer(previous_token->pos.line);
 }
 
+// the target's predefined macros (__i386__, __x86_64__,
+// __aarch64__, __riscv ...). This runs from preprocessor_create
+// before preprocessor->compiler is set, and only for the top-level
+// process, whose target is the current one.
+static void preprocessor_create_target_definitions(struct preprocessor* preprocessor)
+{
+    const struct target_macro* macro = target_current()->macros;
+    while (macro && macro->name)
+    {
+        preprocessor_definition_create(macro->name, preprocessor_build_value_vector_for_integer(macro->value), NULL, preprocessor);
+        macro++;
+    }
+}
+
 void preprocessor_create_definitions(struct preprocessor* preprocessor)
 {
     preprocessor_definition_create_native("__LINE__", preprocessor_line_macro_evaluate, preprocessor_line_macro_value, preprocessor);
+    preprocessor_create_target_definitions(preprocessor);
 }
 
 // ch236: register a C-implemented native function as a symbol so the
