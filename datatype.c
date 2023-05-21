@@ -64,7 +64,11 @@ bool datatype_is_struct_or_union_non_pointer(struct datatype* dtype){
 
 // ch237: set a datatype struct to void. Native functions use this as a
 // default return type since we will never look at it from the caller.
+// clear the whole struct first. The natives pass uninitialised
+// stack datatypes here, and codegen used to read their leftover
+// flags.
 void datatype_set_void(struct datatype* dtype){
+    memset(dtype, 0, sizeof(struct datatype));
     dtype->type     = DATA_TYPE_VOID;
     dtype->type_str = "void";
     dtype->size     = 0;

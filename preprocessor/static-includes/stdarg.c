@@ -28,7 +28,8 @@ void native_va_start(struct generator* generator, struct native_function* func, 
     struct resolver_entity* list_arg_entity = resolver_result_entity_root(result);
     struct generator_entity_address address_out;
     generator->entity_address(generator, list_arg_entity, &address_out);
-    generator->asm_push("mov dword [%s], ebx", address_out.address);
+    // the store itself is target-specific.
+    generator->va_start_store(generator, address_out.address);
     generator->asm_push("; va_start end for variable %s", stack_arg->sval);
 
     struct datatype void_datatype;
@@ -58,13 +59,9 @@ void native__builtin_va_arg(struct generator* generator, struct native_function*
         compiler_error(compiler, "native__builtin_va_arg expects a second argument to be numeric size of variable argument. Use the macro va_arg for automation");
     }
 
-    generator->asm_push("add dword [ebx], %i", size_argument->llnum);
-    generator->asm_push("mov dword eax, [ebx]");
-    struct datatype void_dtype;
-    datatype_set_void(&void_dtype);
-    void_dtype.pointer_depth++;
-    void_dtype.flags |= DATATYPE_FLAG_IS_POINTER;
-    generator->ret(&void_dtype, "dword [eax]");
+    // stepping the list and loading the argument is
+    // target-specific (slot size, registers).
+    generator->va_arg_fetch(generator, size_argument->llnum);
     generator->asm_push("; native__builtin_va_arg end");
 }
 

@@ -36,6 +36,13 @@ static const struct target_macro target_riscv64_macros[] = {
     { 0 },
 };
 
+// backends. codegen_x86.c is the original codegen.c renamed.
+static const struct codegen_backend codegen_backend_x86 = {
+    .name           = "x86",
+    .generate       = codegen_x86,
+    .frame_register = "ebp",
+};
+
 static const struct target target_x86_desc = {
     .name              = "x86",
     .pointer_size      = DATA_SIZE_DWORD,
@@ -47,7 +54,7 @@ static const struct target target_x86_desc = {
     .stack_align       = C_STACK_ALIGNMENT,
     // cdecl: every argument goes on the stack.
     .max_reg_args      = 0,
-    .backend           = codegen,
+    .backend           = &codegen_backend_x86,
     .asm_cmd           = "nasm -f elf32 %s -o %s",
     //
     .link_cmd          = "i686-linux-gnu-gcc -static %s -o %s",

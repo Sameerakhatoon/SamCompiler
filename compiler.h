@@ -236,6 +236,14 @@ typedef void (*GENERATOR_GENERATE_EXPRESSION)(struct generator* generator, struc
 typedef void (*GENERATOR_ENTITY_ADDRESS)(struct generator* generator, struct resolver_entity* entity, struct generator_entity_address* address_out);
 typedef void (*GENERATOR_END_EXPRESSION)(struct generator* generator);
 typedef void (*GENERATOR_FUNCTION_RETURN)(struct datatype* dtype, const char* fmt, ...);
+// per-target halves of the stdarg natives.
+//   va_start_store: the address of the last named parameter is in the
+//                   backend's address register; store it at list_address.
+//   va_arg_fetch:   the address of the va_list is in the address
+//                   register; step it past one argument of `size`
+//                   bytes and push that argument through ret.
+typedef void (*GENERATOR_VA_START_STORE)(struct generator* generator, const char* list_address);
+typedef void (*GENERATOR_VA_ARG_FETCH)(struct generator* generator, int size);
 
 struct generator {
     ASM_PUSH_PROTOTYPE            asm_push;
@@ -243,6 +251,8 @@ struct generator {
     GENERATOR_END_EXPRESSION      end_exp;
     GENERATOR_ENTITY_ADDRESS      entity_address;
     GENERATOR_FUNCTION_RETURN     ret;
+    GENERATOR_VA_START_STORE      va_start_store;
+    GENERATOR_VA_ARG_FETCH        va_arg_fetch;
 
     struct compile_process* compiler;
 
@@ -380,8 +390,8 @@ struct target {
     // Arguments passed in registers. 0 means all on the stack.
     int    max_reg_args;
 
-    // Emits the asm for a whole translation unit.
-    int (*backend)(struct compile_process* process);
+    // the code generator, see struct codegen_backend.
+    const struct codegen_backend* backend;
 
     // printf formats run by the driver: asm_cmd takes (asm, obj),
     // link_cmd takes (obj, out). link_fallback_cmd is used when the
@@ -395,6 +405,14 @@ struct target {
     // macros the preprocessor predefines for this target,
     // ended by a { 0 } entry.
     const struct target_macro* macros;
+};
+
+// what a code generator provides. codegen() calls generate;
+// rdefault.c formats stack addresses as <frame_register><offset>.
+struct codegen_backend {
+    const char* name;
+    int (*generate)(struct compile_process* process);
+    const char* frame_register;
 };
 
 struct target_macro {
@@ -1012,6 +1030,8 @@ enum {
     EXPRESSION_IS_ASSIGNMENT | IS_ALONE_STATEMENT)
 
 int                    codegen(struct compile_process* process);
+// the backends.
+int                    codegen_x86(struct compile_process* process);
 struct code_generator* codegenerator_new(struct compile_process* process);
 
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.

@@ -23,7 +23,7 @@ int main(void){
         t->pointer_size, t->long_size, t->stack_slot_size,
         t->frame_header_size, t->arg_slot_size, t->stack_align,
         t->max_reg_args, target_current() == t, p->target == t,
-        t->backend == codegen);
+        t->backend->generate == codegen_x86);
     return 0;
 }
 EOF2
