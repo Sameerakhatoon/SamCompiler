@@ -43,6 +43,13 @@ static const struct codegen_backend codegen_backend_x86 = {
     .frame_register = "ebp",
 };
 
+// the x86_64 backend, built from codegen_x86.c.
+static const struct codegen_backend codegen_backend_x86_64 = {
+    .name           = "x86_64",
+    .generate       = codegen_x86_64,
+    .frame_register = "rbp",
+};
+
 static const struct target target_x86_desc = {
     .name              = "x86",
     .pointer_size      = DATA_SIZE_DWORD,
@@ -75,7 +82,7 @@ static const struct target target_x86_64_desc = {
     .stack_align       = C_STACK_ALIGNMENT,
     // SysV: rdi, rsi, rdx, rcx, r8, r9
     .max_reg_args      = 6,
-    .backend           = 0,
+    .backend           = &codegen_backend_x86_64,
     .asm_cmd           = "nasm -f elf64 %s -o %s",
     // -no-pie: calls take the callee's address with `lea r11, [name]`
     // even for libc functions such as printf. A PIE would have to go

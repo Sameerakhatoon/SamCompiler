@@ -979,6 +979,13 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
         offset = (int)stack_addition;
         if(last_entity){
             offset = (int)datatype_size(&variable_node(last_entity->node)->var.type);
+            // on the register-argument targets every argument
+            // was spilled into its own 8-byte home-area slot, so step
+            // by whole slots. x86 keeps the exact type size (its
+            // output is locked).
+            if(current_process->target->max_reg_args > 0){
+                offset = align_value(offset, current_process->target->arg_slot_size);
+            }
         }
     }
 
