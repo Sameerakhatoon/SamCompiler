@@ -50,6 +50,13 @@ static const struct codegen_backend codegen_backend_x86_64 = {
     .frame_register = "rbp",
 };
 
+// the AArch64 backend, GNU as syntax.
+static const struct codegen_backend codegen_backend_aarch64 = {
+    .name           = "aarch64",
+    .generate       = codegen_aarch64,
+    .frame_register = "x29",
+};
+
 static const struct target target_x86_desc = {
     .name              = "x86",
     .pointer_size      = DATA_SIZE_DWORD,
@@ -106,7 +113,7 @@ static const struct target target_aarch64_desc = {
     .stack_align       = C_STACK_ALIGNMENT,
     // AAPCS64: x0-x7
     .max_reg_args      = 8,
-    .backend           = 0,
+    .backend           = &codegen_backend_aarch64,
     .asm_cmd           = "aarch64-linux-gnu-as %s -o %s",
     // -static: qemu-user then needs no aarch64 sysroot.
     .link_cmd          = "aarch64-linux-gnu-gcc -static %s -o %s",

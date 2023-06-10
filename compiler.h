@@ -1033,6 +1033,7 @@ int                    codegen(struct compile_process* process);
 // the backends.
 int                    codegen_x86(struct compile_process* process);
 int                    codegen_x86_64(struct compile_process* process);
+int                    codegen_aarch64(struct compile_process* process);
 struct code_generator* codegenerator_new(struct compile_process* process);
 
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.

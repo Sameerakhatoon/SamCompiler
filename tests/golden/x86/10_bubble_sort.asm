@@ -73,11 +73,11 @@ mov dword [ebp-8], eax
 push dword [ebp-8]
 push dword [ebp+8]
 push dword 1
-push dword [ebp-4]
 pop ecx
 pop eax
 sub eax, ecx
 push eax
+push dword [ebp-4]
 pop ecx
 pop eax
 sub eax, ecx
