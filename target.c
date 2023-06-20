@@ -57,6 +57,13 @@ static const struct codegen_backend codegen_backend_aarch64 = {
     .frame_register = "x29",
 };
 
+// the RISC-V backend, GNU as syntax.
+static const struct codegen_backend codegen_backend_riscv64 = {
+    .name           = "riscv64",
+    .generate       = codegen_riscv64,
+    .frame_register = "s0",
+};
+
 static const struct target target_x86_desc = {
     .name              = "x86",
     .pointer_size      = DATA_SIZE_DWORD,
@@ -135,7 +142,7 @@ static const struct target target_riscv64_desc = {
     .stack_align       = C_STACK_ALIGNMENT,
     // LP64 psABI: a0-a7
     .max_reg_args      = 8,
-    .backend           = 0,
+    .backend           = &codegen_backend_riscv64,
     .asm_cmd           = "riscv64-linux-gnu-as %s -o %s",
     .link_cmd          = "riscv64-linux-gnu-gcc -static %s -o %s",
     .link_fallback_cmd = 0,
