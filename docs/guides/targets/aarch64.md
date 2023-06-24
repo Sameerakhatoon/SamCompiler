@@ -192,24 +192,29 @@ binfmt.
 
 ## 8. Run the samples
 
-`samples/run_all.sh ARCH=aarch64` arrives with the samples runner. Until then
-`tests/211-aarch64-run.sh` builds and runs every sample and every
-golden input under qemu-aarch64. Run by hand, all 54 pass:
-
 ```
-01_return_const exit=42 expected=42 OK
-...
-25_struct_return exit=9 expected=9 OK
-...
-37_printf exit=0 expected=0 OK out=[v=42 s=hi]
-...
-10_bubble_sort exit=1 expected=1 OK
-...
-14_token_scanner exit=4 expected=4 OK
-passed: 54 failed: 0
+$ bash samples/run_all.sh ARCH=aarch64
+01_arithmetic_control_flow       exit=55  expected=55  OK
+02_preprocessor_kitchen_sink     exit=42  expected=42  OK
+03_varargs_sum                   exit=0   expected=0   OK
+04_struct_offsetof               exit=8   expected=8   OK
+05_typedef_pointers              exit=99  expected=99  OK
+06_switch_and_break              exit=29  expected=29  OK
+07_include_user_header           exit=4   expected=4   OK
+08_array_indexing                exit=25  expected=25  OK
+09_factorial_recursion           exit=120 expected=120 OK
+10_bubble_sort                   exit=1   expected=1   OK
+11_struct_linked_list            exit=60  expected=60  OK
+12_bit_manipulation              exit=7   expected=7   OK
+13_string_hash                   exit=13  expected=13  OK
+14_token_scanner                 exit=4   expected=4   OK
+
+passed: 14   failed: 0
 ```
 
-(Sample 10 failed was found; see Troubleshooting.)
+The runner starts each binary with `qemu-aarch64`. `ARCH=all` runs all four targets and ends with a per-target summary. Golden inputs (`tests/golden/inputs/`) are run by this target's run test in section 9.
+
+A program whose answer depends on pointer size can carry `// EXPECTED EXIT lp64: N`; the 64-bit targets use it instead of `EXPECTED EXIT` (`tests/golden/inputs/39_pointer_size.c`: 8 on x86, 16 here). None of the samples needs one.
 
 ## 9. Run the tests
 

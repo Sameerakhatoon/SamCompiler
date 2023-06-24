@@ -5,7 +5,10 @@ compiler end to end. Each carries an `// EXPECTED EXIT: N`
 comment so you can compare the produced binary's exit code
 against the intended value.
 
-All samples are verified passing on the current build (14/14).
+All samples pass on all four targets (x86, x86_64, aarch64,
+riscv64): 14/14 each. None of them needs a separate LP64 answer;
+a program that did would add `// EXPECTED EXIT lp64: N` (see
+`tests/golden/inputs/39_pointer_size.c`).
 
 See `docs/guides/FEATURE_TESTING.md` for the full workflow.
 
@@ -37,25 +40,50 @@ echo "exit=$?"
 ```
 
 The exit code should match the `EXPECTED EXIT` line in the source.
-Producing a runnable binary requires the 32-bit gcc toolchain
-(`sudo apt install gcc-multilib`); without it the `./main`
-invocation will report `Issue assemblign...` after emitting the
-asm and the binary won't appear.
+The x86 link uses `i686-linux-gnu-gcc -static` (package
+`gcc-i686-linux-gnu`); without it, or `gcc -m32`, the `./main`
+invocation reports `Issue assemblign...` after emitting the asm
+.
+
+For another target add `-target=` first; the cross targets run
+under qemu-user:
+
+```
+./main -target=aarch64 samples/01_arithmetic_control_flow.c /tmp/01.a64
+qemu-aarch64 /tmp/01.a64
+echo "exit=$?"
+```
+
+Toolchains per target: `docs/guides/targets/`.
 
 ## Run them all
 
 A runner ships in this directory:
 
 ```
-bash samples/run_all.sh           # from repo root
-bash run_all.sh                   # from inside samples/
+bash samples/run_all.sh                 # x86, from repo root
+bash run_all.sh                         # x86, from inside samples/
+bash samples/run_all.sh ARCH=riscv64    # one target
+bash samples/run_all.sh ARCH=all        # x86, x86_64, aarch64, riscv64
 ```
 
 It rebuilds `./main` if missing, compiles each sample, runs the
-produced binary, and tabulates exit-code vs expected. The final
-line is `passed: N   failed: M`; non-zero `failed` -> exit code 1.
+produced binary (natively for x86 and x86_64, under qemu-aarch64 /
+qemu-riscv64 for the others), and tabulates exit-code vs expected.
+Each target ends with `passed: N   failed: M`; `ARCH=all` adds a
+summary. Any failure -> exit code 1.
 
-Expected output on a clean tree:
+`ARCH=all` ends with:
+
+```
+== summary
+x86      passed: 14  failed: 0
+x86_64   passed: 14  failed: 0
+aarch64  passed: 14  failed: 0
+riscv64  passed: 14  failed: 0
+```
+
+Expected output for one target on a clean tree:
 
 ```
 01_arithmetic_control_flow       exit=55  expected=55  OK
