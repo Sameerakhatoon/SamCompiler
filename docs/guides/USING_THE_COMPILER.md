@@ -16,18 +16,21 @@ my.c
 |                                  |
 |   lex     -> tokens              |
 |   preproc -> tokens (expanded)   |
-|   validate                       |
 |   parse   -> AST                 |
-|   codegen -> NASM text           |
+|   validate                       |
+|   codegen -> asm text            |
+|     (backend chosen by -target)  |
 +----------------------------------+
   |
-  |  writes:  my.bin   (NASM source, temporarily named .bin)
+  |  writes:  my.bin   (asm source, temporarily named .bin)
   v
 +----------------------------------+
-| main.c then shells out:          |
-|   nasm -f elf32 my.bin -o my.bin.o   (ELF32 .o file)
-|   gcc -m32 my.bin.o -o my.bin        (links to 32-bit ELF binary,
-|                                       overwriting the .asm at my.bin)
+| main.c then shells out (x86):    |
+|   nasm -f elf32 my.bin -o my.bin.o          (ELF32 .o file)
+|   i686-linux-gnu-gcc -static my.bin.o -o my.bin
+|                       (links the binary, overwriting the asm
+|                        at my.bin; gcc -m32 if the i686 cross
+|                        gcc is missing,)
 +----------------------------------+
   |
   v
@@ -36,7 +39,9 @@ my.bin.o  (intermediate object; can delete)
 ```
 
 That's it. Five passes inside `./main`, then two child processes
-(`nasm` and `gcc -m32`).
+(the assembler and the linker). The other targets swap the
+backend, the assembler and the linker; see "Choosing a target"
+below.
 
 ## What main.c actually does
 
@@ -74,56 +79,99 @@ and runs the five passes inside `./main`:
    token stream, handles `#define`, `#include`, `#ifdef`, macros,
    `##`, `#`, native functions like `__LINE__` / `va_start`.
    Output is a fresh token vector with everything expanded.
-4. **`validate()`** - validator. Catches duplicate function /
+4. **`parse()`** - parser. Consumes the expanded tokens, builds
+   an AST (NODE_TYPE_*). Resolves operator precedence.
+5. **`validate()`** - validator. Runs on the AST the parser just
+   built (this guide used to list it before `parse()`, which is
+   not the order in `compile_file`). Catches duplicate function /
    variable / struct / union definitions, void-return-with-value
    errors, missing identifiers. Lives in `validator.c`.
-5. **`parse()`** - parser. Consumes the expanded tokens, builds
-   an AST (NODE_TYPE_*). Resolves operator precedence.
-6. **`codegen()`** - codegen. Walks the AST and emits NASM text
-   directly to `output_file`. Per-function prologues/epilogues,
-   stackframe tracking, string-table dedup, switch jump tables,
-   indirect-call slots - all here.
+6. **`codegen()`** - codegen. `codegen.c` hands the AST to the
+   target's backend (`codegen_x86.c`, `codegen_x86_64.c`,
+   `codegen_aarch64.c` or `codegen_riscv64.c`), which emits asm
+   text directly to `output_file`. Per-function
+   prologues/epilogues, stackframe tracking, string-table dedup,
+   switch compare chains, calls - all in the backend.
 
 If `res == COMPILER_FILE_COMPILED_OK`, prints
 `everything compiled fine`. Otherwise prints `Compile failed`
 and returns.
 
-Then the post-codegen step (still inside `main.c`):
+Then the post-codegen step (still inside `main.c`). Since the
+-target flag, the commands come from the target descriptor in `target.c`
+(`asm_cmd`, `link_cmd`, `link_fallback_cmd`):
 
 ```c
 if(compile_flags & COMPILE_PROCESS_EXECUTE_NASM){
-    snprintf(nasm_output_file, ..., "%s.o", output_file);
+    snprintf(nasm_output_file, sizeof(nasm_output_file), "%s.o", output_file);
+    snprintf(asm_cmd, sizeof(asm_cmd), target->asm_cmd, output_file, nasm_output_file);
     if(compile_flags & COMPILE_PROCESS_EXPORT_AS_OBJECT){
         // object-mode: stop after the assembler
-        snprintf(nasm_cmd, ..., "nasm -f elf32 %s -o %s",
-                 output_file, nasm_output_file);
+        snprintf(nasm_cmd, sizeof(nasm_cmd), "%s", asm_cmd);
     } else {
         // default: assemble, then link
-        snprintf(nasm_cmd, ...,
-                 "nasm -f elf32 %s -o %s && gcc -m32 %s -o %s",
-                 output_file, nasm_output_file,
-                 nasm_output_file, output_file);
+        snprintf(link_cmd, sizeof(link_cmd), main_link_cmd(target), nasm_output_file, output_file);
+        snprintf(nasm_cmd, sizeof(nasm_cmd), "%s && %s", asm_cmd, link_cmd);
     }
+    printf("%s\n", nasm_cmd);
     int rc = system(nasm_cmd);
     if(rc != 0){
         printf("Issue assemblign the assembly file with NASM and linking with gcc\n");
         // "assemblign" is the upstream typo, preserved verbatim.
         return rc;
     }
+    // cross targets: "run with: qemu-aarch64 <out>" and similar
 }
 ```
 
 Key thing to understand: **`output_file` is reused at three
 different points in the pipeline.** Initially the compiler
-writes the NASM source there. `nasm` then reads from it and
-writes the `.o` to `output_file + ".o"`. Finally `gcc -m32`
-reads the `.o` and writes the linked ELF binary back to
-`output_file`, OVERWRITING the asm. So at the end:
+writes the asm source there. The assembler then reads from it and
+writes the `.o` to `output_file + ".o"`. Finally the linker reads
+the `.o` and writes the linked ELF binary back to `output_file`,
+OVERWRITING the asm. So at the end (x86):
 
 | `option` arg | Contents of `output_file` | Contents of `output_file.o` |
 |---|---|---|
 | (omitted, default) | linked 32-bit ELF executable | ELF32 object |
 | `object` | NASM source | ELF32 object |
+
+## Choosing a target
+
+```
+./main [-target=x86|x86_64|aarch64|riscv64] <input.c> <output_path> [object]
+```
+
+`-target=` must come before the file names. Without it the target
+is `x86` and everything behaves as before the multi-target work.
+
+| `-target=` | Output | Assembler | Linker | Run | Guide |
+|---|---|---|---|---|---|
+| `x86` | NASM, 32-bit | `nasm -f elf32` | `i686-linux-gnu-gcc -static` (else `gcc -m32`) | native | [x86](targets/x86.md) |
+| `x86_64` | NASM, 64-bit, `default rel` | `nasm -f elf64` | `gcc -no-pie` | native | [x86_64](targets/x86_64.md) |
+| `aarch64` | GNU as | `aarch64-linux-gnu-as` | `aarch64-linux-gnu-gcc -static` | `qemu-aarch64` | [aarch64](targets/aarch64.md) |
+| `riscv64` | GNU as | `riscv64-linux-gnu-as` | `riscv64-linux-gnu-gcc -static` | `qemu-riscv64` | [riscv64](targets/riscv64.md) |
+
+For the cross targets the driver prints how to run the result:
+
+```
+$ ./main -target=aarch64 /tmp/g/add.c /tmp/g/add_a64
+...
+everything compiled fine
+aarch64-linux-gnu-as /tmp/g/add_a64 -o /tmp/g/add_a64.o && aarch64-linux-gnu-gcc -static /tmp/g/add_a64.o -o /tmp/g/add_a64
+run with: qemu-aarch64 /tmp/g/add_a64
+```
+
+An unknown name is rejected:
+
+```
+$ ./main -target=sparc tests/golden/inputs/01_return_const.c /tmp/d2
+Unknown target sparc, expected x86, x86_64, aarch64 or riscv64
+```
+
+The preprocessor predefines `__x86_64__`, `__aarch64__` or
+`__riscv` (with `__riscv_xlen` = 64) for the 64-bit targets, and
+`__LP64__` on all three; x86 adds none.
 
 That second column is the one you read to debug codegen. The
 first is the one you `./output_file` to run.
@@ -235,10 +283,10 @@ Sample 07 demonstrates this exact pattern with `values.h`.
 |---|---|
 | `Compile failed` | The compiler's own parser / validator bailed. Re-run and read the diagnostic line - it includes line:col and a message. |
 | `Issue assemblign...` (after `everything compiled fine`) | The emitted asm is bad OR the link step failed. Re-run with `object` and inspect the `.asm`. |
-| `Issue assemblign...` after a clean asm | `gcc-multilib` isn't installed. `sudo apt install gcc-multilib`. |
+| `Issue assemblign...` after a clean asm | No 32-bit linker. Install `gcc-i686-linux-gnu` (not `gcc-multilib`, which removes the cross compilers;). For the other targets, see the target guide's prerequisites. |
 | `./main: No such file or directory` | The chapter test suite (or `make clean`) deleted it. Just `./build.sh` again. |
 | Exit code is wrong, compile succeeded | Codegen quirk. Check the `Known codegen quirks` section in `samples/README.md` - the patterns there are real (bare `int[]` reads return addresses, void-return loads, comparison right-operand drops). |
-| `cannot find -lgcc` | 32-bit C runtime missing. `sudo apt install gcc-multilib`. |
+| `cannot find -lgcc` | `gcc -m32` was used without its 32-bit runtime. Install `gcc-i686-linux-gnu`; the driver then links with it. |
 
 ## See also
 

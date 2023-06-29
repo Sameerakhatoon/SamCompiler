@@ -7,16 +7,21 @@ still produces correct binaries for non-trivial programs."
 
 ## Toolchain
 
-The compiler emits 32-bit x86 NASM source and invokes `nasm` plus
-`gcc -m32` to produce ELF objects and linked binaries. You need:
+By default the compiler emits 32-bit x86 NASM source and invokes
+`nasm` plus `i686-linux-gnu-gcc -static` to produce ELF objects and
+linked binaries. You need:
 
 ```
-sudo apt install nasm gcc-multilib
+sudo apt install nasm gcc-i686-linux-gnu
 ```
 
-`gcc-multilib` installs the 32-bit C runtime + `crt0`, `libc.so`,
-`libgcc_s.so`, etc. Without it the linker step bails with
-`cannot find -lgcc` / `cannot find Scrt1.o`.
+Do not install `gcc-multilib` for `gcc -m32`: on Ubuntu 24.04 it
+removes the aarch64 and riscv64 cross compilers
+. The driver still falls back to `gcc -m32` if
+the i686 cross gcc is missing.
+
+The other targets (`-target=x86_64|aarch64|riscv64`) need their
+own tools; see `docs/guides/targets/`.
 
 ## Build the compiler
 
@@ -92,8 +97,10 @@ pipeline works end-to-end for every feature listed in the matrix.
 
 ## Run every sample as a binary
 
-This step requires `gcc-multilib`. Once installed, use the
-runner shipped under `samples/`:
+This step requires a linker for the target (for x86,
+`gcc-i686-linux-gnu`). Use the runner shipped under `samples/`
+(add `ARCH=x86_64`, `ARCH=aarch64`, `ARCH=riscv64` or `ARCH=all`
+for the other targets):
 
 ```bash
 bash samples/run_all.sh           # from repo root
@@ -177,7 +184,7 @@ that's worth a new sample; it doubles as documentation.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `cannot find -lgcc` | No 32-bit libc | `sudo apt install gcc-multilib` |
+| `cannot find -lgcc` | `gcc -m32` used without a 32-bit libc | `sudo apt install gcc-i686-linux-gnu` |
 | `Exec format error` | Tried to run an x86 binary in a non-x86 env | Use the WSL distro the project lives in |
 | `Issue assemblign...` | Bad asm or nasm not installed | `which nasm`, then read the asm to find the offending line |
 | Compile failed silently | Likely a preprocessor parse error | Re-run with object-only and read the asm; the error is usually printed before `./main` exits |

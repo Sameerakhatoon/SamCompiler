@@ -12,9 +12,10 @@ cd ~/projects/samcompiler
 ```
 
 This runs `make clean`, creates the `build/`, `build/helpers/`,
-and `build/static-includes/` directories, then `make all`. It
-produces `./main` plus one `.o` per translation unit under
-`build/`.
+and `build/static-includes/` directories, then `make -j"$(nproc)"
+all`. It produces `./main` plus one `.o` per translation unit under
+`build/`. Every test calls `build.sh` (twice, through `lib.sh`), so
+the parallel build matters: about 12.7 s per test instead of 31 s.
 
 If `build.sh` itself reports `Permission denied`:
 
@@ -46,11 +47,56 @@ or
 The suite ends with a summary:
 
 ```
-passed: 175   failed: 0
+passed: 187   failed: 0
 ```
 
 Non-zero `failed` -> exit code 1, and the runner lists the failed
 test names below the summary.
+
+## Tests per target
+
+Most tests exercise the front end and need no assembler at all. The
+ones below are the multi-target tests and the older
+end-to-end test; "compile" means only `./main` runs, "run" means the
+program is assembled, linked and executed.
+
+| Test | x86 | x86_64 | aarch64 | riscv64 | Needs |
+|---|---|---|---|---|---|
+| `90-end-to-end-nasm` | assemble | | | | nasm and `i686-linux-gnu-gcc` or `gcc -m32`, else skips |
+| `176-x86-golden` | compile, byte-for-byte diff | | | | nothing extra |
+| `177-target-descriptor` | descriptor | | | | nothing extra |
+| `178-target-flag` | `-target=x86` = default | descriptor + macros | descriptor + macros | descriptor + macros | nothing extra |
+| `179-backend-split` | backend, rdefault, stdarg hooks | | | | nothing extra |
+| `200-x86-64-codegen` | | compile, asm shape | | | nothing extra |
+| `201-x86-64-run` | | run 54 programs | | | nasm, gcc; skips without nasm |
+| `210-aarch64-codegen` | | | compile, asm shape | | nothing extra |
+| `211-aarch64-run` | | | run 54 programs | | `gcc-aarch64-linux-gnu`, `qemu-user`; skips without them |
+| `220-riscv64-codegen` | | | | compile, asm shape | nothing extra |
+| `221-riscv64-run` | | | | run 54 programs | `gcc-riscv64-linux-gnu`, `qemu-user`; skips without them |
+| `230-samples-all-targets` | run samples | run samples | run samples | run samples | cross targets only when their gcc and qemu exist |
+| `240-compare-gcc` | when `i686-linux-gnu-gcc` exists | always | when the cross gcc exists | when the cross gcc exists | gcc per target |
+
+The "54 programs" are the 40 golden inputs in
+`tests/golden/inputs/` plus the 14 samples.
+
+Run one target's tests on their own:
+
+```
+bash tests/210-aarch64-codegen.sh
+bash tests/211-aarch64-run.sh
+```
+
+and the samples for one or all targets:
+
+```
+bash samples/run_all.sh ARCH=aarch64
+bash samples/run_all.sh ARCH=all
+```
+
+The x86 golden test must stay green whatever changes; if a change
+to x86 output is intended, regenerate with
+`bash tests/golden/regen.sh x86` and commit the new files with the
+reason.
 
 ## Run a single test
 
@@ -115,20 +161,25 @@ the compiler as a library and capture stdout from the probe.
 
 ### End-to-end source tests
 
-Write a real `.c` file, run `./main src.c out.asm`, and check the
-emitted asm or the binary the linker built. The `./main` binary
-forks `nasm` and `gcc -m32` itself; the test captures combined
-stdout / stderr and pattern-matches.
+Write a real `.c` file, run `./main [-target=...] src.c out`, and
+check the emitted asm or the binary the linker built. The `./main`
+binary forks the target's assembler and linker itself (for x86
+`nasm` and `i686-linux-gnu-gcc -static`); the test captures
+combined stdout / stderr and pattern-matches.
 
-Look for the `nasm` / `gcc -m32` setup if you want to actually
-run the produced binary:
+Tests that run a binary check for their tools first and skip
+cleanly without them, for example `tests/211-aarch64-run.sh`:
 
 ```bash
-command -v nasm >/dev/null || skip
-gcc -m32 -c -o /tmp/_check.o -x c /dev/null 2>/dev/null || skip
+for tool in aarch64-linux-gnu-as aarch64-linux-gnu-gcc qemu-aarch64; do
+    command -v "$tool" >/dev/null || { echo "211-aarch64-run ... skip (no $tool)"; exit 0; }
+done
 ```
 
-Tests gracefully skip when 32-bit toolchain isn't installed.
+`lib.sh` runs every test with `set -euo pipefail`. A loop that runs
+programs must guard their exit codes (`out=$(prog) && ec=0 || ec=$?`)
+and `grep`s that may match nothing (`... | head -1 || true`), or
+the test ends silently at the first non-zero status.
 
 ## When the suite is flaky
 
@@ -169,8 +220,9 @@ that fixed it in place.
 ## See also
 
 - `USING_THE_COMPILER.md` for how to drive `./main` against your
-  own `.c` file (CLI patterns, what each pipeline stage does,
-  the `nasm` + `gcc -m32` shell-out)
+  own `.c` file (CLI patterns, `-target=`, what each pipeline stage
+  does, the assembler and linker shell-out)
+- `targets/*.md` for each target's toolchain, run and debug steps
 - `DEBUGGING.md` for failure shapes and how to investigate them
 - `FEATURE_TESTING.md` for end-to-end feature verification using
   the sample programs in `samples/`
