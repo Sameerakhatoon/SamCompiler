@@ -29,10 +29,7 @@ int bubble_sort(int n)
     int lhs = 0;
     int rhs = 0;
     for (i = 0; i < n - 1; i = i + 1) {
-        // Parenthesised on purpose: the parser groups `a - b - c` as
-        // `a - (b - c)`, which ran k past the end
-        // of values[].
-        for (j = 0; j < (n - 1) - i; j = j + 1) {
+        for (j = 0; j < n - 1 - i; j = j + 1) {
             k = j + 1;
             lhs = values[j].v;
             rhs = values[k].v;

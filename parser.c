@@ -237,14 +237,21 @@ static int parser_get_precedence_for_operator(const char* op,
 }
 
 // "Does the left-hand operator have at-least-as-high precedence than
-// the right-hand operator?" Used to decide whether (a OPl b) OPr c
-// should rewrite to a OPl (b OPr c). Right-associative ops never claim
+// the right-hand operator?" Used to decide whether a OPl (b OPr c)
+// should rewrite to (a OPl b) OPr c. Right-associative ops never claim
 // priority over themselves.
+//
+// the same operator twice used to return false here, so
+// `a - b - c` stayed `a - (b - c)`. A left-to-right operator
+// now has priority over itself like over any other operator of its
+// group. `&&`, `||` and `,` keep the right-nested shape: grouping does
+// not change their result, and the short-circuit codegen shares one
+// pair of end labels down the right-hand chain.
 static bool parser_left_op_has_priority(const char* op_left, const char* op_right){
     struct expressionable_op_precedence_group* group_left  = 0;
     struct expressionable_op_precedence_group* group_right = 0;
 
-    if(S_EQ(op_left, op_right)){
+    if(S_EQ(op_left, op_right) && (S_EQ(op_left, "&&") || S_EQ(op_left, "||") || S_EQ(op_left, ","))){
         return false;
     }
 

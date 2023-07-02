@@ -50,7 +50,9 @@ int main(void){
     // <= precedence_right; "+" is wider than "*" so left does NOT have
     // priority, so left_has_priority("+", "*") should be false.
     int left_plus_vs_star = expressionable_parser_left_op_has_priority("+", "*");
-    // Same precedence, same op string: short-circuits to false.
+    // Same op string: "+" is left-to-right, so it has priority over
+    // itself and `a + b + c` groups as `(a + b) + c`. This used to
+    // short-circuit to false.
     int same_op = expressionable_parser_left_op_has_priority("+", "+");
     // Left "*" vs right "+": left binds tighter, left has priority.
     int left_star_vs_plus = expressionable_parser_left_op_has_priority("*", "+");
@@ -68,6 +70,6 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 got="$("$bin")"
 # * is row 1, + is row 2, = is row 12, bogus -1.
 # * associtivity LEFT_TO_RIGHT (0), = associtivity RIGHT_TO_LEFT (1).
-assert_contains "$got" "star=1 plus=2 assign=12 bogus=-1 sa=0 aa=1 t=1 ps=0 ss=0 sp=1" \
+assert_contains "$got" "star=1 plus=2 assign=12 bogus=-1 sa=0 aa=1 t=1 ps=0 ss=1 sp=1" \
     "precedence lookup + left_op_has_priority match the op_precedence table"
 pass

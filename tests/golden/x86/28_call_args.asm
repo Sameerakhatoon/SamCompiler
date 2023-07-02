@@ -19,11 +19,11 @@ pop eax
 mov ecx, ecx
 mul ecx
 push eax
-push dword [ebp+16]
 pop ecx
 pop eax
 add eax, ecx
 push eax
+push dword [ebp+16]
 pop ecx
 pop eax
 add eax, ecx

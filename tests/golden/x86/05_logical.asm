@@ -61,16 +61,16 @@ pop eax
 mov ecx, ecx
 mul ecx
 push eax
+pop ecx
+pop eax
+add eax, ecx
+push eax
 push dword [ebp-20]
 push dword 4
 pop ecx
 pop eax
 mov ecx, ecx
 mul ecx
-push eax
-pop ecx
-pop eax
-add eax, ecx
 push eax
 pop ecx
 pop eax

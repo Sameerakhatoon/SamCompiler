@@ -15,6 +15,10 @@ push dword [g]
 mov eax, [k]
 movsx eax, al
 push eax
+pop ecx
+pop eax
+add eax, ecx
+push eax
 mov ebx, [msg]
 push ebx
 pop ebx
@@ -25,10 +29,6 @@ push ebx
 pop eax
 mov eax, [eax]
 movsx eax, al
-push eax
-pop ecx
-pop eax
-add eax, ecx
 push eax
 pop ecx
 pop eax

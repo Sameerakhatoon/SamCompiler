@@ -32,11 +32,11 @@ pop eax
 mov dword [ebp-24], eax
 push dword [ebp-16]
 push dword [ebp-20]
-push dword [ebp-24]
 pop ecx
 pop eax
 add eax, ecx
 push eax
+push dword [ebp-24]
 pop ecx
 pop eax
 add eax, ecx

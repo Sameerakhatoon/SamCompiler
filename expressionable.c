@@ -159,7 +159,11 @@ bool expressionable_parser_left_op_has_priority(const char* op_left, const char*
     struct expressionable_op_precedence_group* group_left = NULL;
     struct expressionable_op_precedence_group* group_right = NULL;
 
-    if (S_EQ(op_left, op_right))
+    // the same operator twice used to return false, which kept
+    // `10 - 3 - 2` as `10 - (3 - 2)` in #if expressions, the same bug
+    // as the parser's copy of this function. Only `&&`, `||`
+    // and `,` keep that, as in parser.c.
+    if (S_EQ(op_left, op_right) && (S_EQ(op_left, "&&") || S_EQ(op_left, "||") || S_EQ(op_left, ",")))
     {
         return false;
     }
