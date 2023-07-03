@@ -43,9 +43,10 @@ pop ebx
 mov dword [function_call_1], ebx
 ; SUBTRACT ROOM FOR RETURNED STRUCTURE/UNION DATATYPE
 sub esp, 8
-push esp
 push dword 7
 push dword 2
+lea ebx, [esp+8]
+push ebx
 call [function_call_1]
 add esp, 12
 mov ebx, eax

@@ -1,5 +1,4 @@
 // EXPECTED EXIT: 9
-// NO RUN x86: the i386 backend pushes the hidden return pointer first
 struct pt {
     int x;
     int y;

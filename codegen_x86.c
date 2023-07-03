@@ -1146,16 +1146,27 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
     codegen_data_section_add("function_call_%i: dd 0", function_call_label_id);
     asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     asm_push("mov dword [function_call_%i], ebx", function_call_label_id);
+    size_t slot_elements = 0;
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
-        // ch150: caller allocates the return slot; push a pointer to
-        // it as the hidden first argument the callee will write to.
+        // ch150: caller allocates the return slot; a pointer to it is
+        // the hidden first argument the callee will write to.
         asm_push("; SUBTRACT ROOM FOR RETURNED STRUCTURE/UNION DATATYPE");
         codegen_stack_sub_with_name(align_value(datatype_size(&entity->dtype), DATA_SIZE_DWORD), "result_value");
-        asm_push_ins_push("esp", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        slot_elements = vector_count(current_function->func.frame.elements);
     }
     while(node){
         codegen_generate_expressionable(node, codegen_history_begin(EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS));
         node = vector_peek_ptr(entity->func_call_data.arguments);
+    }
+    if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
+        // the hidden pointer is the first argument, so it has
+        // to be pushed last, where the callee reads it ([ebp+8]).
+        // ch150 pushed it before the arguments, which put it after the
+        // last one and crashed. The slot sits just above the
+        // arguments pushed since it was reserved.
+        size_t arg_bytes = (vector_count(current_function->func.frame.elements) - slot_elements) * DATA_SIZE_DWORD;
+        asm_push("lea ebx, [esp+%i]", (int)arg_bytes);
+        asm_push_ins_push("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
     asm_push("call [function_call_%i]", function_call_label_id);
     size_t stack_size = entity->func_call_data.stack_size;

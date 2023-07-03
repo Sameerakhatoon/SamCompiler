@@ -280,7 +280,7 @@ Interactively: `layout asm`, `stepi`, `info registers`, `x/8gx $sp`
 |---|---|---|
 | `qemu-aarch64: Could not open '/lib/ld-linux-aarch64.so.1'` | dynamically linked binary, qemu looks for the loader on the host | link `-static` (what the driver does) or run `qemu-aarch64 -L /usr/aarch64-linux-gnu` |
 | `warning: BFD: warning: system-supplied DSO at 0x400000810000 has a corrupt string table index` in gdb | qemu's vDSO | harmless |
-| sample 10 crashed in `__run_exit_handlers` (exit 124 from `timeout`, qemu reports signal 11) | `n - 1 - i` parsed as `n - (1 - i)`, the loop wrote past `values[]` and hit libc's exit handler list | sample rewritten as `(n - 1) - i`; the parser bug remains |
+| sample 10 crashed in `__run_exit_handlers` (exit 124 from `timeout`, qemu reports signal 11) | `n - 1 - i` parsed as `n - (1 - i)`, the loop wrote past `values[]` and hit libc's exit handler list | fixed in the parser; the sample is back to `n - 1 - i` |
 | `aarch64: calls with more than 8 register arguments are not supported` (7 with a struct return) | v1 limit | pass a struct pointer |
 | `Target aarch64 has no code generator yet` | a `./main` built before the aarch64 backend | `./build.sh` |
 | a `;` comment in hand-written GNU as for aarch64 splits the line | `;` separates statements on AArch64 | comment with `//` (the backend rewrites the natives' `;` comments) |

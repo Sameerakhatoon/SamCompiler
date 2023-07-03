@@ -47,7 +47,7 @@ or
 The suite ends with a summary:
 
 ```
-passed: 187   failed: 0
+passed: 189   failed: 0
 ```
 
 Non-zero `failed` -> exit code 1, and the runner lists the failed
@@ -67,16 +67,18 @@ program is assembled, linked and executed.
 | `177-target-descriptor` | descriptor | | | | nothing extra |
 | `178-target-flag` | `-target=x86` = default | descriptor + macros | descriptor + macros | descriptor + macros | nothing extra |
 | `179-backend-split` | backend, rdefault, stdarg hooks | | | | nothing extra |
+| `180-left-assoc` | `a - b - c` asm order, run input 41 | | | | nasm for the run part, else skips it |
+| `181-x86-run` | run 55 programs | | | | nasm and `i686-linux-gnu-gcc` or `gcc -m32`, else skips |
 | `200-x86-64-codegen` | | compile, asm shape | | | nothing extra |
-| `201-x86-64-run` | | run 54 programs | | | nasm, gcc; skips without nasm |
+| `201-x86-64-run` | | run 55 programs | | | nasm, gcc; skips without nasm |
 | `210-aarch64-codegen` | | | compile, asm shape | | nothing extra |
-| `211-aarch64-run` | | | run 54 programs | | `gcc-aarch64-linux-gnu`, `qemu-user`; skips without them |
+| `211-aarch64-run` | | | run 55 programs | | `gcc-aarch64-linux-gnu`, `qemu-user`; skips without them |
 | `220-riscv64-codegen` | | | | compile, asm shape | nothing extra |
-| `221-riscv64-run` | | | | run 54 programs | `gcc-riscv64-linux-gnu`, `qemu-user`; skips without them |
+| `221-riscv64-run` | | | | run 55 programs | `gcc-riscv64-linux-gnu`, `qemu-user`; skips without them |
 | `230-samples-all-targets` | run samples | run samples | run samples | run samples | cross targets only when their gcc and qemu exist |
 | `240-compare-gcc` | when `i686-linux-gnu-gcc` exists | always | when the cross gcc exists | when the cross gcc exists | gcc per target |
 
-The "54 programs" are the 40 golden inputs in
+The "55 programs" are the 41 golden inputs in
 `tests/golden/inputs/` plus the 14 samples.
 
 Run one target's tests on their own:

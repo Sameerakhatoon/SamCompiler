@@ -14,7 +14,7 @@ RISC-V (rv64).
 | `aarch64` | GNU as, LP64, AAPCS64 | under `qemu-aarch64` | [docs/guides/targets/aarch64.md](docs/guides/targets/aarch64.md) |
 | `riscv64` | GNU as, LP64, RISC-V psABI | under `qemu-riscv64` | [docs/guides/targets/riscv64.md](docs/guides/targets/riscv64.md) |
 
-All 14 samples and the 40 golden feature programs pass on all four.
+All 14 samples and the 41 golden feature programs pass on all four.
 The x86 output is locked byte for byte by `tests/176-x86-golden.sh`.
 
 ## Layout
