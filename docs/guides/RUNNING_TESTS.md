@@ -11,11 +11,15 @@ cd ~/projects/samcompiler
 ./build.sh
 ```
 
-This runs `make clean`, creates the `build/`, `build/helpers/`,
-and `build/static-includes/` directories, then `make -j"$(nproc)"
-all`. It produces `./main` plus one `.o` per translation unit under
-`build/`. Every test calls `build.sh` (twice, through `lib.sh`), so
-the parallel build matters: about 12.7 s per test instead of 31 s.
+This creates the `build/`, `build/helpers/` and
+`build/static-includes/` directories, then runs `make -j"$(nproc)"
+all`. It produces `./main` plus one `.o` and one `.d` per translation
+unit under `build/`. The `.d` files come from gcc `-MMD` and list the
+headers each object read, so the build is incremental and still
+correct after a header edit. Every test calls `build.sh` (twice,
+through `lib.sh`); after the first build those calls do nothing.
+
+`./build.sh clean` forces a rebuild from scratch.
 
 If `build.sh` itself reports `Permission denied`:
 

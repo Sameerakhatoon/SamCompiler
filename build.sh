@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Build script. Clears stale .o files so header edits don't desync object files,
-# then runs make. Mirrors the gotcha workflow.
+# Build script. The Makefile tracks header dependencies (-MMD), so a plain
+# incremental make is safe after a header edit. Pass "clean" to force
+# a rebuild from scratch.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-make clean >/dev/null 2>&1 || true
+if [ "${1:-}" = clean ]; then
+    make clean >/dev/null 2>&1 || true
+fi
 mkdir -p build/helpers build/static-includes
-# Every test calls this twice, so the build dominates the suite.
-# Measured on 10 tests: 31 s per test serial, 12.7 s with -j.
 make -j"$(nproc)" all
