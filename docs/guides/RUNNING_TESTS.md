@@ -81,6 +81,7 @@ program is assembled, linked and executed.
 | `221-riscv64-run` | | | | run 55 programs | `gcc-riscv64-linux-gnu`, `qemu-user`; skips without them |
 | `230-samples-all-targets` | run samples | run samples | run samples | run samples | cross targets only when their gcc and qemu exist |
 | `240-compare-gcc` | when `i686-linux-gnu-gcc` exists | always | when the cross gcc exists | when the cross gcc exists | gcc per target |
+| `250-gcc-differential` | run `tests/diff`, compare with gcc | same | same | same | gcc and qemu per target; fails if one is missing |
 
 The "55 programs" are the 41 golden inputs in
 `tests/golden/inputs/` plus the 14 samples.
@@ -97,6 +98,14 @@ and the samples for one or all targets:
 ```
 bash samples/run_all.sh ARCH=aarch64
 bash samples/run_all.sh ARCH=all
+```
+
+Compare any directory of programs with gcc on every target (the
+reference is each target's own gcc):
+
+```
+bash tools/gcc_differential.sh tests/diff
+bash tools/gcc_differential.sh /path/to/programs x86_64 riscv64
 ```
 
 The x86 golden test must stay green whatever changes; if a change
