@@ -1339,10 +1339,16 @@ enum {
     RESOLVER_DEFAULT_ENTITY_DATA_TYPE_ARRAY_BRACKET,
 };
 
+// The lexer rejects longer identifiers, so a name plus "+offset" always
+// fits the resolver's address buffers below. They were 60 bytes and a
+// 60-character name overflowed them.
+#define IDENTIFIER_MAX_LENGTH 255
+#define RESOLVER_ADDRESS_MAX  (IDENTIFIER_MAX_LENGTH + 64)
+
 struct resolver_default_entity_data {
     int  type;
-    char address[60];        // "[ebp-4]" / "[var_name+4]"
-    char base_address[60];   // "ebp" / "var_name"
+    char address[RESOLVER_ADDRESS_MAX];        // "[ebp-4]" / "[var_name+4]"
+    char base_address[RESOLVER_ADDRESS_MAX];   // "ebp" / "var_name"
     int  offset;
     int  flags;
 };
@@ -1373,8 +1379,8 @@ struct resolver_result {
     size_t                     count;
 
     struct resolver_result_base {
-        char address[60];        // "[ebp-4]" / "[name+4]"
-        char base_address[60];   // "EBP"     / "global_variable_name"
+        char address[RESOLVER_ADDRESS_MAX];        // "[ebp-4]" / "[name+4]"
+        char base_address[RESOLVER_ADDRESS_MAX];   // "EBP"     / "global_variable_name"
         int  offset;
     } base;
 };

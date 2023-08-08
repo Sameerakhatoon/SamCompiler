@@ -23,13 +23,14 @@ struct resolver_default_scope_data* resolver_default_scope_private(struct resolv
 // Format `ebp-4` / `ebp+4` (no brackets, the asm template adds them).
 // the frame register comes from the target's backend (ebp,
 // rbp, x29, s0), so this no longer assumes x86.
+// `out` and `address_out` below are RESOLVER_ADDRESS_MAX bytes.
 char* resolver_default_stack_asm_address(int stack_offset, char* out){
     const char* frame_register = target_current()->backend->frame_register;
     if(stack_offset < 0){
-        sprintf(out, "%s%i", frame_register, stack_offset);
+        snprintf(out, RESOLVER_ADDRESS_MAX, "%s%i", frame_register, stack_offset);
         return out;
     }
-    sprintf(out, "%s+%i", frame_register, stack_offset);
+    snprintf(out, RESOLVER_ADDRESS_MAX, "%s+%i", frame_register, stack_offset);
     return out;
 }
 
@@ -39,10 +40,10 @@ static struct resolver_default_entity_data* resolver_default_new_entity_data(voi
 
 void resolver_default_global_asm_address(const char* name, int offset, char* address_out){
     if(offset == 0){
-        sprintf(address_out, "%s", name);
+        snprintf(address_out, RESOLVER_ADDRESS_MAX, "%s", name);
         return;
     }
-    sprintf(address_out, "%s+%i", name, offset);
+    snprintf(address_out, RESOLVER_ADDRESS_MAX, "%s+%i", name, offset);
 }
 
 static void resolver_default_entity_data_set_address(struct resolver_default_entity_data* entity_data, struct node* var_node, int offset, int flags){
@@ -55,10 +56,10 @@ static void resolver_default_entity_data_set_address(struct resolver_default_ent
     entity_data->offset = offset;
     if(flags & RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK){
         resolver_default_stack_asm_address(offset, entity_data->address);
-        sprintf(entity_data->base_address, "%s", target_current()->backend->frame_register);
+        snprintf(entity_data->base_address, RESOLVER_ADDRESS_MAX, "%s", target_current()->backend->frame_register);
     } else {
         resolver_default_global_asm_address(variable_node(var_node)->var.name, offset, entity_data->address);
-        sprintf(entity_data->base_address, "%s", variable_node(var_node)->var.name);
+        snprintf(entity_data->base_address, RESOLVER_ADDRESS_MAX, "%s", variable_node(var_node)->var.name);
     }
 }
 

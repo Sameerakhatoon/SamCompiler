@@ -63,7 +63,18 @@ if(S_EQ(option, "object")){
 Then:
 
 ```c
-int res = compile_file(input_file, output_file, compile_flags);
+int res = compile_file(input_file, main_tmp_output, compile_flags);
+```
+
+`main_tmp_output` is a temporary file next to `output_file`
+(`output_file.XXXXXX`, from `mkstemp`). It is renamed over
+`output_file` only when compilation succeeds, so a failed compile
+never empties an existing output. If the output is the input file
+itself, the driver refuses before compiling:
+
+```
+$ ./main my.c my.c
+The output file my.c is the input file, refusing to overwrite it
 ```
 
 That's the compiler proper. `compile_file` lives in `compiler.c`
@@ -104,13 +115,16 @@ Then the post-codegen step (still inside `main.c`). Since the
 ```c
 if(compile_flags & COMPILE_PROCESS_EXECUTE_NASM){
     snprintf(nasm_output_file, sizeof(nasm_output_file), "%s.o", output_file);
-    snprintf(asm_cmd, sizeof(asm_cmd), target->asm_cmd, output_file, nasm_output_file);
+    // both paths are single-quoted for /bin/sh first
+    main_shell_quote(output_file, quoted_output, sizeof(quoted_output));
+    main_shell_quote(nasm_output_file, quoted_object, sizeof(quoted_object));
+    snprintf(asm_cmd, sizeof(asm_cmd), target->asm_cmd, quoted_output, quoted_object);
     if(compile_flags & COMPILE_PROCESS_EXPORT_AS_OBJECT){
         // object-mode: stop after the assembler
         snprintf(nasm_cmd, sizeof(nasm_cmd), "%s", asm_cmd);
     } else {
         // default: assemble, then link
-        snprintf(link_cmd, sizeof(link_cmd), main_link_cmd(target), nasm_output_file, output_file);
+        snprintf(link_cmd, sizeof(link_cmd), main_link_cmd(target), quoted_object, quoted_output);
         snprintf(nasm_cmd, sizeof(nasm_cmd), "%s && %s", asm_cmd, link_cmd);
     }
     printf("%s\n", nasm_cmd);
@@ -118,11 +132,17 @@ if(compile_flags & COMPILE_PROCESS_EXECUTE_NASM){
     if(rc != 0){
         printf("Issue assemblign the assembly file with NASM and linking with gcc\n");
         // "assemblign" is the upstream typo, preserved verbatim.
-        return rc;
+        // rc is a wait status: return the tool's exit status, or 1.
+        ...
     }
     // cross targets: "run with: qemu-aarch64 <out>" and similar
 }
 ```
+
+Paths are quoted, so a path with spaces or shell characters is
+passed to the assembler and linker as one argument and never run
+as a command. A failed assemble or link makes `./main` exit
+non-zero, so scripts and `make` see the failure.
 
 Key thing to understand: **`output_file` is reused at three
 different points in the pipeline.** Initially the compiler

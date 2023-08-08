@@ -33,6 +33,7 @@ EOF
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 [ -x "$bin" ] || fail "ch117 probe failed to compile"
 got="$("$bin")"
-assert_contains "$got" "addr_len=60"  "result.base.address is char[60]"
-assert_contains "$got" "base_len=60"  "result.base.base_address is char[60]"
+# char[60] in the book; RESOLVER_ADDRESS_MAX (255 + 64) now.
+assert_contains "$got" "addr_len=319"  "result.base.address is char[RESOLVER_ADDRESS_MAX]"
+assert_contains "$got" "base_len=319"  "result.base.base_address is char[RESOLVER_ADDRESS_MAX]"
 pass

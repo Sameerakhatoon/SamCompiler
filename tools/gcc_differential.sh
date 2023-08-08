@@ -94,7 +94,7 @@ for src in "$dir"/*.c; do
         if [ $rc = 0 ]; then
             got=$(run_status "$runner" "$out")
         elif [ $rc = 124 ]; then got=T
-        elif grep -q "Issue assembling or linking" "$out.log"; then got=A
+        elif grep -q "Issue assemblign" "$out.log"; then got=A
         elif [ $rc -ge 128 ] && [ $rc != 255 ]; then got=X
         else got=C; fi
         mark=" "

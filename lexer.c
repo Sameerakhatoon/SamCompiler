@@ -465,6 +465,12 @@ static struct token* token_make_identifier_or_keyword(void){
 
     buffer_write(buffer, 0x00);
 
+    size_t len = strlen(buffer_ptr(buffer));
+    if(len > IDENTIFIER_MAX_LENGTH){
+        compiler_error(lex_process->compiler, "Identifier %.32s... is %zu characters long, the limit is %i",
+            buffer_ptr(buffer), len, IDENTIFIER_MAX_LENGTH);
+    }
+
     if(is_keyword(buffer_ptr(buffer))){
         return token_create(&(struct token){
             .type = TOKEN_TYPE_KEYWORD,

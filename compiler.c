@@ -54,8 +54,11 @@ static void compiler_emit_pos(struct compile_process* compiler){
 // Only lex + preprocess run; parse + codegen stay with the outer
 // translation unit.
 struct compile_process* compile_include_for_include_dir(const char* include_dir, const char* filename, struct compile_process* parent_process){
-    char tmp_filename[512];
-    sprintf(tmp_filename, "%s/%s", include_dir, filename);
+    char tmp_filename[PATH_MAX];
+    int written = snprintf(tmp_filename, sizeof(tmp_filename), "%s/%s", include_dir, filename);
+    if(written < 0 || (size_t)written >= sizeof(tmp_filename)){
+        compiler_error(parent_process, "Include path %s/%s is longer than %i characters", include_dir, filename, PATH_MAX - 1);
+    }
     if(file_exists(tmp_filename)){
         filename = tmp_filename;
     }
