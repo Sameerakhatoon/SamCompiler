@@ -24,6 +24,14 @@ void node_push(struct node* node){
     vector_push(node_vector, &node);
 }
 
+// How many nodes the scratch stack holds. The parser compares it before
+// and after a sub-parse to prove the sub-parse produced its node; a
+// node_pop() with nothing new on the stack would pop an earlier node
+// instead, and a whole function vanished that way.
+size_t node_count(void){
+    return vector_count(node_vector);
+}
+
 struct node* node_peek_or_null(void){
     return vector_back_ptr_or_null(node_vector);
 }

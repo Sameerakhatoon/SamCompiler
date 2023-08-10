@@ -841,6 +841,7 @@ int  validate(struct compile_process* process);
 // node_peek* / node_pop to manipulate the work-stack.
 void         node_set_vector(struct vector* vec, struct vector* root_vec);
 void         node_push(struct node* node);
+size_t       node_count(void);
 struct node* node_peek_or_null(void);
 struct node* node_peek(void);
 struct node* node_pop(void);

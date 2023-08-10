@@ -197,6 +197,42 @@ static struct token* token_peek_next(void){
     return vector_peek_no_increment(current_process->token_vec);
 }
 
+// How a token reads in a diagnostic: 'while', ';', the number 5.
+static const char* parser_token_text(struct token* token){
+    static char text[64];
+    if(!token){
+        return "the end of the file";
+    }
+    switch(token->type){
+        case TOKEN_TYPE_IDENTIFIER:
+        case TOKEN_TYPE_KEYWORD:
+        case TOKEN_TYPE_OPERATOR:
+            snprintf(text, sizeof(text), "'%.40s'", token->sval);
+            break;
+        case TOKEN_TYPE_SYMBOL:
+            snprintf(text, sizeof(text), "'%c'", token->cval);
+            break;
+        case TOKEN_TYPE_NUMBER:
+            snprintf(text, sizeof(text), "the number %llu", token->llnum);
+            break;
+        case TOKEN_TYPE_STRING:
+            snprintf(text, sizeof(text), "a string literal");
+            break;
+        default:
+            snprintf(text, sizeof(text), "an unexpected token");
+    }
+    return text;
+}
+
+// A sub-parse that should have left one new node on the stack. If it
+// left none, the caller's node_pop() would take an earlier node, which
+// is how whole functions disappeared from the output.
+static void parser_expect_new_node(size_t count_before, const char* what){
+    if(node_count() <= count_before){
+        compiler_error(current_process, "Expected %s but found %s\n", what, parser_token_text(token_peek_next()));
+    }
+}
+
 static void parse_single_token_to_node(void){
     struct token* token = token_next();
     switch(token->type){
@@ -399,6 +435,7 @@ static void parse_exp_normal(struct history* history){
 
     node_pop();            // detach the left operand
     node_left->flags |= NODE_FLAG_INSIDE_EXPRESSION;
+    size_t count_before_right = node_count();
 
     // ch130: choose right-operand parser by what's next.
     if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_OPERATOR){
@@ -415,6 +452,9 @@ static void parse_exp_normal(struct history* history){
         parse_expressionable_for_op(history_down(history, history->flags), op);
     }
 
+    char what[64];
+    snprintf(what, sizeof(what), "an operand after '%s'", op);
+    parser_expect_new_node(count_before_right, what);
     struct node* node_right = node_pop();
     node_right->flags |= NODE_FLAG_INSIDE_EXPRESSION;
 
@@ -918,7 +958,9 @@ static void parser_ignore_int(struct datatype* dtype){
 // on the stack for the caller to pop. Used when a sub-grammar (like
 // the RHS of `int x = E;`) needs to embed an expressionable result.
 static void parse_expressionable_root(struct history* history){
+    size_t count_before = node_count();
     parse_expressionable(history);
+    parser_expect_new_node(count_before, "an expression");
     struct node* result_node = node_pop();
     node_push(result_node);
 }
@@ -1218,14 +1260,22 @@ static void parse_symbol(void){
         node_push(body_node);
         return;
     }
-    compiler_error(current_process, "Symbols are not yet supported\n");
+    compiler_error(current_process, "Unexpected %s\n", parser_token_text(token_peek_next()));
 }
 
 // One statement: keyword-led (declarations / control-flow) or a bare
 // expression-statement terminated by `;`.
 static void parse_statement(struct history* history){
+    if(!token_peek_next()){
+        compiler_error(current_process, "Expected a statement or '}' but found the end of the file\n");
+    }
     if(token_peek_next()->type == TOKEN_TYPE_KEYWORD){
+        size_t count_before = node_count();
+        struct token* keyword = token_peek_next();
         parse_keyword(history);
+        if(node_count() <= count_before){
+            compiler_error(current_process, "The keyword '%s' is not supported here\n", keyword->sval);
+        }
         return;
     }
 
@@ -1985,6 +2035,11 @@ int parse(struct compile_process* process){
             node = node_peek();
             vector_push(process->node_tree_vec, &node);
         }
+    }
+    // parse_next stops at a token it has no rule for. Everything after
+    // it used to be dropped without a word.
+    if(token_peek_next()){
+        compiler_error(process, "Unexpected %s at file scope\n", parser_token_text(token_peek_next()));
     }
 
     // ch97: every forward struct reference must resolve by end of parse.
