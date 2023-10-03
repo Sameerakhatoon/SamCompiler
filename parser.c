@@ -78,6 +78,9 @@ static struct parser_scope_entity* parser_scope_last_entity_stop_global_scope(vo
 struct history {
     int                          flags;
     struct parser_history_switch _switch;
+    // With EXPRESSION_IS_UNARY: the node count when the operand parse
+    // began, so parse_exp can tell whether the operand exists yet.
+    size_t                       unary_operand_base;
 };
 
 static struct parser_history_switch parser_new_switch_statement(struct history* history);
@@ -382,11 +385,19 @@ static void parser_reorder_expression(struct node** node_out){
 // ch130: `*X` chain - read all consecutive `*` operators and parse
 // the operand that follows, building a single NODE_TYPE_UNARY whose
 // indirection.depth carries the chain length.
+static struct history* parser_unary_operand_history(void){
+    struct history* history = history_begin(EXPRESSION_IS_UNARY);
+    history->unary_operand_base = node_count();
+    return history;
+}
+
 static void parse_for_indirection_unary(void){
     int depth = parser_get_pointer_depth();
     // ch176: flag this descent EXPRESSION_IS_UNARY so the operator
     // parser knows to stop before unrelated operators.
-    parse_expressionable(history_begin(EXPRESSION_IS_UNARY));
+    size_t count_before = node_count();
+    parse_expressionable(parser_unary_operand_history());
+    parser_expect_new_node(count_before, "an operand after '*'");
     struct node* operand = node_pop();
     make_unary_node("*", operand);
     struct node* unary = node_pop();
@@ -399,7 +410,11 @@ static void parse_for_normal_unary(void){
     const char* op = token_next()->sval;
     // ch176: same as the indirection path - flag the descent so the
     // operator parser knows where to stop.
-    parse_expressionable(history_begin(EXPRESSION_IS_UNARY));
+    size_t count_before = node_count();
+    parse_expressionable(parser_unary_operand_history());
+    char what[64];
+    snprintf(what, sizeof(what), "an operand after '%s'", op);
+    parser_expect_new_node(count_before, what);
     struct node* operand = node_pop();
     make_unary_node(op, operand);
 }
@@ -418,6 +433,23 @@ static bool parser_is_unary_operator(const char* op){
     return is_unary_operator(op);
 }
 
+// `v.a++` arrives as v . (a++) because the right side of `.` is parsed
+// first and the postfix lands on `a`. Postfix ++/-- applies to the
+// whole member access, so lift it: (v . a)++. Inner levels are already
+// lifted, so `v.b.c++` ends as ((v.b).c)++.
+static struct node* parser_hoist_postfix(struct node* exp_node){
+    if(exp_node->type != NODE_TYPE_EXPRESSION || !is_access_operator(exp_node->exp.op)){
+        return exp_node;
+    }
+    struct node* right = exp_node->exp.right;
+    if(right->type != NODE_TYPE_UNARY || !(right->unary.flags & UNARY_FLAG_IS_POSTFIX)){
+        return exp_node;
+    }
+    exp_node->exp.right  = right->unary.operand;
+    right->unary.operand = exp_node;
+    return right;
+}
+
 static void parse_exp_normal(struct history* history){
     struct token* op_token = token_peek_next();
     const char*   op       = op_token->sval;
@@ -428,6 +460,17 @@ static void parse_exp_normal(struct history* history){
             compiler_error(current_process, "The given expression has no left operand");
         }
         parse_for_unary();
+        return;
+    }
+
+    // `x++` / `x--`: postfix, no right operand. The operator table has
+    // always listed them in the top precedence group; the parser never
+    // built anything for them, so `x++;` swallowed the next node (A13).
+    if(is_increment_operator(op)){
+        token_next();
+        node_pop();
+        make_unary_node(op, node_left);
+        node_peek()->unary.flags |= UNARY_FLAG_IS_POSTFIX;
         return;
     }
 
@@ -464,7 +507,7 @@ static void parse_exp_normal(struct history* history){
     // ch30: reorder for operator precedence.
     parser_reorder_expression(&exp_node);
 
-    node_push(exp_node);
+    node_push(parser_hoist_postfix(exp_node));
 }
 
 // ch77: after a `(`...`)` is parsed, if the next token is an
@@ -569,13 +612,26 @@ static void parse_for_comma(struct history* history){
 }
 
 static int parse_exp(struct history* history){
-    // ch176: when we're parsing a unary's operand, bail out as soon
-    // as we hit an operator that isn't a continuation (access, array
-    // bracket, or call parens). Anything else - including the `=` in
-    // `*p = ...` - is for the outer expression parser to handle.
-    if((history->flags & EXPRESSION_IS_UNARY)
-       && !unary_operand_compatible(token_peek_next())){
-        return -1;
+    if(history->flags & EXPRESSION_IS_UNARY){
+        bool has_operand = node_count() > history->unary_operand_base;
+        // The operand itself starts with a prefix operator: `-*p`,
+        // `!!x`, `++*p`. It binds to the operand only, so no
+        // parser_deal_with_additional_expression here.
+        if(!has_operand && parser_is_unary_operator(token_peek_next()->sval)){
+            if(op_is_indirection(token_peek_next()->sval)){
+                parse_for_indirection_unary();
+            } else {
+                parse_for_normal_unary();
+            }
+            return 0;
+        }
+        // ch176: when we're parsing a unary's operand, bail out as soon
+        // as we hit an operator that isn't a continuation (access, array
+        // bracket, call parens, postfix ++/--). Anything else - including
+        // the `=` in `*p = ...` - is for the outer expression parser.
+        if(!unary_operand_compatible(token_peek_next())){
+            return -1;
+        }
     }
     if(S_EQ(token_peek_next()->sval, "(")){
         parse_for_parentheses(history);

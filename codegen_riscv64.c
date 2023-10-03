@@ -657,34 +657,165 @@ static void codegen_generate_entity_access_for_assignment_left_operand(struct re
     }
 }
 
-static void codegen_generate_assignment_part(struct node* node, const char* op, struct history* history){
-    struct resolver_result* result = resolver_follow(current_process->resolver, node);
-    assert(resolver_result_ok(result));
+static bool codegen_is_wide(struct datatype* dtype);
+static int  codegen_set_flag_for_operator(const char* op);
+static void codegen_gen_math_for_value(int flags, bool wide, bool is_signed);
+static void codegen_reduce_register(size_t size, bool is_signed);
+static bool asm_datatype_back(struct datatype* dtype_out);
+
+enum {
+    // Push the assignment's value: it is an operand, as in `a = b = 3`.
+    CODEGEN_ASSIGN_VALUE_NEEDED = 0b001,
+    // `x++` / `x--`: the value is the operand before the step.
+    CODEGEN_ASSIGN_POSTFIX      = 0b010,
+    // ++ / --: there is no right operand on the stack, the step is 1.
+    CODEGEN_ASSIGN_STEP_ONE     = 0b100,
+};
+
+// Push a0 as the value of an assignment, narrowed to the stored type
+// (the value of `c = 300` with a char c is 44).
+static void codegen_push_assignment_value(struct datatype* dtype){
+    codegen_reduce_register(datatype_element_size(dtype), dtype->flags & DATATYPE_FLAG_IS_SIGNED);
+    asm_push_ins_push_with_data("a0",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = *dtype});
+}
+
+// `lhs = value`, the value already on the stack. The value push is only
+// for an assignment that is itself an operand (`a = b = 3`).
+static void codegen_generate_plain_assignment(struct node* node, struct resolver_result* result, struct history* history, int assign_flags){
     struct resolver_entity* root_assignment_entity = resolver_result_entity_root(result);
-    size_t size = datatype_element_size(&result->last_entity->dtype);
-    struct resolver_entity* next_entity = resolver_result_entity_next(root_assignment_entity);
-    if(!next_entity){
-        if(datatype_is_struct_or_union_non_pointer(&result->last_entity->dtype)){
-            codegen_generate_move_struct(&result->last_entity->dtype, result->base.address, 0);
-        } else {
-            asm_push_ins_pop("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-            codegen_generate_assignment_instruction_for_operator(size, result->base.address, op);
+    struct datatype* dtype = &result->last_entity->dtype;
+    size_t size = datatype_element_size(dtype);
+    bool is_struct = datatype_is_struct_or_union_non_pointer(dtype);
+    if(is_struct && (assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED)){
+        compiler_error(current_process, "riscv64: the value of a struct assignment cannot be used\n");
+    }
+    if(!resolver_result_entity_next(root_assignment_entity)){
+        if(is_struct){
+            codegen_generate_move_struct(dtype, result->base.address, 0);
+            return;
         }
+        asm_push_ins_pop("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_store_register("a0", result->base.address, size);
     } else {
         codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
         asm_push_ins_pop("t1", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
         asm_push_ins_pop("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-        if(datatype_is_struct_or_union_non_pointer(&result->last_entity->dtype)){
+        if(is_struct){
             compiler_error(current_process, "riscv64: struct assignment through a pointer or member is not supported\n");
         }
-        codegen_generate_assignment_instruction_for_operator(size, "t1", op);
+        codegen_store_register("a0", "t1", size);
+    }
+    if(assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED){
+        codegen_push_assignment_value(dtype);
     }
 }
 
+// `lhs op= value`, `++lhs`, `lhs++`: load into a0, compute with a1,
+// store. A non-simple lhs address stays in t1, which neither the
+// arithmetic (a0, a1) nor codegen_mem_operand (t2) touches.
+static void codegen_generate_read_modify_write(struct node* node, struct resolver_result* result, const char* op, struct history* history, int assign_flags){
+    struct resolver_entity* root_assignment_entity = resolver_result_entity_root(result);
+    struct datatype dtype = result->last_entity->dtype;
+    if(datatype_is_struct_or_union_non_pointer(&dtype)){
+        compiler_error(current_process, "riscv64: %s on a struct is not valid\n", op);
+    }
+    struct datatype value_dtype = datatype_for_numeric();
+    if(!(assign_flags & CODEGEN_ASSIGN_STEP_ONE)){
+        asm_datatype_back(&value_dtype);
+    }
+
+    const char* address = result->base.address;
+    if(resolver_result_entity_next(root_assignment_entity)){
+        codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
+        asm_push_ins_pop("t1", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        address = "t1";
+    }
+    if(assign_flags & CODEGEN_ASSIGN_STEP_ONE){
+        asm_push("li a1, 1");
+    } else {
+        asm_push_ins_pop("a1", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    }
+
+    size_t size = datatype_element_size(&dtype);
+    bool lhs_signed = dtype.flags & DATATYPE_FLAG_IS_SIGNED;
+    codegen_load_register("a0", address, size, lhs_signed);
+    if(assign_flags & CODEGEN_ASSIGN_POSTFIX){
+        asm_push_ins_push_with_data("a0",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = dtype});
+    }
+
+    const char* arith = assignment_arithmetic_operator(op);
+    int op_flags = codegen_set_flag_for_operator(arith);
+    bool is_pointer = dtype.flags & DATATYPE_FLAG_IS_POINTER;
+    if(is_pointer && (S_EQ(arith, "+") || S_EQ(arith, "-"))){
+        size_t step = datatype_size(datatype_pointer_reduce(&dtype, 1));
+        if(step > DATA_SIZE_BYTE){
+            codegen_mul_imm("a1", step);
+        }
+    }
+    // The operation runs in the type both operands convert to: unsigned
+    // when either is (a literal step counts as int).
+    bool value_signed = (value_dtype.flags & DATATYPE_FLAG_IS_SIGNED) || (value_dtype.flags & DATATYPE_FLAG_IS_LITERAL);
+    bool wide = codegen_is_wide(&dtype) || codegen_is_wide(&value_dtype);
+    codegen_gen_math_for_value(op_flags, wide, lhs_signed && value_signed && !is_pointer);
+
+    codegen_store_register("a0", address, size);
+    if((assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED) && !(assign_flags & CODEGEN_ASSIGN_POSTFIX)){
+        codegen_push_assignment_value(&dtype);
+    }
+}
+
+static void codegen_generate_assignment_part(struct node* node, const char* op, struct history* history, int assign_flags){
+    struct resolver_result* result = resolver_follow(current_process->resolver, node);
+    if(!resolver_result_ok(result)){
+        compiler_error(current_process, "The left operand of %s cannot be assigned to\n", op);
+    }
+    if(S_EQ(op, "=")){
+        codegen_generate_plain_assignment(node, result, history, assign_flags);
+        return;
+    }
+    // A statement `x += n` on a non-pointer keeps its old instructions.
+    struct resolver_entity* root_assignment_entity = resolver_result_entity_root(result);
+    struct datatype* dtype = &result->last_entity->dtype;
+    if(S_EQ(op, "+=") && !(assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED)
+       && !(dtype->flags & DATATYPE_FLAG_IS_POINTER)
+       && !datatype_is_struct_or_union_non_pointer(dtype)){
+        size_t size = datatype_element_size(dtype);
+        if(!resolver_result_entity_next(root_assignment_entity)){
+            asm_push_ins_pop("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            codegen_generate_assignment_instruction_for_operator(size, result->base.address, op);
+        } else {
+            codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
+            asm_push_ins_pop("t1", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            codegen_generate_assignment_instruction_for_operator(size, "t1", op);
+        }
+        return;
+    }
+    codegen_generate_read_modify_write(node, result, op, history, assign_flags);
+}
+
+// An assignment that is a whole statement (or a for-loop init / step)
+// pushes nothing; one that is an operand pushes its value.
 static void codegen_generate_assignment_expression(struct node* node, struct history* history){
     codegen_generate_expressionable(node->exp.right,
         codegen_history_down(history, EXPRESSION_IS_ASSIGNMENT | IS_RIGHT_OPERAND_OF_ASSIGNMENT));
-    codegen_generate_assignment_part(node->exp.left, node->exp.op, history);
+    codegen_generate_assignment_part(node->exp.left, node->exp.op, history,
+        codegen_is_exp_root(history) ? 0 : CODEGEN_ASSIGN_VALUE_NEEDED);
+}
+
+static void codegen_generate_increment(struct node* node, struct history* history){
+    int assign_flags = CODEGEN_ASSIGN_STEP_ONE;
+    if(!codegen_is_exp_root(history)){
+        assign_flags |= CODEGEN_ASSIGN_VALUE_NEEDED;
+        if(node->unary.flags & UNARY_FLAG_IS_POSTFIX){
+            assign_flags |= CODEGEN_ASSIGN_POSTFIX;
+        }
+    }
+    codegen_generate_assignment_part(node->unary.operand, node->unary.op, history, assign_flags);
 }
 
 struct response_data {
@@ -924,6 +1055,10 @@ static void codegen_generate_tenary(struct node* node, struct history* history){
 }
 
 static void codegen_generate_unary(struct node* node, struct history* history){
+    if(is_increment_operator(node->unary.op)){
+        codegen_generate_increment(node, history);
+        return;
+    }
     if(codegen_resolve_node_for_value(node, history)){
         return;
     }
@@ -1466,19 +1601,32 @@ static void codegen_generate_while_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
+// A for-loop's init and step are evaluated for their effect, like a
+// statement: an assignment or ++/-- there pushes no value.
+static void codegen_generate_for_effect(struct node* node){
+    if(is_node_assignment(node)){
+        codegen_generate_exp_node(node, codegen_history_begin(0));
+        return;
+    }
+    if(node->type == NODE_TYPE_UNARY && is_increment_operator(node->unary.op)){
+        codegen_generate_increment(node, codegen_history_begin(0));
+        return;
+    }
+    codegen_generate_expressionable(node, codegen_history_begin(0));
+    asm_push_ins_pop_or_ignore("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+}
+
 static void codegen_generate_for_stmt(struct node* node){
     struct for_stmt* fs = &node->stmt.for_stmt;
     int for_loop_start_id = codegen_label_count();
     int for_loop_end_id   = codegen_label_count();
     if(fs->init_node){
-        codegen_generate_expressionable(fs->init_node, codegen_history_begin(0));
-        asm_push_ins_pop_or_ignore("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_generate_for_effect(fs->init_node);
     }
     asm_push("j .Lfor_loop%i", for_loop_start_id);
     codegen_begin_entry_exit_point();
     if(fs->loop_node){
-        codegen_generate_expressionable(fs->loop_node, codegen_history_begin(0));
-        asm_push_ins_pop_or_ignore("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_generate_for_effect(fs->loop_node);
     }
     asm_push(".Lfor_loop%i:", for_loop_start_id);
     if(fs->cond_node){
@@ -1490,8 +1638,7 @@ static void codegen_generate_for_stmt(struct node* node){
         codegen_generate_body(fs->body_node, codegen_history_begin(IS_ALONE_STATEMENT));
     }
     if(fs->loop_node){
-        codegen_generate_expressionable(fs->loop_node, codegen_history_begin(0));
-        asm_push_ins_pop_or_ignore("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_generate_for_effect(fs->loop_node);
     }
     asm_push("j .Lfor_loop%i", for_loop_start_id);
     asm_push(".Lfor_loop_end%i:", for_loop_end_id);

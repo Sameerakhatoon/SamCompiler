@@ -698,35 +698,178 @@ static void codegen_generate_entity_access_for_assignment_left_operand(struct re
 // into the resolved base address. Multi-entity path: compute the
 // address into ebx via the access walker, pop the rhs (eax) and the
 // addr (edx), then mov.
-static void codegen_generate_assignment_part(struct node* node, const char* op, struct history* history){
-    struct resolver_result* result = resolver_follow(current_process->resolver, node);
-    assert(resolver_result_ok(result));
+static int  codegen_set_flag_for_operator(const char* op);
+static void codegen_gen_math_for_value(const char* reg, const char* value, int flags, bool is_signed);
+static void codegen_reduce_register(const char* reg, size_t size, bool is_signed);
+static bool asm_datatype_back(struct datatype* dtype_out);
+
+enum {
+    // Push the assignment's value: it is an operand, as in `a = b = 3`.
+    CODEGEN_ASSIGN_VALUE_NEEDED = 0b001,
+    // `x++` / `x--`: the value is the operand before the step.
+    CODEGEN_ASSIGN_POSTFIX      = 0b010,
+    // ++ / --: there is no right operand on the stack, the step is 1.
+    CODEGEN_ASSIGN_STEP_ONE     = 0b100,
+};
+
+// eax = the `size`-byte value at [address], sign or zero extended.
+static void codegen_load_eax(const char* address, size_t size, bool is_signed){
+    if(size == DATA_SIZE_BYTE || size == DATA_SIZE_WORD){
+        asm_push("%s eax, %s [%s]", is_signed ? "movsx" : "movzx",
+            size == DATA_SIZE_BYTE ? "byte" : "word", address);
+        return;
+    }
+    asm_push("mov eax, [%s]", address);
+}
+
+// Push eax as the value of an assignment, narrowed to the stored type
+// (the value of `c = 300` with a char c is 44).
+static void codegen_push_assignment_value(struct datatype* dtype){
+    codegen_reduce_register("eax", datatype_element_size(dtype), dtype->flags & DATATYPE_FLAG_IS_SIGNED);
+    asm_push_ins_push_with_data("eax",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = *dtype});
+}
+
+// ch140: `lhs = value`, the value already on the stack. Single-entity
+// path: store directly into the resolved base address. Multi-entity
+// path: compute the address via the access walker, pop the addr (edx)
+// and the rhs (eax), then mov. The value push is only for an
+// assignment that is itself an operand (`a = b = 3`).
+static void codegen_generate_plain_assignment(struct node* node, struct resolver_result* result, struct history* history, int assign_flags){
     struct resolver_entity* root_assignment_entity = resolver_result_entity_root(result);
+    struct datatype* dtype = &result->last_entity->dtype;
     const char* reg_to_use = "eax";
-    const char* mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(&result->last_entity->dtype), &reg_to_use);
-    struct resolver_entity* next_entity = resolver_result_entity_next(root_assignment_entity);
-    if(!next_entity){
-        if(datatype_is_struct_or_union_non_pointer(&result->last_entity->dtype)){
+    const char* mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(dtype), &reg_to_use);
+    bool is_struct = datatype_is_struct_or_union_non_pointer(dtype);
+    if(is_struct && (assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED)){
+        compiler_error(current_process, "x86: the value of a struct assignment cannot be used\n");
+    }
+    if(!resolver_result_entity_next(root_assignment_entity)){
+        if(is_struct){
             // ch150: struct-by-value assignment - pop chunks and store.
-            codegen_generate_move_struct(&result->last_entity->dtype, result->base.address, 0);
-        } else {
-            asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-            codegen_generate_assignment_instruction_for_operator(mov_type, result->base.address, reg_to_use, op,
-                result->last_entity->dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+            codegen_generate_move_struct(dtype, result->base.address, 0);
+            return;
         }
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        asm_push("mov %s [%s], %s", mov_type, result->base.address, reg_to_use);
     } else {
         codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
         asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-        codegen_generate_assignment_instruction_for_operator(mov_type, "edx", reg_to_use, op,
-            result->last_entity->flags & DATATYPE_FLAG_IS_SIGNED);
+        asm_push("mov %s [edx], %s", mov_type, reg_to_use);
+    }
+    if(assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED){
+        codegen_push_assignment_value(dtype);
     }
 }
 
+// `lhs op= value`, `++lhs`, `lhs++`: load, compute, store. A non-simple
+// lhs address is kept in ebx because mul/div clobber edx and shifts
+// take their count from cl.
+static void codegen_generate_read_modify_write(struct node* node, struct resolver_result* result, const char* op, struct history* history, int assign_flags){
+    struct resolver_entity* root_assignment_entity = resolver_result_entity_root(result);
+    struct datatype dtype = result->last_entity->dtype;
+    if(datatype_is_struct_or_union_non_pointer(&dtype)){
+        compiler_error(current_process, "x86: %s on a struct is not valid\n", op);
+    }
+    struct datatype value_dtype = datatype_for_numeric();
+    if(!(assign_flags & CODEGEN_ASSIGN_STEP_ONE)){
+        asm_datatype_back(&value_dtype);
+    }
+
+    const char* address = result->base.address;
+    if(resolver_result_entity_next(root_assignment_entity)){
+        codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
+        asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        address = "ebx";
+    }
+    if(assign_flags & CODEGEN_ASSIGN_STEP_ONE){
+        asm_push("mov ecx, 1");
+    } else {
+        asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    }
+
+    size_t size = datatype_element_size(&dtype);
+    bool lhs_signed = dtype.flags & DATATYPE_FLAG_IS_SIGNED;
+    codegen_load_eax(address, size, lhs_signed);
+    if(assign_flags & CODEGEN_ASSIGN_POSTFIX){
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = dtype});
+    }
+
+    const char* arith = assignment_arithmetic_operator(op);
+    int op_flags = codegen_set_flag_for_operator(arith);
+    bool is_pointer = dtype.flags & DATATYPE_FLAG_IS_POINTER;
+    if(is_pointer && (S_EQ(arith, "+") || S_EQ(arith, "-"))){
+        size_t step = datatype_size(datatype_pointer_reduce(&dtype, 1));
+        if(step > DATA_SIZE_BYTE){
+            asm_push("imul ecx, %i", (int)step);
+        }
+    }
+    // The operation runs in the type both operands convert to: unsigned
+    // when either is (a literal step counts as int).
+    bool value_signed = (value_dtype.flags & DATATYPE_FLAG_IS_SIGNED) || (value_dtype.flags & DATATYPE_FLAG_IS_LITERAL);
+    codegen_gen_math_for_value("eax", "ecx", op_flags, lhs_signed && value_signed && !is_pointer);
+
+    const char* reg_to_use = "eax";
+    const char* mov_type   = codegen_byte_word_or_dword_or_ddword(size, &reg_to_use);
+    asm_push("mov %s [%s], %s", mov_type, address, reg_to_use);
+    if((assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED) && !(assign_flags & CODEGEN_ASSIGN_POSTFIX)){
+        codegen_push_assignment_value(&dtype);
+    }
+}
+
+static void codegen_generate_assignment_part(struct node* node, const char* op, struct history* history, int assign_flags){
+    struct resolver_result* result = resolver_follow(current_process->resolver, node);
+    if(!resolver_result_ok(result)){
+        compiler_error(current_process, "The left operand of %s cannot be assigned to\n", op);
+    }
+    if(S_EQ(op, "=")){
+        codegen_generate_plain_assignment(node, result, history, assign_flags);
+        return;
+    }
+    // A statement `x += n` on a non-pointer keeps its single instruction.
+    struct resolver_entity* root_assignment_entity = resolver_result_entity_root(result);
+    struct datatype* dtype = &result->last_entity->dtype;
+    if(S_EQ(op, "+=") && !(assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED)
+       && !(dtype->flags & DATATYPE_FLAG_IS_POINTER)
+       && !datatype_is_struct_or_union_non_pointer(dtype)){
+        const char* reg_to_use = "eax";
+        const char* mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(dtype), &reg_to_use);
+        if(!resolver_result_entity_next(root_assignment_entity)){
+            asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push("add %s [%s], %s", mov_type, result->base.address, reg_to_use);
+        } else {
+            codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
+            asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push("add %s [edx], %s", mov_type, reg_to_use);
+        }
+        return;
+    }
+    codegen_generate_read_modify_write(node, result, op, history, assign_flags);
+}
+
+// An assignment that is a whole statement (or a for-loop init / step)
+// pushes nothing; one that is an operand pushes its value.
 static void codegen_generate_assignment_expression(struct node* node, struct history* history){
     codegen_generate_expressionable(node->exp.right,
         codegen_history_down(history, EXPRESSION_IS_ASSIGNMENT | IS_RIGHT_OPERAND_OF_ASSIGNMENT));
-    codegen_generate_assignment_part(node->exp.left, node->exp.op, history);
+    codegen_generate_assignment_part(node->exp.left, node->exp.op, history,
+        codegen_is_exp_root(history) ? 0 : CODEGEN_ASSIGN_VALUE_NEEDED);
+}
+
+static void codegen_generate_increment(struct node* node, struct history* history){
+    int assign_flags = CODEGEN_ASSIGN_STEP_ONE;
+    if(!codegen_is_exp_root(history)){
+        assign_flags |= CODEGEN_ASSIGN_VALUE_NEEDED;
+        if(node->unary.flags & UNARY_FLAG_IS_POSTFIX){
+            assign_flags |= CODEGEN_ASSIGN_POSTFIX;
+        }
+    }
+    codegen_generate_assignment_part(node->unary.operand, node->unary.op, history, assign_flags);
 }
 
 // ch145 helpers (codegen_reduce_register, codegen_gen_mem_access,
@@ -1005,6 +1148,10 @@ static void codegen_generate_tenary(struct node* node, struct history* history){
 
 // ch151/154: NODE_TYPE_UNARY codegen dispatch.
 static void codegen_generate_unary(struct node* node, struct history* history){
+    if(is_increment_operator(node->unary.op)){
+        codegen_generate_increment(node, history);
+        return;
+    }
     if(codegen_resolve_node_for_value(node, history)){
         return;
     }
@@ -1618,20 +1765,33 @@ static void codegen_generate_while_stmt(struct node* node){
 //     jmp .for_loop<N>
 //   .for_loop_end<M>:
 // Any of the four parts may be missing.
+// A for-loop's init and step are evaluated for their effect, like a
+// statement: an assignment or ++/-- there pushes no value.
+static void codegen_generate_for_effect(struct node* node){
+    if(is_node_assignment(node)){
+        codegen_generate_exp_node(node, codegen_history_begin(0));
+        return;
+    }
+    if(node->type == NODE_TYPE_UNARY && is_increment_operator(node->unary.op)){
+        codegen_generate_increment(node, codegen_history_begin(0));
+        return;
+    }
+    codegen_generate_expressionable(node, codegen_history_begin(0));
+    asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+}
+
 static void codegen_generate_for_stmt(struct node* node){
     struct for_stmt* fs = &node->stmt.for_stmt;
     int for_loop_start_id = codegen_label_count();
     int for_loop_end_id   = codegen_label_count();
     if(fs->init_node){
-        codegen_generate_expressionable(fs->init_node, codegen_history_begin(0));
-        asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_generate_for_effect(fs->init_node);
     }
     // ch163: skip past the entry-point incrementer on the first pass.
     asm_push("jmp .for_loop%i", for_loop_start_id);
     codegen_begin_entry_exit_point();
     if(fs->loop_node){
-        codegen_generate_expressionable(fs->loop_node, codegen_history_begin(0));
-        asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_generate_for_effect(fs->loop_node);
     }
     asm_push(".for_loop%i:", for_loop_start_id);
     if(fs->cond_node){
@@ -1644,8 +1804,7 @@ static void codegen_generate_for_stmt(struct node* node){
         codegen_generate_body(fs->body_node, codegen_history_begin(IS_ALONE_STATEMENT));
     }
     if(fs->loop_node){
-        codegen_generate_expressionable(fs->loop_node, codegen_history_begin(0));
-        asm_push_ins_pop_or_ignore("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_generate_for_effect(fs->loop_node);
     }
     asm_push("jmp .for_loop%i", for_loop_start_id);
     asm_push(".for_loop_end%i:", for_loop_end_id);

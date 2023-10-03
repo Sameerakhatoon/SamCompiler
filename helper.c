@@ -195,11 +195,31 @@ bool is_argument_node(struct node* node){
 // ch130: unary operator predicates.
 bool is_unary_operator(const char* op){
     return S_EQ(op, "-") || S_EQ(op, "!") || S_EQ(op, "~")
-        || S_EQ(op, "*") || S_EQ(op, "&");
+        || S_EQ(op, "*") || S_EQ(op, "&")
+        || S_EQ(op, "++") || S_EQ(op, "--");
 }
 
 bool op_is_indirection(const char* op){
     return S_EQ(op, "*");
+}
+
+bool is_increment_operator(const char* op){
+    return S_EQ(op, "++") || S_EQ(op, "--");
+}
+
+const char* assignment_arithmetic_operator(const char* op){
+    static const char* table[][2] = {
+        { "+=", "+" },   { "-=", "-" },   { "*=", "*" },  { "/=", "/" },
+        { "%=", "%" },   { "<<=", "<<" }, { ">>=", ">>" },
+        { "&=", "&" },   { "|=", "|" },   { "^=", "^" },
+        { "++", "+" },   { "--", "-" },
+    };
+    for(size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++){
+        if(S_EQ(op, table[i][0])){
+            return table[i][1];
+        }
+    }
+    return 0;
 }
 
 // ch132: address-of unary.
@@ -253,10 +273,13 @@ bool is_parentheses(const char* op){
     return S_EQ(op, "(");
 }
 
+// Postfix ++ and -- bind tighter than any prefix operator, so `-x++`
+// is -(x++) and `*p++` is *(p++).
 bool unary_operand_compatible(struct token* token){
     return is_access_operator(token->sval)
         || is_array_operator(token->sval)
-        || is_parentheses(token->sval);
+        || is_parentheses(token->sval)
+        || is_increment_operator(token->sval);
 }
 
 // ch170: synthetic datatype for string literals - `const char*`

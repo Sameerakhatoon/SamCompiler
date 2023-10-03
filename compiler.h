@@ -789,6 +789,8 @@ struct node {
         struct unary {
             const char*  op;
             struct node* operand;
+            // UNARY_FLAG_*.
+            int          flags;
             union {
                 struct indirection {
                     int depth;
@@ -923,6 +925,16 @@ void         make_unary_node(const char* op, struct node* operand_node);
 bool         is_parentheses(const char* op);
 bool         unary_operand_compatible(struct token* token);
 bool         is_node_assignment(struct node* node);
+// "++" or "--", prefix or postfix.
+bool         is_increment_operator(const char* op);
+// The arithmetic an assignment does: "-=" -> "-", "<<=" -> "<<",
+// "++" -> "+", "--" -> "-". NULL for plain "=".
+const char*  assignment_arithmetic_operator(const char* op);
+
+enum {
+    // `x++` / `x--`: the value is the operand before the step.
+    UNARY_FLAG_IS_POSTFIX = 0b00000001,
+};
 
 // ch104: codegen entry point + status enum. Module 2/3 fills in the
 // real instruction-emit work; ch104 just lands the skeleton.

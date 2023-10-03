@@ -217,12 +217,13 @@ static struct token* token_make_string(char start_delim, char end_delim){
 // "Treated as one" operators never combine with the next char into a
 // two-char operator. e.g. '(' on its own is fine; ".." would mean
 // something else (the `...` ellipsis is handled elsewhere).
+// '*' used to be listed too, which lexed `*=` as `*` `=`. A pair that
+// is not an operator (`**`, `*(`) is split again by read_op.
 static bool op_treated_as_one(char op){
     return op == '('
         || op == '['
         || op == ','
         || op == '.'
-        || op == '*'
         || op == '?';
 }
 
@@ -242,6 +243,8 @@ static bool op_valid(const char* op){
     return S_EQ(op, "+")  || S_EQ(op, "-")  || S_EQ(op, "*")  || S_EQ(op, "/")
         || S_EQ(op, "!")  || S_EQ(op, "^")
         || S_EQ(op, "+=") || S_EQ(op, "-=") || S_EQ(op, "*=") || S_EQ(op, "/=")
+        || S_EQ(op, "%=") || S_EQ(op, "&=") || S_EQ(op, "|=") || S_EQ(op, "^=")
+        || S_EQ(op, "<<=")|| S_EQ(op, ">>=")
         || S_EQ(op, ">>") || S_EQ(op, "<<") || S_EQ(op, ">=") || S_EQ(op, "<=")
         || S_EQ(op, ">")  || S_EQ(op, "<")
         || S_EQ(op, "||") || S_EQ(op, "&&") || S_EQ(op, "|")  || S_EQ(op, "&")
@@ -279,6 +282,15 @@ static const char* read_op(void){
             buffer_write(buffer, op);
             nextc();
             single_operator = false;
+        }
+    }
+
+    // `<<=` and `>>=` are the only three-character operators besides
+    // `...` (which the parser reads as three `.` tokens).
+    if(!single_operator && buffer->len == 2 && peekc() == '='){
+        const char* two = buffer_ptr(buffer);
+        if((two[0] == '<' && two[1] == '<') || (two[0] == '>' && two[1] == '>')){
+            buffer_write(buffer, nextc());
         }
     }
 
