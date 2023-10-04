@@ -23,6 +23,10 @@ dir="$(cd "$dir" && pwd)"
 
 tmp=$(mktemp -d /tmp/sam_diff.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
+# gcc's exit status per (source, gcc version, target). Delete the
+# directory to rebuild every reference.
+cache_dir="${SAM_DIFF_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/samcompiler-gcc-differential}"
+mkdir -p "$cache_dir"
 
 gcc_for(){
     case "$1" in
@@ -81,13 +85,22 @@ for src in "$dir"/*.c; do
         ref="$tmp/$name.$t.gcc"
         out="$tmp/$name.$t"
         runner=$(runner_for "$t")
-        if ! $(gcc_for "$t") -w -o "$ref" "$src" 2>"$tmp/gcc.log"; then
-            echo
-            echo "gcc rejected $name for $t:" >&2
-            cat "$tmp/gcc.log" >&2
-            exit 1
+        # gcc's answer only changes with the source or the gcc, so it is
+        # cached; static linking and qemu dominate the run time otherwise.
+        key=$( { cat "$src"; $(gcc_for "$t") --version 2>/dev/null | head -1; echo "$t"; } | sha256sum | cut -c1-32)
+        cached="$cache_dir/$key"
+        if [ -f "$cached" ]; then
+            want=$(cat "$cached")
+        else
+            if ! $(gcc_for "$t") -w -o "$ref" "$src" 2>"$tmp/gcc.log"; then
+                echo
+                echo "gcc rejected $name for $t:" >&2
+                cat "$tmp/gcc.log" >&2
+                exit 1
+            fi
+            want=$(run_status "$runner" "$ref")
+            echo "$want" > "$cached"
         fi
-        want=$(run_status "$runner" "$ref")
         # The subshell keeps bash's "Aborted" job message out of the table.
         ( timeout 20 ./main -target="$t" "$src" "$out" >"$out.log" 2>&1 ) 2>/dev/null
         rc=$?

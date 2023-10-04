@@ -101,7 +101,9 @@ bash samples/run_all.sh ARCH=all
 ```
 
 Compare any directory of programs with gcc on every target (the
-reference is each target's own gcc):
+reference is each target's own gcc; its exit status is cached in
+`~/.cache/samcompiler-gcc-differential`, keyed by the source, the gcc
+version and the target, so delete that directory to rebuild them):
 
 ```
 bash tools/gcc_differential.sh tests/diff
