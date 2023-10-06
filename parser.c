@@ -339,6 +339,18 @@ static void parser_node_shift_children_left(struct node* node){
     node->exp.op    = right_op;
 }
 
+// A left operand that is already complete: a leaf, or a postfix
+// expression (`a[i]`, `f()`, `s.a`, `p->a`), which binds tighter than
+// any binary operator. Only a leaf counted here before, so
+// `a[1] * 2 + i * 10` stayed a[1] * (2 + i * 10).
+static bool parser_is_complete_operand(struct node* node){
+    if(node->type != NODE_TYPE_EXPRESSION){
+        return true;
+    }
+    return S_EQ(node->exp.op, "[]") || S_EQ(node->exp.op, "()")
+        || is_access_operator(node->exp.op);
+}
+
 // Recursive reorder: walks the freshly-built expression subtree and
 // flips ordering where the parent op deserves higher precedence.
 static void parser_reorder_expression(struct node** node_out){
@@ -346,16 +358,16 @@ static void parser_reorder_expression(struct node** node_out){
     if(node->type != NODE_TYPE_EXPRESSION){
         return;
     }
-    if(node->exp.left->type != NODE_TYPE_EXPRESSION
+    if(parser_is_complete_operand(node->exp.left)
        && node->exp.right
        && node->exp.right->type != NODE_TYPE_EXPRESSION){
         return;
     }
 
-    // The interesting case: left is a leaf, right is an expression.
+    // The interesting case: left is complete, right is an expression.
     // e.g. `50 * (20 + 120)` parsed top-down. If our op has higher
     // precedence than the right's op, shift left.
-    if(node->exp.left->type != NODE_TYPE_EXPRESSION
+    if(parser_is_complete_operand(node->exp.left)
        && node->exp.right
        && node->exp.right->type == NODE_TYPE_EXPRESSION){
         const char* right_op = node->exp.right->exp.op;

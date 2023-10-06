@@ -101,8 +101,9 @@ for src in "$dir"/*.c; do
             want=$(run_status "$runner" "$ref")
             echo "$want" > "$cached"
         fi
-        # The subshell keeps bash's "Aborted" job message out of the table.
-        ( timeout 20 ./main -target="$t" "$src" "$out" >"$out.log" 2>&1 ) 2>/dev/null
+        # bash reports a crashed child ("Segmentation fault") on its own
+        # stderr; the group keeps that redirected away from the table.
+        { timeout 20 ./main -target="$t" "$src" "$out" >"$out.log" 2>&1; } 2>/dev/null
         rc=$?
         if [ $rc = 0 ]; then
             got=$(run_status "$runner" "$out")
