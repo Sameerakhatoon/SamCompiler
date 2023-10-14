@@ -23,6 +23,9 @@ push dword [ebp-8]
 pop ebx
 mov ebx, [ebx]
 push ebx
+pop eax
+movsx eax, al
+push eax
 push dword 103
 pop ecx
 pop eax

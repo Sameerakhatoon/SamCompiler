@@ -25,12 +25,14 @@ struct vector* array_brackets_node_vector(struct array_brackets* brackets){
 // Bytes occupied by the array starting from `index`. Multiplies the
 // element size by each remaining bracket dimension. e.g. for
 // `int x[4][3]` with dtype->size==4, starting at index 0 returns
-// 4 * 4 * 3 = 48.
+// 4 * 4 * 3 = 48. The element of `int* v[2]` is a pointer, so it
+// takes the target pointer size; dtype->size is the int's 4 bytes,
+// which overlapped v[1] with the next local on the LP64 targets.
 size_t array_brackets_calculate_size_from_index(struct datatype* dtype,
                                                 struct array_brackets* brackets,
                                                 int index){
     struct vector* array_vec = array_brackets_node_vector(brackets);
-    size_t size = dtype->size;
+    size_t size = datatype_element_size(dtype);
     if(index >= vector_count(array_vec)){
         // Past the last bracket; we're sizing a single element.
         return size;

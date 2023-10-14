@@ -274,10 +274,12 @@ bool is_parentheses(const char* op){
 }
 
 // Postfix ++ and -- bind tighter than any prefix operator, so `-x++`
-// is -(x++) and `*p++` is *(p++).
+// is -(x++) and `*p++` is *(p++). The bracket token is "[";
+// is_array_operator matches the "[]" node operator, so with it here
+// `&a[1]` parsed as (&a)[1] and `-a[1]` as (-a)[1].
 bool unary_operand_compatible(struct token* token){
     return is_access_operator(token->sval)
-        || is_array_operator(token->sval)
+        || S_EQ(token->sval, "[")
         || is_parentheses(token->sval)
         || is_increment_operator(token->sval);
 }

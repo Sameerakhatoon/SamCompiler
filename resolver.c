@@ -683,6 +683,17 @@ struct resolver_entity* resolver_follow_exp(struct resolver_process* resolver, s
     return entity;
 }
 
+// A subscript that selects an element of an array of pointers
+// (`v[i]` with `int* v[2]`). The access chain leaves the element's
+// address; following the pointer needs one more load.
+bool resolver_entity_is_pointer_array_element(struct resolver_entity* entity){
+    return entity
+        && entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET
+        && (entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)
+        && (entity->dtype.flags & DATATYPE_FLAG_IS_POINTER)
+        && !(entity->flags & RESOLVER_ENTITY_FLAG_IS_POINTER_ARRAY_ENTITY);
+}
+
 // ch129: decide merge flags for an array-bracket entity. Out-of-bounds
 // (pointer arithmetic) or non-NUMBER index = standalone entity;
 // constant in-range index = JUST_USE_OFFSET so the merge pass can
@@ -979,8 +990,17 @@ static void resolver_finalize_result_flags(struct resolver_process* resolver, st
     bool does_get_address = false;
 
     if(entity == last_entity){
+        // A whole array used as a value is its address (it decays to a
+        // pointer); pushing its "value" loaded a[0] instead.
+        // A constant subscript merged into the variable is an element,
+        // not the array.
+        // So is a row of a multi-dimensional array whose constant
+        // subscripts merged into the variable (`m[2]` of `int m[3][4]`).
+        bool whole_array = (last_entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)
+            && (!(last_entity->flags & RESOLVER_ENTITY_FLAG_USES_ARRAY_BRACKETS)
+                || last_entity->array.index + 1 < (int)array_brackets_count(&last_entity->dtype));
         if(last_entity->type == RESOLVER_ENTITY_TYPE_VARIABLE
-           && datatype_is_struct_or_union_non_pointer(&last_entity->dtype)){
+           && (datatype_is_struct_or_union_non_pointer(&last_entity->dtype) || whole_array)){
             flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
             flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
         }
@@ -1008,7 +1028,11 @@ static void resolver_finalize_result_flags(struct resolver_process* resolver, st
             flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
         }
         if(entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET){
-            if(entity->dtype.flags & DATATYPE_FLAG_IS_POINTER){
+            // Subscripting a pointer loads the pointer's value first. An
+            // array whose elements are pointers (`int* v[2]`) is still an
+            // array and is addressed like any other.
+            if((entity->dtype.flags & DATATYPE_FLAG_IS_POINTER)
+               && !(entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)){
                 flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
                 flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
             } else {
@@ -1034,6 +1058,15 @@ static void resolver_finalize_result_flags(struct resolver_process* resolver, st
         // `char abc[50]; char* p = abc;` -> no final indirection.
         flags &= ~RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
     } else if(last_entity->type == RESOLVER_ENTITY_TYPE_VARIABLE){
+        flags |= RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+    } else if(last_entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET
+              && (last_entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)
+              && (int)array_brackets_count(&last_entity->dtype) <= last_entity->array.index + 1){
+        // The chain ends at an element (the last subscript of the
+        // array), so its value is the load from the computed address.
+        // Without this a runtime index such as `a[i]` produced the
+        // element's address. A partial subscript of a
+        // multi-dimensional array (`m[i]`) stays an address.
         flags |= RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
     }
 

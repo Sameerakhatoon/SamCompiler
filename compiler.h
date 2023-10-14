@@ -871,6 +871,8 @@ bool datatype_is_struct_or_union(struct datatype* dtype);
 // ch51: size helpers used by codegen + resolver later.
 size_t datatype_size_for_array_access(struct datatype* dtype);
 size_t datatype_element_size(struct datatype* dtype);
+// Array-to-pointer decay: `int a[3]` used as a value has type `int*`.
+struct datatype datatype_decay(struct datatype* dtype);
 size_t datatype_size_no_ptr(struct datatype* dtype);
 size_t datatype_size(struct datatype* dtype);
 bool   datatype_is_primitive(struct datatype* dtype);
@@ -1219,6 +1221,7 @@ bool                     resolver_result_ok(struct resolver_result* result);
 bool                     resolver_result_finished(struct resolver_result* result);
 struct resolver_entity*  resolver_result_entity_root(struct resolver_result* result);
 struct resolver_entity*  resolver_result_entity_next(struct resolver_entity* entity);
+bool                     resolver_entity_is_pointer_array_element(struct resolver_entity* entity);
 struct resolver_entity*  resolver_entity_clone(struct resolver_entity* entity);
 struct resolver_entity*  resolver_result_entity(struct resolver_result* result);
 struct resolver_result*  resolver_new_result(struct resolver_process* process);

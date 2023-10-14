@@ -431,13 +431,16 @@ static void parse_for_normal_unary(void){
     make_unary_node(op, operand);
 }
 
+// A prefix operator, then whatever operators follow it, with the unary
+// as their left operand. The `*` path used to skip the second step, so
+// in a right operand `1 + *q * 2` became (1 + *q) * 2.
 static void parse_for_unary(void){
     const char* op = token_peek_next()->sval;
     if(op_is_indirection(op)){
         parse_for_indirection_unary();
-        return;
+    } else {
+        parse_for_normal_unary();
     }
-    parse_for_normal_unary();
     parser_deal_with_additional_expression();
 }
 

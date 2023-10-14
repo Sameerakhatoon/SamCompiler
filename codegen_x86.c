@@ -677,7 +677,12 @@ static void codegen_generate_entity_access_for_unary_indirection_for_assignment_
     (void)flags;
     int gen_entity_rules = codegen_entity_rules(result->last_entity, history);
     (void)gen_entity_rules;
+    // A member read through `->` leaves the member's address, not its
+    // value, so `*w->p = 9` must follow one more level.
     int depth = entity->indirection.depth - 1;
+    if(result->flags & RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE){
+        depth++;
+    }
     codegen_apply_unary_access(depth);
     asm_push_ins_push_with_flags("ebx",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
@@ -961,7 +966,15 @@ static void codegen_gen_mem_access(struct node* node, int flags, struct resolver
         codegen_gen_mem_access_get_address(node, flags, entity);
         return;
     }
-    if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
+    if(entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY){
+        // An array used as a value is the address of its first element
+        // (loading here used to read a[0]).
+        asm_push("lea ebx, [%s]", codegen_entity_private(entity)->address);
+        struct datatype decayed = datatype_decay(&entity->dtype);
+        asm_push_ins_push_with_data("ebx",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = decayed});
+    } else if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
         codegen_gen_mem_access_get_address(node, 0, entity);
         asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
         codegen_generate_structure_push_or_return(entity, codegen_history_begin(0), 0);
@@ -1043,9 +1056,15 @@ static void codegen_generate_unary_indirection(struct node* node, struct history
         codegen_reduce_register(reg_to_use, datatype_size_no_ptr(&operand_datatype),
             operand_datatype.flags & DATATYPE_FLAG_IS_SIGNED);
     }
+    // A loaded value has the pointed-to type. Tagging it with the
+    // operand's pointer type made `*p + 1` scale the 1.
+    struct datatype result_dtype = operand_datatype;
+    if(!(history->flags & EXPRESSION_GET_ADDRESS)){
+        result_dtype = *datatype_pointer_reduce(&operand_datatype, real_depth);
+    }
     asm_push_ins_push_with_data(reg_to_use,
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-        &(struct stack_frame_data){.dtype = operand_datatype});
+        &(struct stack_frame_data){.dtype = result_dtype});
     codegen_response_acknowledge(&(struct response){
         .flags = RESPONSE_FLAG_RESOLVED_ENTITY,
         .data.resolved_entity = res->data.resolved_entity,
@@ -1196,11 +1215,20 @@ static void codegen_generate_entity_access_for_unary_indirection(struct resolver
     int gen_entity_rules = codegen_entity_rules(result->last_entity, history);
     (void)gen_entity_rules;
     int depth = entity->indirection.depth;
+    // `*v[i]` with `int* v[2]`: the chain left the element's address,
+    // and the element is the pointer to follow.
+    if(resolver_entity_is_pointer_array_element(entity->prev)){
+        asm_push("mov ebx, [ebx]");
+    }
     codegen_apply_unary_access(depth);
+    // The pushed value has the pointed-to type, so a following `+ 1`
+    // is not scaled as pointer arithmetic.
+    struct datatype result_dtype = *datatype_pointer_reduce(&operand_datatype, depth);
+    result_dtype.flags &= ~DATATYPE_FLAG_IS_ARRAY;
     asm_push_ins_push_with_data("ebx",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
         STACK_FRAME_ELEMENT_FLAG_IS_PUSHED_ADDRESS,
-        &(struct stack_frame_data){.dtype = operand_datatype});
+        &(struct stack_frame_data){.dtype = result_dtype});
 }
 
 // ch154: read-side unary get-address. Pop ebx (the address from the
@@ -1350,6 +1378,24 @@ static bool codegen_resolve_node_return_result(struct node* node, struct history
     return false;
 }
 
+// The access chain left the address of an array (not a value read from
+// one): no final load is due and the first entity was not pushed as a
+// value. A constant subscript merged into the variable keeps the array
+// type but is pushed as the element's value.
+static bool codegen_result_is_array_address(struct resolver_result* result, struct datatype* dtype){
+    return (dtype->flags & DATATYPE_FLAG_IS_ARRAY)
+        && !(result->flags & RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE)
+        && !(result->flags & RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE);
+}
+
+// The chain ends at the address of a pointer (an element of `int* v[2]`,
+// a member read as `w->p`): the value is the pointer stored there, a
+// full-width load. This path pushed the address itself before.
+static bool codegen_result_is_pointer_load(struct resolver_result* result, struct datatype* dtype){
+    return (dtype->flags & DATATYPE_FLAG_IS_POINTER)
+        && (result->flags & RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE);
+}
+
 static bool codegen_resolve_node_for_value(struct node* node, struct history* history){
     struct resolver_result* result = 0;
     if(!codegen_resolve_node_return_result(node, history, &result)){
@@ -1363,7 +1409,24 @@ static bool codegen_resolve_node_for_value(struct node* node, struct history* hi
     //     result_value.
     struct datatype dtype;
     assert(asm_datatype_back(&dtype));
-    if(datatype_is_struct_or_union_non_pointer(&dtype)){
+    if(codegen_result_is_array_address(result, &dtype)){
+        // The chain left an array's address (a whole array, or a row of
+        // a multi-dimensional one): the value is that address, as a
+        // pointer to the element type.
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        struct datatype decayed = datatype_decay(&dtype);
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = decayed});
+    } else if(codegen_result_is_pointer_load(result, &dtype)){
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        asm_push("mov eax, [eax]");
+        struct datatype element = dtype;
+        element.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = element});
+    } else if(datatype_is_struct_or_union_non_pointer(&dtype)){
         codegen_generate_structure_push(result->last_entity, history, 0);
     } else if(!(dtype.flags & DATATYPE_FLAG_IS_POINTER) && dtype.type != DATA_TYPE_VOID){
         // a void result (va_start, va_end, a void call) has no

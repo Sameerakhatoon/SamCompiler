@@ -31,6 +31,21 @@ size_t datatype_element_size(struct datatype* dtype){
     return dtype->size;
 }
 
+// An array used as a value is the address of its first element, so its
+// type becomes a pointer to the element type: `int a[3]` -> `int*`,
+// `char* s[2]` -> `char**`. For `int m[2][3]` the result is
+// `int*`; the row size is not kept, so `m + 1` is not supported.
+struct datatype datatype_decay(struct datatype* dtype){
+    struct datatype decayed = *dtype;
+    if(!(dtype->flags & DATATYPE_FLAG_IS_ARRAY)){
+        return decayed;
+    }
+    decayed.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    decayed.flags |= DATATYPE_FLAG_IS_POINTER;
+    decayed.pointer_depth++;
+    return decayed;
+}
+
 // Size ignoring pointer-ness: arrays still use the array total.
 size_t datatype_size_no_ptr(struct datatype* dtype){
     if(dtype->flags & DATATYPE_FLAG_IS_ARRAY){
@@ -39,14 +54,16 @@ size_t datatype_size_no_ptr(struct datatype* dtype){
     return dtype->size;
 }
 
-// Full size: pointers take the target pointer size, arrays use their
-// total size, else the raw type size.
+// Full size: arrays use their total size, pointers take the target
+// pointer size, else the raw type size. The array test comes first:
+// `int* v[2]` is an array of two pointers, and sizing it as one pointer
+// overlapped v[1] with the next local.
 size_t datatype_size(struct datatype* dtype){
-    if((dtype->flags & DATATYPE_FLAG_IS_POINTER) && dtype->pointer_depth > 0){
-        return target_current()->pointer_size;
-    }
     if(dtype->flags & DATATYPE_FLAG_IS_ARRAY){
         return dtype->array.size;
+    }
+    if((dtype->flags & DATATYPE_FLAG_IS_POINTER) && dtype->pointer_depth > 0){
+        return target_current()->pointer_size;
     }
     return dtype->size;
 }
