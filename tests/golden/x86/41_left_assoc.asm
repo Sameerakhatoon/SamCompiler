@@ -36,15 +36,15 @@ push dword 4
 pop ecx
 pop eax
 mov ecx, ecx
-xor edx, edx
-div ecx
+cdq
+idiv ecx
 push eax
 push dword 2
 pop ecx
 pop eax
 mov ecx, ecx
-xor edx, edx
-div ecx
+cdq
+idiv ecx
 push eax
 pop eax
 mov dword [ebp-24], eax
@@ -62,7 +62,7 @@ pop ecx
 pop eax
 mov ecx, ecx
 cdq
-div ecx
+idiv ecx
 mov eax, edx
 push eax
 pop eax

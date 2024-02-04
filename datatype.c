@@ -1,3 +1,4 @@
+#include <string.h>
 #include "compiler.h"
 
 // Helpers that operate on datatypes from the parser side. ch34 starts
@@ -29,6 +30,180 @@ size_t datatype_element_size(struct datatype* dtype){
         return target_current()->pointer_size;
     }
     return dtype->size;
+}
+
+// An int or long of `size` bytes, signed or not, as an operation or a
+// constant has it. `is_long` keeps long ranked above int when the two
+// are the same size (x86).
+static struct datatype datatype_integer(size_t size, bool is_signed, bool is_long){
+    struct datatype dtype = {0};
+    dtype.type     = is_long ? DATA_TYPE_LONG : DATA_TYPE_INTEGER;
+    dtype.type_str = is_long ? "long" : "int";
+    dtype.size     = size;
+    if(is_signed){
+        dtype.flags |= DATATYPE_FLAG_IS_SIGNED;
+    }
+    return dtype;
+}
+
+static bool datatype_is_long(struct datatype* dtype){
+    return dtype->type == DATA_TYPE_LONG || dtype->size > DATA_SIZE_DWORD;
+}
+
+// Integer conversion rank (C11 6.3.1.1): by size, and long above int.
+static int datatype_rank(struct datatype* dtype){
+    return (int)dtype->size * 2 + (datatype_is_long(dtype) ? 1 : 0);
+}
+
+// The type of an integer constant (C11 6.4.4.1p5): the first of these
+// that holds the value. A decimal constant without u tries int then
+// long; one written in hex, octal or binary may also be unsigned int or
+// unsigned long; u limits the list to unsigned types, l starts it at
+// long. long long is the target's long. A value no type holds becomes
+// unsigned long, as gcc does with a warning.
+struct datatype datatype_for_number_node(struct node* node){
+    int flags = node->num.flags;
+    unsigned long long value = node->llnum;
+    size_t long_size = target_current()->long_size;
+    bool any_sign = (flags & NUMBER_FLAG_NOT_DECIMAL) || (flags & NUMBER_FLAG_UNSIGNED);
+    struct {
+        size_t size;
+        bool   is_signed;
+        bool   is_long;
+    } candidates[] = {
+        { DATA_SIZE_DWORD, true,  false },
+        { DATA_SIZE_DWORD, false, false },
+        { long_size,       true,  true  },
+        { long_size,       false, true  },
+    };
+    for(size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++){
+        bool is_signed = candidates[i].is_signed;
+        if((flags & NUMBER_FLAG_LONG) && !candidates[i].is_long) continue;
+        if((flags & NUMBER_FLAG_UNSIGNED) && is_signed) continue;
+        if(!is_signed && !any_sign) continue;
+        int bits = candidates[i].size * 8 - (is_signed ? 1 : 0);
+        if(bits >= 64 || value <= (~0ULL >> (64 - bits))){
+            struct datatype dtype = datatype_integer(candidates[i].size, is_signed, candidates[i].is_long);
+            dtype.flags |= DATATYPE_FLAG_IS_LITERAL;
+            return dtype;
+        }
+    }
+    struct datatype dtype = datatype_integer(long_size, false, true);
+    dtype.flags |= DATATYPE_FLAG_IS_LITERAL;
+    return dtype;
+}
+
+// A constant as a 64-bit register holds it: a 4-byte signed value sign
+// extended, a 4-byte unsigned value zero extended, a long as it is.
+long long datatype_canonical_value(unsigned long long value, struct datatype* dtype){
+    if(datatype_element_size(dtype) <= DATA_SIZE_DWORD){
+        if(dtype->flags & DATATYPE_FLAG_IS_SIGNED){
+            return (long long)(int)(unsigned int)value;
+        }
+        return (long long)(unsigned int)value;
+    }
+    return (long long)value;
+}
+
+// Integer promotion (C11 6.3.1.1p2): a char or short operand becomes
+// int, since int holds all their values.
+struct datatype datatype_promote(struct datatype* dtype){
+    if((dtype->flags & DATATYPE_FLAG_IS_POINTER) || datatype_is_struct_or_union(dtype)){
+        return *dtype;
+    }
+    if(datatype_element_size(dtype) < DATA_SIZE_DWORD){
+        return datatype_integer(DATA_SIZE_DWORD, true, false);
+    }
+    return datatype_integer(datatype_element_size(dtype), dtype->flags & DATATYPE_FLAG_IS_SIGNED, datatype_is_long(dtype));
+}
+
+// The usual arithmetic conversions (C11 6.3.1.8p1) of two integer
+// operands: the same signedness keeps the higher rank; otherwise the
+// unsigned type wins unless the signed type is wider and so holds all
+// its values; if not, the unsigned version of the signed type.
+static struct datatype datatype_common(struct datatype* left, struct datatype* right){
+    struct datatype a = datatype_promote(left);
+    struct datatype b = datatype_promote(right);
+    bool a_signed = a.flags & DATATYPE_FLAG_IS_SIGNED;
+    bool b_signed = b.flags & DATATYPE_FLAG_IS_SIGNED;
+    if(a_signed == b_signed){
+        return datatype_rank(&a) >= datatype_rank(&b) ? a : b;
+    }
+    struct datatype* u = a_signed ? &b : &a;
+    struct datatype* s = a_signed ? &a : &b;
+    if(datatype_rank(u) >= datatype_rank(s)){
+        return *u;
+    }
+    if(s->size > u->size){
+        return *s;
+    }
+    return datatype_integer(s->size, false, datatype_is_long(s));
+}
+
+static bool datatype_op_is_comparison(const char* op){
+    return S_EQ(op, "==") || S_EQ(op, "!=") || S_EQ(op, "<")
+        || S_EQ(op, ">")  || S_EQ(op, "<=") || S_EQ(op, ">=");
+}
+
+// Bytes a pointer step moves: the size of what it points at.
+static size_t datatype_pointer_step(struct datatype* pointer){
+    return datatype_size(datatype_pointer_reduce(pointer, 1));
+}
+
+// How `left op right` runs, for every binary operator a backend turns
+// into one instruction. Before this, each backend took the signedness
+// from the right operand alone and the width from the wider operand,
+// and scaled the non-pointer side for every operator, so `-17 / 5`
+// divided unsigned, `u > 1` compared signed, and `q > p` compared q
+// with 4 * p.
+void datatype_binary_types(struct datatype* left, struct datatype* right, const char* op, struct datatype_binary* out){
+    memset(out, 0, sizeof(*out));
+    out->scale_left  = 1;
+    out->scale_right = 1;
+    out->pointer_difference = 1;
+    size_t pointer_size = target_current()->pointer_size;
+    bool left_pointer  = left->flags & DATATYPE_FLAG_IS_POINTER;
+    bool right_pointer = right->flags & DATATYPE_FLAG_IS_POINTER;
+
+    if(datatype_op_is_comparison(op)){
+        // Pointers compare as unsigned addresses, unscaled.
+        if(left_pointer || right_pointer){
+            out->operation = datatype_integer(pointer_size, false, pointer_size > DATA_SIZE_DWORD);
+        } else {
+            out->operation = datatype_common(left, right);
+        }
+        out->result = datatype_integer(DATA_SIZE_DWORD, true, false);
+        return;
+    }
+
+    if((S_EQ(op, "+") || S_EQ(op, "-")) && (left_pointer || right_pointer)){
+        out->operation = datatype_integer(pointer_size, false, pointer_size > DATA_SIZE_DWORD);
+        if(left_pointer && right_pointer){
+            // p - q counts elements, as a ptrdiff_t (long).
+            out->pointer_difference = datatype_pointer_step(left);
+            out->operation.flags |= DATATYPE_FLAG_IS_SIGNED;
+            out->result = datatype_integer(target_current()->long_size, true, true);
+            return;
+        }
+        if(left_pointer){
+            out->scale_right = datatype_pointer_step(left);
+            out->result = *left;
+        } else {
+            out->scale_left = datatype_pointer_step(right);
+            out->result = *right;
+        }
+        return;
+    }
+
+    if(S_EQ(op, "<<") || S_EQ(op, ">>")){
+        // A shift has the promoted type of its left operand.
+        out->operation = datatype_promote(left);
+        out->result    = out->operation;
+        return;
+    }
+
+    out->operation = datatype_common(left, right);
+    out->result    = out->operation;
 }
 
 // An array used as a value is the address of its first element, so its

@@ -381,8 +381,11 @@ static void codegen_generate_function_arguments(struct vector* argument_vector){
 
 static void codegen_generate_number_node(struct node* node, struct history* history){
     (void)history;
-    codegen_mov_imm("a0", (int)node->llnum);
-    struct datatype dtype = datatype_for_numeric();
+    // The constant's type comes from its value and suffix, and the
+    // register holds its canonical 64-bit form; the old `(int)` cast cut
+    // longs to 32 bits.
+    struct datatype dtype = datatype_for_number_node(node);
+    codegen_mov_imm("a0", datatype_canonical_value(node->llnum, &dtype));
     asm_push_ins_push_with_data("a0",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
         STACK_FRAME_ELEMENT_FLAG_IS_NUMERICAL,
@@ -752,20 +755,17 @@ static void codegen_generate_read_modify_write(struct node* node, struct resolve
             &(struct stack_frame_data){.dtype = dtype});
     }
 
+    // `a op= b` computes `a op b` like the binary operator (in the
+    // converted type, a pointer step scaled) and stores it at a's width.
     const char* arith = assignment_arithmetic_operator(op);
     int op_flags = codegen_set_flag_for_operator(arith);
-    bool is_pointer = dtype.flags & DATATYPE_FLAG_IS_POINTER;
-    if(is_pointer && (S_EQ(arith, "+") || S_EQ(arith, "-"))){
-        size_t step = datatype_size(datatype_pointer_reduce(&dtype, 1));
-        if(step > DATA_SIZE_BYTE){
-            codegen_mul_imm("a1", step);
-        }
+    struct datatype_binary types;
+    datatype_binary_types(&dtype, &value_dtype, arith, &types);
+    if(types.scale_right > 1){
+        codegen_mul_imm("a1", types.scale_right);
     }
-    // The operation runs in the type both operands convert to: unsigned
-    // when either is (a literal step counts as int).
-    bool value_signed = (value_dtype.flags & DATATYPE_FLAG_IS_SIGNED) || (value_dtype.flags & DATATYPE_FLAG_IS_LITERAL);
-    bool wide = codegen_is_wide(&dtype) || codegen_is_wide(&value_dtype);
-    codegen_gen_math_for_value(op_flags, wide, lhs_signed && value_signed && !is_pointer);
+    codegen_gen_math_for_value(op_flags, codegen_is_wide(&types.operation),
+        types.operation.flags & DATATYPE_FLAG_IS_SIGNED);
 
     codegen_store_register("a0", address, size);
     if((assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED) && !(assign_flags & CODEGEN_ASSIGN_POSTFIX)){
@@ -1001,30 +1001,46 @@ static bool codegen_is_wide(struct datatype* dtype){
     return datatype_element_size(dtype) == DATA_SIZE_DDWORD;
 }
 
+static void codegen_zero_extend_word(const char* reg);
+
+// The type of a value that is an int whatever its operands were
+// (`!x`, a comparison).
+static struct datatype codegen_int_result(void){
+    struct datatype dtype = datatype_for_numeric();
+    dtype.flags &= ~DATATYPE_FLAG_IS_LITERAL;
+    return dtype;
+}
+
 static void codegen_generate_normal_unary(struct node* node, struct history* history){
     codegen_generate_expressionable(node->unary.operand, history);
     struct datatype last_dtype;
     assert(asm_datatype_back(&last_dtype));
     asm_push_ins_pop("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-    bool wide = codegen_is_wide(&last_dtype);
+    // `-` and `~` work on the promoted operand: a char becomes int, an
+    // unsigned int stays unsigned and is zero extended afterwards.
+    struct datatype promoted = datatype_promote(&last_dtype);
+    bool wide = codegen_is_wide(&promoted);
+    bool zero_extend = !wide && !(promoted.flags & DATATYPE_FLAG_IS_SIGNED);
     if(S_EQ(node->unary.op, "-")){
         asm_push(wide ? "neg a0, a0" : "negw a0, a0");
+        if(zero_extend){ codegen_zero_extend_word("a0"); }
         asm_push_ins_push_with_data("a0",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = promoted});
     } else if(S_EQ(node->unary.op, "~")){
         // not of a sign-extended int is still sign-extended
         asm_push("not a0, a0");
+        if(zero_extend){ codegen_zero_extend_word("a0"); }
         asm_push_ins_push_with_data("a0",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = promoted});
     } else if(S_EQ(node->unary.op, "*")){
         codegen_generate_unary_indirection(node, history);
     } else if(S_EQ(node->unary.op, "!")){
         asm_push("seqz a0, a0");
         asm_push_ins_push_with_data("a0",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = codegen_int_result()});
     }
 }
 
@@ -1389,8 +1405,32 @@ static int get_additional_flags(int current_flags, struct node* node){
 // low 32 bits and sign-extend the result. Compares are always full
 // width: ints are kept sign-extended, so a 64-bit compare gives the
 // 32-bit answer.
+// reg = its low 32 bits, zero extended: an unsigned int's canonical form.
+static void codegen_zero_extend_word(const char* reg){
+    asm_push("slli %s, %s, 32", reg, reg);
+    asm_push("srli %s, %s, 32", reg, reg);
+}
+
+static bool codegen_is_comparison(int flags){
+    return flags & (EXPRESSION_IS_ABOVE | EXPRESSION_IS_BELOW | EXPRESSION_IS_EQUAL
+        | EXPRESSION_IS_ABOVE_OR_EQUAL | EXPRESSION_IS_BELOW_OR_EQUAL | EXPRESSION_IS_NOT_EQUAL);
+}
+
 static void codegen_gen_math_for_value(int flags, bool wide, bool is_signed){
     const char* w = wide ? "" : "w";
+    // Compares are full width, so both 32-bit operands first take the
+    // operation's form: an int compared as unsigned int (`-1 < u`) is
+    // zero extended, an unsigned int compared as int sign extended.
+    if(!wide && codegen_is_comparison(flags)){
+        if(is_signed){
+            asm_push("sext.w a0, a0");
+            asm_push("sext.w a1, a1");
+        } else {
+            codegen_zero_extend_word("a0");
+            codegen_zero_extend_word("a1");
+        }
+    }
+    const char* slt = is_signed ? "slt" : "sltu";
     if(flags & EXPRESSION_IS_ADDITION){
         asm_push("add%s a0, a0, a1", w);
     } else if(flags & EXPRESSION_IS_SUBTRACTION){
@@ -1402,17 +1442,17 @@ static void codegen_gen_math_for_value(int flags, bool wide, bool is_signed){
     } else if(flags & EXPRESSION_IS_MODULAS){
         asm_push("%s%s a0, a0, a1", is_signed ? "rem" : "remu", w);
     } else if(flags & EXPRESSION_IS_ABOVE){
-        asm_push("slt a0, a1, a0");
+        asm_push("%s a0, a1, a0", slt);
     } else if(flags & EXPRESSION_IS_BELOW){
-        asm_push("slt a0, a0, a1");
+        asm_push("%s a0, a0, a1", slt);
     } else if(flags & EXPRESSION_IS_EQUAL){
         asm_push("xor a0, a0, a1");
         asm_push("seqz a0, a0");
     } else if(flags & EXPRESSION_IS_ABOVE_OR_EQUAL){
-        asm_push("slt a0, a0, a1");
+        asm_push("%s a0, a0, a1", slt);
         asm_push("xori a0, a0, 1");
     } else if(flags & EXPRESSION_IS_BELOW_OR_EQUAL){
-        asm_push("slt a0, a1, a0");
+        asm_push("%s a0, a1, a0", slt);
         asm_push("xori a0, a0, 1");
     } else if(flags & EXPRESSION_IS_NOT_EQUAL){
         asm_push("xor a0, a0, a1");
@@ -1420,13 +1460,18 @@ static void codegen_gen_math_for_value(int flags, bool wide, bool is_signed){
     } else if(flags & EXPRESSION_IS_BITSHIFT_LEFT){
         asm_push("sll%s a0, a0, a1", w);
     } else if(flags & EXPRESSION_IS_BITSHIFT_RIGHT){
-        asm_push("sra%s a0, a0, a1", w);
+        asm_push("%s%s a0, a0, a1", is_signed ? "sra" : "srl", w);
     } else if(flags & EXPRESSION_IS_BITWISE_AND){
         asm_push("and a0, a0, a1");
     } else if(flags & EXPRESSION_IS_BITWISE_OR){
         asm_push("or a0, a0, a1");
     } else if(flags & EXPRESSION_IS_BITWISE_XOR){
         asm_push("xor a0, a0, a1");
+    }
+    // The *w instructions sign-extend; an unsigned int result is kept
+    // zero extended like the other 64-bit targets.
+    if(!wide && !is_signed && !codegen_is_comparison(flags)){
+        codegen_zero_extend_word("a0");
     }
 }
 
@@ -1480,6 +1525,21 @@ static void codegen_generate_exp_node_for_logical_arithmetic(struct node* node, 
     }
 }
 
+// a0 = a0 / n for a byte difference that is an exact multiple of n
+// (a pointer difference).
+static void codegen_divide_exact(size_t n){
+    if((n & (n - 1)) == 0){
+        int shift = 0;
+        while(((size_t)1 << shift) < n){
+            shift++;
+        }
+        asm_push("srai a0, a0, %i", shift);
+        return;
+    }
+    codegen_mov_imm("a1", n);
+    asm_push("div a0, a0, a1");
+}
+
 static void codegen_generate_exp_node_for_arithmetic(struct node* node, struct history* history){
     assert(node->type == NODE_TYPE_EXPRESSION);
     if(is_logical_operator(node->exp.op)){
@@ -1499,16 +1559,24 @@ static void codegen_generate_exp_node_for_arithmetic(struct node* node, struct h
         struct datatype left_dtype = datatype_for_numeric();
         asm_datatype_back(&left_dtype);
         asm_push_ins_pop("a0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-        struct datatype* pointer_dtype = datatype_thats_a_pointer(&left_dtype, &right_dtype);
-        if(pointer_dtype && datatype_size(datatype_pointer_reduce(pointer_dtype, 1)) > DATA_SIZE_BYTE){
-            const char* reg = (pointer_dtype == &right_dtype) ? "a0" : "a1";
-            codegen_mul_imm(reg, datatype_size(datatype_pointer_reduce(pointer_dtype, 1)));
+        // datatype_binary_types gives the type the operation runs in
+        // (width and signedness pick the instructions), the pointer
+        // scaling and the result type. The signedness came from the
+        // right operand alone before, and every operator was scaled.
+        struct datatype_binary types;
+        datatype_binary_types(&left_dtype, &right_dtype, node->exp.op, &types);
+        if(types.scale_left > 1){
+            codegen_mul_imm("a0", types.scale_left);
         }
-        bool wide = codegen_is_wide(&left_dtype) || codegen_is_wide(&right_dtype);
-        if(datatype_element_size(&left_dtype) > datatype_element_size(&right_dtype)){
-            last_dtype = left_dtype;
+        if(types.scale_right > 1){
+            codegen_mul_imm("a1", types.scale_right);
         }
-        codegen_gen_math_for_value(op_flags, wide, last_dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+        codegen_gen_math_for_value(op_flags, codegen_is_wide(&types.operation),
+            types.operation.flags & DATATYPE_FLAG_IS_SIGNED);
+        if(types.pointer_difference > 1){
+            codegen_divide_exact(types.pointer_difference);
+        }
+        last_dtype = types.result;
     }
     asm_push_ins_push_with_data("a0",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,

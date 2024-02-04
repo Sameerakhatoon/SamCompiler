@@ -101,6 +101,16 @@ enum {
     NUMBER_TYPE_DOUBLE,
 };
 
+// What an integer constant's spelling says about its type (C11
+// 6.4.4.1): the suffixes, and whether it was written in decimal. Kept
+// on the token and the NODE_TYPE_NUMBER node; datatype_for_number_node
+// turns them into the constant's type.
+enum {
+    NUMBER_FLAG_UNSIGNED    = 0b001,   // u or U
+    NUMBER_FLAG_LONG        = 0b010,   // l, L, ll or LL
+    NUMBER_FLAG_NOT_DECIMAL = 0b100,   // 0x, 0b or a leading 0
+};
+
 enum {
     TOKEN_FLAG_IS_CUSTOM_OPERATOR = 0b00000001,
 };
@@ -122,6 +132,8 @@ struct token {
     // Set on TOKEN_TYPE_NUMBER tokens only. Records L / f / d suffixes.
     struct token_number {
         int type;
+        // NUMBER_FLAG_*.
+        int flags;
     } num;
 
     // True if there is whitespace between this token and the next token.
@@ -676,6 +688,12 @@ struct node {
             struct node* exp;
         } parenthesis;
 
+        // NODE_TYPE_NUMBER: NUMBER_FLAG_* from the constant's spelling.
+        // The value itself is in llnum.
+        struct node_number {
+            int flags;
+        } num;
+
         struct var {
             struct datatype type;
             // ch53: bytes of padding to insert before this variable
@@ -873,6 +891,24 @@ size_t datatype_size_for_array_access(struct datatype* dtype);
 size_t datatype_element_size(struct datatype* dtype);
 // Array-to-pointer decay: `int a[3]` used as a value has type `int*`.
 struct datatype datatype_decay(struct datatype* dtype);
+// C integer typing (C11 6.3.1, 6.4.4.1): the type of a constant, the
+// promoted type of an operand, and how a binary operator runs.
+struct datatype datatype_for_number_node(struct node* node);
+long long       datatype_canonical_value(unsigned long long value, struct datatype* dtype);
+struct datatype datatype_promote(struct datatype* dtype);
+struct datatype_binary {
+    // The type the instruction works in: its width and signedness pick
+    // the instruction (idiv or div, setl or setb, sar or shr).
+    struct datatype operation;
+    // The type of the value pushed afterwards (int for a comparison).
+    struct datatype result;
+    // Pointer + integer: multiply that operand by the element size.
+    size_t          scale_left;
+    size_t          scale_right;
+    // Pointer - pointer: divide the byte difference by the element size.
+    size_t          pointer_difference;
+};
+void datatype_binary_types(struct datatype* left, struct datatype* right, const char* op, struct datatype_binary* out);
 size_t datatype_size_no_ptr(struct datatype* dtype);
 size_t datatype_size(struct datatype* dtype);
 bool   datatype_is_primitive(struct datatype* dtype);

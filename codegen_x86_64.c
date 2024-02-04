@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "compiler.h"
@@ -290,14 +291,25 @@ static void codegen_generate_function_arguments(struct vector* argument_vector){
 }
 
 // `push qword imm` sign-extends a 32-bit immediate, which is exactly
-// the canonical form of an int.
+// the canonical form of an int. A constant whose canonical value does
+// not fit one (a long such as 5000000000, an unsigned int above
+// 0x7fffffff) goes through rax; the old `(int)` cast cut it to 32 bits.
 static void codegen_generate_number_node(struct node* node, struct history* history){
     (void)history;
-    asm_push_ins_push_with_data("qword %i",
+    struct datatype dtype = datatype_for_number_node(node);
+    long long value = datatype_canonical_value(node->llnum, &dtype);
+    if(value >= INT32_MIN && value <= INT32_MAX){
+        asm_push_ins_push_with_data("qword %lld",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
+            STACK_FRAME_ELEMENT_FLAG_IS_NUMERICAL,
+            &(struct stack_frame_data){.dtype = dtype}, value);
+        return;
+    }
+    asm_push("mov rax, %lld", value);
+    asm_push_ins_push_with_data("rax",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
         STACK_FRAME_ELEMENT_FLAG_IS_NUMERICAL,
-        &(struct stack_frame_data){.dtype = datatype_for_numeric()},
-        (int)node->llnum);
+        &(struct stack_frame_data){.dtype = dtype});
 }
 
 static bool codegen_is_exp_root_for_flags(int flags){
@@ -719,21 +731,17 @@ static void codegen_generate_read_modify_write(struct node* node, struct resolve
             &(struct stack_frame_data){.dtype = dtype});
     }
 
+    // `a op= b` computes `a op b` like the binary operator (in the
+    // converted type, a pointer step scaled) and stores it at a's width.
     const char* arith = assignment_arithmetic_operator(op);
     int op_flags = codegen_set_flag_for_operator(arith);
-    bool is_pointer = dtype.flags & DATATYPE_FLAG_IS_POINTER;
-    if(is_pointer && (S_EQ(arith, "+") || S_EQ(arith, "-"))){
-        size_t step = datatype_size(datatype_pointer_reduce(&dtype, 1));
-        if(step > DATA_SIZE_BYTE){
-            asm_push("imul rcx, %i", (int)step);
-        }
+    struct datatype_binary types;
+    datatype_binary_types(&dtype, &value_dtype, arith, &types);
+    if(types.scale_right > 1){
+        asm_push("imul rcx, %zu", types.scale_right);
     }
-    // The operation runs in the type both operands convert to: unsigned
-    // when either is (a literal step counts as int).
-    bool value_signed = (value_dtype.flags & DATATYPE_FLAG_IS_SIGNED) || (value_dtype.flags & DATATYPE_FLAG_IS_LITERAL);
-    bool is_signed = lhs_signed && value_signed && !is_pointer;
-    bool wide = codegen_is_wide(&dtype) || codegen_is_wide(&value_dtype);
-    codegen_gen_math_for_value(op_flags, wide, is_signed);
+    codegen_gen_math_for_value(op_flags, codegen_is_wide(&types.operation),
+        types.operation.flags & DATATYPE_FLAG_IS_SIGNED);
 
     const char* reg_to_use = "rax";
     const char* mov_type   = codegen_byte_word_or_dword_or_ddword(size, &reg_to_use);
@@ -985,28 +993,35 @@ static void codegen_generate_normal_unary(struct node* node, struct history* his
     struct datatype last_dtype;
     assert(asm_datatype_back(&last_dtype));
     asm_push_ins_pop("rax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-    bool wide = codegen_is_wide(&last_dtype);
+    // `-` and `~` work on the promoted operand: a char becomes int, an
+    // unsigned int stays unsigned and is zero extended afterwards.
+    struct datatype promoted = datatype_promote(&last_dtype);
+    bool wide = codegen_is_wide(&promoted);
+    const char* narrow = (promoted.flags & DATATYPE_FLAG_IS_SIGNED) ? "movsxd rax, eax" : "mov eax, eax";
     if(S_EQ(node->unary.op, "-")){
         asm_push(wide ? "neg rax" : "neg eax");
-        if(!wide){ asm_push("movsxd rax, eax"); }
+        if(!wide){ asm_push(narrow); }
         asm_push_ins_push_with_data("rax",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = promoted});
     } else if(S_EQ(node->unary.op, "~")){
         asm_push(wide ? "not rax" : "not eax");
-        if(!wide){ asm_push("movsxd rax, eax"); }
+        if(!wide){ asm_push(narrow); }
         asm_push_ins_push_with_data("rax",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = promoted});
     } else if(S_EQ(node->unary.op, "*")){
         codegen_generate_unary_indirection(node, history);
     } else if(S_EQ(node->unary.op, "!")){
         asm_push("cmp rax, 0");
         asm_push("sete al");
         asm_push("movzx eax, al");
+        // `!x` is an int whatever x is (a pointer stayed a pointer).
+        struct datatype result = datatype_for_numeric();
+        result.flags &= ~DATATYPE_FLAG_IS_LITERAL;
         asm_push_ins_push_with_data("rax",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = result});
     }
 }
 
@@ -1390,17 +1405,18 @@ static int get_additional_flags(int current_flags, struct node* node){
     return extra;
 }
 
-// Compare rax/eax with rcx/ecx and leave 0 or 1 in rax. The signed
-// condition codes match the i386 backend.
+// Compare rax/eax with rcx/ecx and leave 0 or 1 in rax. An unsigned
+// comparison uses the below/above condition codes.
 static void codegen_gen_cmp(bool wide, const char* set_ins){
     asm_push(wide ? "cmp rax, rcx" : "cmp eax, ecx");
     asm_push("%s al", set_ins);
     asm_push("movzx eax, al");
 }
 
-// rax = rax <op> rcx. With wide == false the operation runs on eax and
-// ecx so int overflow wraps at 32 bits, then movsxd restores the
-// canonical 64-bit form.
+// rax = rax <op> rcx in the operation's type. With wide == false the
+// operation runs on eax and ecx so int overflow wraps at 32 bits, then
+// the result is put back in canonical 64-bit form: sign extended for
+// int, zero extended for unsigned int.
 static void codegen_gen_math_for_value(int flags, bool wide, bool is_signed){
     const char* a = wide ? "rax" : "eax";
     const char* c = wide ? "rcx" : "ecx";
@@ -1423,19 +1439,19 @@ static void codegen_gen_math_for_value(int flags, bool wide, bool is_signed){
             asm_push(wide ? "mov rax, rdx" : "mov eax, edx");
         }
     } else if(flags & EXPRESSION_IS_ABOVE){
-        codegen_gen_cmp(wide, "setg");
+        codegen_gen_cmp(wide, is_signed ? "setg" : "seta");
         narrow_result = false;
     } else if(flags & EXPRESSION_IS_BELOW){
-        codegen_gen_cmp(wide, "setl");
+        codegen_gen_cmp(wide, is_signed ? "setl" : "setb");
         narrow_result = false;
     } else if(flags & EXPRESSION_IS_EQUAL){
         codegen_gen_cmp(wide, "sete");
         narrow_result = false;
     } else if(flags & EXPRESSION_IS_ABOVE_OR_EQUAL){
-        codegen_gen_cmp(wide, "setge");
+        codegen_gen_cmp(wide, is_signed ? "setge" : "setae");
         narrow_result = false;
     } else if(flags & EXPRESSION_IS_BELOW_OR_EQUAL){
-        codegen_gen_cmp(wide, "setle");
+        codegen_gen_cmp(wide, is_signed ? "setle" : "setbe");
         narrow_result = false;
     } else if(flags & EXPRESSION_IS_NOT_EQUAL){
         codegen_gen_cmp(wide, "setne");
@@ -1443,7 +1459,7 @@ static void codegen_gen_math_for_value(int flags, bool wide, bool is_signed){
     } else if(flags & EXPRESSION_IS_BITSHIFT_LEFT){
         asm_push("sal %s, cl", a);
     } else if(flags & EXPRESSION_IS_BITSHIFT_RIGHT){
-        asm_push("sar %s, cl", a);
+        asm_push("%s %s, cl", is_signed ? "sar" : "shr", a);
     } else if(flags & EXPRESSION_IS_BITWISE_AND){
         asm_push("and %s, %s", a, c);
     } else if(flags & EXPRESSION_IS_BITWISE_OR){
@@ -1452,7 +1468,8 @@ static void codegen_gen_math_for_value(int flags, bool wide, bool is_signed){
         asm_push("xor %s, %s", a, c);
     }
     if(narrow_result){
-        asm_push("movsxd rax, eax");
+        // A 32-bit mov zero-fills the top half.
+        asm_push(is_signed ? "movsxd rax, eax" : "mov eax, eax");
     }
 }
 
@@ -1517,11 +1534,27 @@ static void codegen_generate_exp_node_for_logical_arithmetic(struct node* node, 
     }
 }
 
+// rax = rax / n for a byte difference that is an exact multiple of n
+// (a pointer difference).
+static void codegen_divide_exact(size_t n){
+    if((n & (n - 1)) == 0){
+        int shift = 0;
+        while(((size_t)1 << shift) < n){
+            shift++;
+        }
+        asm_push("sar rax, %i", shift);
+        return;
+    }
+    asm_push("mov rcx, %zu", n);
+    asm_push("cqo");
+    asm_push("idiv rcx");
+}
+
 // Binary arithmetic. Same shape as i386 (left and right pushed, right
-// popped into rcx, left into rax), plus the choice of operand width:
-// 64-bit when either side is a long or a pointer. The result is
-// tagged with the wider side's type so a pointer sum stays a pointer
-// for the next operation.
+// popped into rcx, left into rax). datatype_binary_types gives the type
+// the operation runs in (its width picks 32 or 64-bit registers, its
+// signedness picks idiv or div, setl or setb, sar or shr), the pointer
+// scaling, and the type of the pushed result.
 static void codegen_generate_exp_node_for_arithmetic(struct node* node, struct history* history){
     assert(node->type == NODE_TYPE_EXPRESSION);
     if(is_logical_operator(node->exp.op)){
@@ -1541,17 +1574,20 @@ static void codegen_generate_exp_node_for_arithmetic(struct node* node, struct h
         struct datatype left_dtype = datatype_for_numeric();
         asm_datatype_back(&left_dtype);
         asm_push_ins_pop("rax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-        struct datatype* pointer_dtype = datatype_thats_a_pointer(&left_dtype, &right_dtype);
-        if(pointer_dtype && datatype_size(datatype_pointer_reduce(pointer_dtype, 1)) > DATA_SIZE_BYTE){
-            const char* reg = (pointer_dtype == &right_dtype) ? "rax" : "rcx";
-            asm_push("imul %s, %i", reg,
-                (int)datatype_size(datatype_pointer_reduce(pointer_dtype, 1)));
+        struct datatype_binary types;
+        datatype_binary_types(&left_dtype, &right_dtype, node->exp.op, &types);
+        if(types.scale_left > 1){
+            asm_push("imul rax, %zu", types.scale_left);
         }
-        bool wide = codegen_is_wide(&left_dtype) || codegen_is_wide(&right_dtype);
-        if(datatype_element_size(&left_dtype) > datatype_element_size(&right_dtype)){
-            last_dtype = left_dtype;
+        if(types.scale_right > 1){
+            asm_push("imul rcx, %zu", types.scale_right);
         }
-        codegen_gen_math_for_value(op_flags, wide, last_dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+        codegen_gen_math_for_value(op_flags, codegen_is_wide(&types.operation),
+            types.operation.flags & DATATYPE_FLAG_IS_SIGNED);
+        if(types.pointer_difference > 1){
+            codegen_divide_exact(types.pointer_difference);
+        }
+        last_dtype = types.result;
     }
     asm_push_ins_push_with_data("rax",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,

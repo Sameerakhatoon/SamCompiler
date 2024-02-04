@@ -168,8 +168,100 @@ static struct token* token_make_number_for_value(unsigned long long number){
     });
 }
 
+static int lexer_digit_value(char c){
+    if(c >= '0' && c <= '9') return c - '0';
+    if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 99;
+}
+
+// An integer constant (C11 6.4.4.1): decimal, octal (a leading 0),
+// hexadecimal (0x / 0X) or binary (0b / 0B, a GNU extension), then a u
+// and an l / ll suffix in either order. The whole spelling is read
+// first, so `08`, `0x`, `0b12` and `10q` are errors instead of a number
+// followed by stray tokens; before, `010` was ten, `0xFF` stopped at
+// the F, and `5u` was 5 followed by an identifier `u`. The value is
+// checked against 64 bits; datatype_for_number_node picks the type.
 static struct token* token_make_number(void){
-    return token_make_number_for_value(read_number());
+    struct buffer* buffer = buffer_create();
+    char c;
+    LEX_GETC_IF(buffer, c, isalnum(c) || c == '_');
+    buffer_write(buffer, 0x00);
+    const char* text = buffer_ptr(buffer);
+    if(peekc() == '.'){
+        compiler_error(lex_process->compiler, "Floating-point constants such as %s. are not supported\n", text);
+    }
+
+    int base = 10;
+    int flags = 0;
+    const char* digits = text;
+    if(text[0] == '0' && (text[1] == 'x' || text[1] == 'X')){
+        base = 16;
+        digits = text + 2;
+    } else if(text[0] == '0' && (text[1] == 'b' || text[1] == 'B')){
+        base = 2;
+        digits = text + 2;
+    } else if(text[0] == '0' && isdigit(text[1])){
+        base = 8;
+        digits = text + 1;
+    }
+    if(base != 10){
+        flags |= NUMBER_FLAG_NOT_DECIMAL;
+    }
+
+    unsigned long long value = 0;
+    const char* p = digits;
+    while(*p && lexer_digit_value(*p) < base){
+        unsigned long long digit = lexer_digit_value(*p);
+        if(value > (~0ULL - digit) / base){
+            compiler_error(lex_process->compiler, "The integer constant %s does not fit in 64 bits\n", text);
+        }
+        value = value * base + digit;
+        p++;
+    }
+    if(isdigit(*p) || (base == 16 && isxdigit(*p))){
+        compiler_error(lex_process->compiler, "Invalid digit '%c' in the integer constant %s\n", *p, text);
+    }
+    if(p == digits){
+        compiler_error(lex_process->compiler, "The integer constant %s has no digits\n", text);
+    }
+
+    int number_type = NUMBER_TYPE_NORMAL;
+    const char* suffix = p;
+    if(S_EQ(suffix, "f") || S_EQ(suffix, "F")){
+        // ch21 records an f suffix; floating point itself is rejected
+        // where a value would be generated.
+        number_type = NUMBER_TYPE_FLOAT;
+    } else {
+        bool seen_u = false;
+        bool seen_l = false;
+        while(*p){
+            if((*p == 'u' || *p == 'U') && !seen_u){
+                seen_u = true;
+                p++;
+            } else if((*p == 'l' || *p == 'L') && !seen_l){
+                seen_l = true;
+                // ll / LL, but not lL
+                p += (p[1] == p[0]) ? 2 : 1;
+            } else {
+                compiler_error(lex_process->compiler, "Invalid suffix \"%s\" on the integer constant %s\n", suffix, text);
+            }
+        }
+        if(seen_u){
+            flags |= NUMBER_FLAG_UNSIGNED;
+        }
+        if(seen_l){
+            flags |= NUMBER_FLAG_LONG;
+            number_type = NUMBER_TYPE_LONG;
+        }
+    }
+
+    return token_create(&(struct token){
+        .type      = TOKEN_TYPE_NUMBER,
+        .llnum     = value,
+        .num.type  = number_type,
+        .num.flags = flags,
+    });
 }
 
 // Reads a string literal delimited by start_delim/end_delim. Consumes the

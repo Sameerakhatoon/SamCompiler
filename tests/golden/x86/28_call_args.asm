@@ -10,14 +10,14 @@ push dword 100
 pop ecx
 pop eax
 mov ecx, ecx
-mul ecx
+imul ecx
 push eax
 push dword [ebp+12]
 push dword 10
 pop ecx
 pop eax
 mov ecx, ecx
-mul ecx
+imul ecx
 push eax
 pop ecx
 pop eax

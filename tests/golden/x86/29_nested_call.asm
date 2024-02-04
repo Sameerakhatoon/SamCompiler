@@ -26,7 +26,7 @@ push dword 2
 pop ecx
 pop eax
 mov ecx, ecx
-mul ecx
+imul ecx
 push eax
 pop eax
 pop ebp

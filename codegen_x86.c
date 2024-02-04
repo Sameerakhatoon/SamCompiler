@@ -316,12 +316,15 @@ static void codegen_generate_function_arguments(struct vector* argument_vector){
 // ch138: NUMBER -> push dword <literal>. The stack-frame ledger
 // gets a PUSHED_VALUE / "result_value" element with a numeric flag
 // and an int dtype attached.
+// The constant is pushed as its 32-bit pattern; its type (int, unsigned
+// int, long, unsigned long) comes from the value and suffix.
 static void codegen_generate_number_node(struct node* node, struct history* history){
     (void)history;
+    struct datatype dtype = datatype_for_number_node(node);
     asm_push_ins_push_with_data("dword %i",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
         STACK_FRAME_ELEMENT_FLAG_IS_NUMERICAL,
-        &(struct stack_frame_data){.dtype = datatype_for_numeric()},
+        &(struct stack_frame_data){.dtype = dtype},
         (int)node->llnum);
 }
 
@@ -804,19 +807,16 @@ static void codegen_generate_read_modify_write(struct node* node, struct resolve
             &(struct stack_frame_data){.dtype = dtype});
     }
 
+    // `a op= b` computes `a op b` like the binary operator (in the
+    // converted type, a pointer step scaled) and stores it at a's width.
     const char* arith = assignment_arithmetic_operator(op);
     int op_flags = codegen_set_flag_for_operator(arith);
-    bool is_pointer = dtype.flags & DATATYPE_FLAG_IS_POINTER;
-    if(is_pointer && (S_EQ(arith, "+") || S_EQ(arith, "-"))){
-        size_t step = datatype_size(datatype_pointer_reduce(&dtype, 1));
-        if(step > DATA_SIZE_BYTE){
-            asm_push("imul ecx, %i", (int)step);
-        }
+    struct datatype_binary types;
+    datatype_binary_types(&dtype, &value_dtype, arith, &types);
+    if(types.scale_right > 1){
+        asm_push("imul ecx, %zu", types.scale_right);
     }
-    // The operation runs in the type both operands convert to: unsigned
-    // when either is (a literal step counts as int).
-    bool value_signed = (value_dtype.flags & DATATYPE_FLAG_IS_SIGNED) || (value_dtype.flags & DATATYPE_FLAG_IS_LITERAL);
-    codegen_gen_math_for_value("eax", "ecx", op_flags, lhs_signed && value_signed && !is_pointer);
+    codegen_gen_math_for_value("eax", "ecx", op_flags, types.operation.flags & DATATYPE_FLAG_IS_SIGNED);
 
     const char* reg_to_use = "eax";
     const char* mov_type   = codegen_byte_word_or_dword_or_ddword(size, &reg_to_use);
@@ -1078,16 +1078,18 @@ static void codegen_generate_normal_unary(struct node* node, struct history* his
     struct datatype last_dtype;
     assert(asm_datatype_back(&last_dtype));
     asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    // `-` and `~` produce the promoted operand type (a char becomes int).
+    struct datatype promoted = datatype_promote(&last_dtype);
     if(S_EQ(node->unary.op, "-")){
         asm_push("neg eax");
         asm_push_ins_push_with_data("eax",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = promoted});
     } else if(S_EQ(node->unary.op, "~")){
         asm_push("not eax");
         asm_push_ins_push_with_data("eax",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = promoted});
     } else if(S_EQ(node->unary.op, "*")){
         codegen_generate_unary_indirection(node, history);
     } else if(S_EQ(node->unary.op, "!")){
@@ -1095,9 +1097,12 @@ static void codegen_generate_normal_unary(struct node* node, struct history* his
         asm_push("cmp eax, 0");
         asm_push("sete al");
         asm_push("movzx eax, al");
+        // `!x` is an int whatever x is (a pointer stayed a pointer).
+        struct datatype result = datatype_for_numeric();
+        result.flags &= ~DATATYPE_FLAG_IS_LITERAL;
         asm_push_ins_push_with_data("eax",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
-            &(struct stack_frame_data){.dtype = last_dtype});
+            &(struct stack_frame_data){.dtype = result});
     }
 }
 
@@ -1508,20 +1513,22 @@ static void codegen_gen_math_for_value(const char* reg, const char* value, int f
         if(is_signed){ asm_push("cdq"); asm_push("idiv ecx"); }
         else         { asm_push("xor edx, edx"); asm_push("div ecx"); }
     } else if(flags & EXPRESSION_IS_MODULAS){
+        // An unsigned remainder clears edx; cdq sign-extended a dividend
+        // above 0x7fffffff and div then trapped.
         asm_push("mov ecx, %s", value);
-        asm_push("cdq");
-        asm_push(is_signed ? "idiv ecx" : "div ecx");
+        if(is_signed){ asm_push("cdq"); asm_push("idiv ecx"); }
+        else         { asm_push("xor edx, edx"); asm_push("div ecx"); }
         asm_push("mov eax, edx");
     } else if(flags & EXPRESSION_IS_ABOVE){
-        codegen_gen_cmp(value, "setg");
+        codegen_gen_cmp(value, is_signed ? "setg" : "seta");
     } else if(flags & EXPRESSION_IS_BELOW){
-        codegen_gen_cmp(value, "setl");
+        codegen_gen_cmp(value, is_signed ? "setl" : "setb");
     } else if(flags & EXPRESSION_IS_EQUAL){
         codegen_gen_cmp(value, "sete");
     } else if(flags & EXPRESSION_IS_ABOVE_OR_EQUAL){
-        codegen_gen_cmp(value, "setge");
+        codegen_gen_cmp(value, is_signed ? "setge" : "setae");
     } else if(flags & EXPRESSION_IS_BELOW_OR_EQUAL){
-        codegen_gen_cmp(value, "setle");
+        codegen_gen_cmp(value, is_signed ? "setle" : "setbe");
     } else if(flags & EXPRESSION_IS_NOT_EQUAL){
         codegen_gen_cmp(value, "setne");
     } else if(flags & EXPRESSION_IS_BITSHIFT_LEFT){
@@ -1529,7 +1536,7 @@ static void codegen_gen_math_for_value(const char* reg, const char* value, int f
         asm_push("sal %s, %s", reg, value);
     } else if(flags & EXPRESSION_IS_BITSHIFT_RIGHT){
         value = codegen_sub_register(value, DATA_SIZE_BYTE);
-        asm_push("sar %s, %s", reg, value);
+        asm_push("%s %s, %s", is_signed ? "sar" : "shr", reg, value);
     } else if(flags & EXPRESSION_IS_BITWISE_AND){
         asm_push("and %s, %s", reg, value);
     } else if(flags & EXPRESSION_IS_BITWISE_OR){
@@ -1601,6 +1608,22 @@ static void codegen_generate_exp_node_for_logical_arithmetic(struct node* node, 
     }
 }
 
+// eax = eax / n for a byte difference that is an exact multiple of n
+// (a pointer difference).
+static void codegen_divide_exact(size_t n){
+    if((n & (n - 1)) == 0){
+        int shift = 0;
+        while(((size_t)1 << shift) < n){
+            shift++;
+        }
+        asm_push("sar eax, %i", shift);
+        return;
+    }
+    asm_push("mov ecx, %zu", n);
+    asm_push("cdq");
+    asm_push("idiv ecx");
+}
+
 // ch142: emit code for a binary arithmetic expression. Walk left,
 // walk right (both pushed), pop right into ecx, pop left into eax,
 // run the chosen op, push the result.
@@ -1625,16 +1648,24 @@ static void codegen_generate_exp_node_for_arithmetic(struct node* node, struct h
         struct datatype left_dtype = datatype_for_numeric();
         asm_datatype_back(&left_dtype);
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-        // ch146: pointer arithmetic - scale the non-pointer side by
-        // sizeof(*pointer) so `p + 1` advances one element. Byte
-        // pointers need no scaling.
-        struct datatype* pointer_dtype = datatype_thats_a_pointer(&left_dtype, &right_dtype);
-        if(pointer_dtype && datatype_size(datatype_pointer_reduce(pointer_dtype, 1)) > DATA_SIZE_BYTE){
-            const char* reg = (pointer_dtype == &right_dtype) ? "eax" : "ecx";
-            asm_push("imul %s, %i", reg,
-                (int)datatype_size(datatype_pointer_reduce(pointer_dtype, 1)));
+        // ch146: pointer arithmetic - scale the integer side of `p + n`
+        // by sizeof(*p) so it advances n elements. datatype_binary_types
+        // also gives the type the operation runs in (signed or not) and
+        // the result's type; the signedness used to come from the right
+        // operand alone, and every operator was scaled, comparisons too.
+        struct datatype_binary types;
+        datatype_binary_types(&left_dtype, &right_dtype, node->exp.op, &types);
+        if(types.scale_left > 1){
+            asm_push("imul eax, %zu", types.scale_left);
         }
-        codegen_gen_math_for_value("eax", "ecx", op_flags, last_dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+        if(types.scale_right > 1){
+            asm_push("imul ecx, %zu", types.scale_right);
+        }
+        codegen_gen_math_for_value("eax", "ecx", op_flags, types.operation.flags & DATATYPE_FLAG_IS_SIGNED);
+        if(types.pointer_difference > 1){
+            codegen_divide_exact(types.pointer_difference);
+        }
+        last_dtype = types.result;
     }
     asm_push_ins_push_with_data("eax",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,

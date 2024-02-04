@@ -240,7 +240,7 @@ static void parse_single_token_to_node(void){
     struct token* token = token_next();
     switch(token->type){
         case TOKEN_TYPE_NUMBER:
-            node_create(&(struct node){ .type = NODE_TYPE_NUMBER,     .llnum = token->llnum });
+            node_create(&(struct node){ .type = NODE_TYPE_NUMBER,     .llnum = token->llnum, .num.flags = token->num.flags });
             break;
         case TOKEN_TYPE_IDENTIFIER:
             node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval  = token->sval  });
@@ -1932,7 +1932,9 @@ static void parse_sizeof(struct history* history){
     expect_op("(");
     struct datatype dtype;
     parse_datatype(&dtype);
-    node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&dtype) });
+    // sizeof yields a size_t, which is unsigned long on every target.
+    node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&dtype),
+        .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG });
     expect_sym(')');
 }
 

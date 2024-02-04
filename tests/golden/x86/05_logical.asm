@@ -59,7 +59,7 @@ push dword 2
 pop ecx
 pop eax
 mov ecx, ecx
-mul ecx
+imul ecx
 push eax
 pop ecx
 pop eax
@@ -70,7 +70,7 @@ push dword 4
 pop ecx
 pop eax
 mov ecx, ecx
-mul ecx
+imul ecx
 push eax
 pop ecx
 pop eax

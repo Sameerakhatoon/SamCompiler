@@ -261,7 +261,9 @@ struct datatype* datatype_pointer_reduce(struct datatype* datatype, int by){
 // IS_LITERAL flag set).
 struct datatype datatype_for_numeric(void){
     struct datatype dtype = {0};
-    dtype.flags    |= DATATYPE_FLAG_IS_LITERAL;
+    // A plain constant is a signed int (C11 6.4.4.1); without the flag
+    // `a / 5` divided unsigned.
+    dtype.flags    |= DATATYPE_FLAG_IS_LITERAL | DATATYPE_FLAG_IS_SIGNED;
     dtype.type      = DATA_TYPE_INTEGER;
     dtype.type_str  = "int";
     dtype.size      = DATA_SIZE_DWORD;
