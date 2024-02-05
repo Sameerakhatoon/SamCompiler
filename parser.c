@@ -544,7 +544,10 @@ static void parse_for_parentheses(struct history* history){
     expect_op("(");
     // ch93: `(int) x` - a keyword right after the open paren means
     // this is a cast expression, not a parenthesised value.
-    if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_KEYWORD){
+    // Only a type keyword starts a cast; `(sizeof(x) == 4)` is a
+    // parenthesised expression that happens to begin with a keyword.
+    if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_KEYWORD
+       && (keyword_is_datatype(token_peek_next()->sval) || is_keyword_variable_modifier(token_peek_next()->sval))){
         parse_for_cast();
         return;
     }
@@ -828,9 +831,11 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
                                                              struct token* datatype_secondary_token,
                                                              struct datatype* datatype_out);
 
-// "long int" -> primary=long (4 bytes), secondary=int (4 bytes). The
-// total size is primary + secondary; the secondary datatype is held
-// hanging off the primary's `.secondary` field.
+// "long int" -> primary=long, secondary=int. The secondary datatype is
+// held hanging off the primary's `.secondary` field. It adds no storage:
+// `long int` is a long and `short int` a short. The book added the two
+// sizes, so `long long` was 16 bytes, `long int` 12 and `short int` 6;
+// `long long` is sized in parser_datatype_init.
 static void parser_datatype_adjust_size_for_secondary(struct datatype* datatype,
                                                       struct token* datatype_secondary_token){
     if(!datatype_secondary_token){
@@ -838,7 +843,6 @@ static void parser_datatype_adjust_size_for_secondary(struct datatype* datatype,
     }
     struct datatype* secondary = calloc(1, sizeof(struct datatype));
     parser_datatype_init_type_and_size_for_primitive(datatype_secondary_token, 0, secondary);
-    datatype->size      += secondary->size;
     datatype->secondary  = secondary;
     datatype->flags     |= DATATYPE_FLAG_IS_SECONDARY;
 }
@@ -873,9 +877,11 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
         datatype_out->type = DATA_TYPE_FLOAT;
         datatype_out->size = DATA_SIZE_DWORD;
     } else if(S_EQ(datatype_token->sval, "double")){
-        // g02: write the type to .type, not .size.
+        // g02: write the type to .type, not .size. A double is 8 bytes
+        // on every target (it was 4); floating point is still
+        // rejected where a value would be generated.
         datatype_out->type = DATA_TYPE_DOUBLE;
-        datatype_out->size = DATA_SIZE_DWORD;
+        datatype_out->size = DATA_SIZE_DDWORD;
     } else {
         compiler_error(current_process, "BUG: Invalid primitive datatype\n");
     }
