@@ -390,6 +390,9 @@ struct target {
     // Data model. int stays 4 bytes on every target.
     size_t pointer_size;
     size_t long_size;
+    // Plain `char` is signed in the i386 and x86-64 psABIs and unsigned
+    // in AAPCS64 and the RISC-V psABI.
+    bool   plain_char_unsigned;
 
     // Bytes one push of the codegen expression stack takes.
     size_t stack_slot_size;

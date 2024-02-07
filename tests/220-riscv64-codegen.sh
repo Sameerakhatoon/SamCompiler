@@ -52,7 +52,8 @@ assert_contains "$out" "lla t2, g+4" "global address with lla"
 assert_contains "$out" "g: .zero 16" "global array"
 
 out=$(asm_for tests/golden/inputs/32_char_short.c)
-assert_contains "$out" "lb a0, -1(s0)" "signed char load"
+# Plain char is unsigned in the RISC-V psABI; it was loaded signed.
+assert_contains "$out" "lbu a0, -1(s0)" "plain char load"
 assert_contains "$out" "lh a0, -4(s0)" "short load"
 assert_contains "$out" "sb a0, -1(s0)" "char store"
 

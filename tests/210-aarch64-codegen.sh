@@ -53,7 +53,8 @@ assert_contains "$out" $'adrp x11, g+4\nadd x11, x11, :lo12:g+4' "global address
 assert_contains "$out" "g: .zero 16" "global array"
 
 out=$(asm_for tests/golden/inputs/32_char_short.c)
-assert_contains "$out" "ldursb x0, [x29, #-" "signed char load"
+# Plain char is unsigned in AAPCS64; it was loaded signed.
+assert_contains "$out" "ldurb w0, [x29, #-" "plain char load"
 assert_contains "$out" "ldursh x0, [x29, #-" "short load"
 assert_contains "$out" "sturb w0, [x29, #-" "char store"
 

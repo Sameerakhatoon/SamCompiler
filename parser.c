@@ -114,7 +114,7 @@ static void          parser_deal_with_additional_expression(void);
 static void          parse_for_parentheses(struct history* history);
 static void          parse_identifier(struct history* history);
 static bool          is_keyword_variable_modifier(const char* val);
-static void          parse_datatype_modifiers(struct datatype* dtype);
+static bool          parse_datatype_modifiers(struct datatype* dtype);
 static void          parse_datatype_type(struct datatype* dtype);
 static void          parse_datatype(struct datatype* dtype);
 static void          parse_variable_function_or_struct_union(struct history* history);
@@ -681,8 +681,10 @@ static bool is_keyword_variable_modifier(const char* val){
 }
 
 // Consume a run of modifier keywords, OR-ing matching DATATYPE_FLAG_*s
-// into dtype. Stops at the first non-modifier keyword.
-static void parse_datatype_modifiers(struct datatype* dtype){
+// into dtype. Stops at the first non-modifier keyword. Returns whether
+// `signed` or `unsigned` was among them.
+static bool parse_datatype_modifiers(struct datatype* dtype){
+    bool sign_given = false;
     struct token* token = token_peek_next();
     while(token && token->type == TOKEN_TYPE_KEYWORD){
         if(!is_keyword_variable_modifier(token->sval)){
@@ -691,8 +693,10 @@ static void parse_datatype_modifiers(struct datatype* dtype){
 
         if(S_EQ(token->sval, "signed")){
             dtype->flags |= DATATYPE_FLAG_IS_SIGNED;
+            sign_given = true;
         } else if(S_EQ(token->sval, "unsigned")){
             dtype->flags &= ~DATATYPE_FLAG_IS_SIGNED;
+            sign_given = true;
         } else if(S_EQ(token->sval, "static")){
             dtype->flags |= DATATYPE_FLAG_IS_STATIC;
         } else if(S_EQ(token->sval, "const")){
@@ -706,6 +710,7 @@ static void parse_datatype_modifiers(struct datatype* dtype){
         token_next();
         token = token_peek_next();
     }
+    return sign_given;
 }
 
 static bool token_next_is_operator(const char* op){
@@ -1006,9 +1011,14 @@ static void parse_datatype(struct datatype* dtype){
     memset(dtype, 0, sizeof(struct datatype));
     dtype->flags |= DATATYPE_FLAG_IS_SIGNED;
 
-    parse_datatype_modifiers(dtype);
+    bool sign_given = parse_datatype_modifiers(dtype);
     parse_datatype_type(dtype);
-    parse_datatype_modifiers(dtype);
+    sign_given |= parse_datatype_modifiers(dtype);
+    // Plain char is unsigned on aarch64 and riscv64; it was
+    // always signed, so `char c = 200` read back as -56 there.
+    if(dtype->type == DATA_TYPE_CHAR && !sign_given && current_process->target->plain_char_unsigned){
+        dtype->flags &= ~DATATYPE_FLAG_IS_SIGNED;
+    }
 }
 
 // "long int" / "float int" / "double int" are tolerated abbreviations

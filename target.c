@@ -111,6 +111,7 @@ static const struct target target_aarch64_desc = {
     .name              = "aarch64",
     .pointer_size      = DATA_SIZE_DDWORD,
     .long_size         = DATA_SIZE_DDWORD,
+    .plain_char_unsigned = true,
     // sp must stay 16-byte aligned whenever it is used to access
     // memory, so every expression push takes a full 16 bytes.
     .stack_slot_size   = 16,
@@ -133,6 +134,7 @@ static const struct target target_riscv64_desc = {
     .name              = "riscv64",
     .pointer_size      = DATA_SIZE_DDWORD,
     .long_size         = DATA_SIZE_DDWORD,
+    .plain_char_unsigned = true,
     // The psABI keeps sp 16-byte aligned; pushing 16 at a time keeps
     // that true at every call without extra padding logic.
     .stack_slot_size   = 16,
