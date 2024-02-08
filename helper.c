@@ -270,6 +270,13 @@ struct datatype datatype_for_numeric(void){
     return dtype;
 }
 
+// A computed int: the type of `!x`, a comparison, or `a && b`.
+struct datatype datatype_for_int(void){
+    struct datatype dtype = datatype_for_numeric();
+    dtype.flags &= ~DATATYPE_FLAG_IS_LITERAL;
+    return dtype;
+}
+
 // ch176: tiny predicates for the parser-side unary-operand check.
 bool is_parentheses(const char* op){
     return S_EQ(op, "(");

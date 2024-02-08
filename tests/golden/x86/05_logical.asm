@@ -32,11 +32,11 @@ mov dword [ebp-12], eax
 push dword [ebp-4]
 pop eax
 cmp eax, 0
-jg .endc_2_positive
+jne .endc_2_positive
 push dword [ebp-8]
 pop eax
 cmp eax, 0
-jg .endc_2_positive
+jne .endc_2_positive
 ; || END CLAUSE
 jmp .endc_2
 .endc_2_positive:

@@ -1562,9 +1562,11 @@ static void codegen_generate_logical_cmp_and(const char* reg, const char* fail_l
     asm_push("je %s", fail_label);
 }
 
+// Any non-zero operand makes `||` true. The book's `jg` counted a
+// negative one as false, so `-1 || 0` was 0.
 static void codegen_generate_logical_cmp_or(const char* reg, const char* equal_label){
     asm_push("cmp %s, 0", reg);
-    asm_push("jg %s", equal_label);
+    asm_push("jne %s", equal_label);
 }
 
 static void codegen_generate_logical_cmp(const char* op, const char* fail_label, const char* equal_label){
@@ -1604,7 +1606,10 @@ static void codegen_generate_exp_node_for_logical_arithmetic(struct node* node, 
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
         codegen_generate_logical_cmp(node->exp.op, history->exp.logical_end_label, history->exp.logical_end_label_positive);
         codegen_generate_end_labels_for_logical_expression(node->exp.op, history->exp.logical_end_label, history->exp.logical_end_label_positive);
-        asm_push_ins_push("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        // The 0/1 result is an int. Pushed without a type, a
+        // `return a || b;` asserted on the missing datatype.
+        asm_push_ins_push_with_data("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = datatype_for_int()});
     }
 }
 

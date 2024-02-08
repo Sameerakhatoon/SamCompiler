@@ -17,7 +17,7 @@ cmp eax, 1
 je .switch_stmt_3_case_1
 cmp eax, 2
 je .switch_stmt_3_case_2
-jmp .exit_point_2
+jmp .switch_stmt_3_case_default
 .switch_stmt_3_case_1:
 ; CASE 1
 push dword 10

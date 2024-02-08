@@ -1880,10 +1880,19 @@ static void parse_case(struct history* history){
     node_push(case_node);
 }
 
+// The switch must know it has a default label: without it the case
+// jumps fell out of the switch for an unmatched value and the default
+// body never ran.
 static void parse_default(struct history* history){
-    (void)history;
     expect_keyword("default");
     expect_sym(':');
+    if(!(history->flags & HISTORY_FLAG_IN_SWITCH_STATEMENT)){
+        compiler_error(current_process, "'default' is only allowed inside a switch\n");
+    }
+    if(history->_switch.case_data->has_default_case){
+        compiler_error(current_process, "This switch already has a default label\n");
+    }
+    history->_switch.case_data->has_default_case = true;
     make_default_node();
 }
 
