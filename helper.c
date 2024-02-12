@@ -195,7 +195,7 @@ bool is_argument_node(struct node* node){
 // ch130: unary operator predicates.
 bool is_unary_operator(const char* op){
     return S_EQ(op, "-") || S_EQ(op, "!") || S_EQ(op, "~")
-        || S_EQ(op, "*") || S_EQ(op, "&")
+        || S_EQ(op, "*") || S_EQ(op, "&") || S_EQ(op, "+")
         || S_EQ(op, "++") || S_EQ(op, "--");
 }
 

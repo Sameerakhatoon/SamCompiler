@@ -301,7 +301,11 @@ static struct resolver_entity* codegen_register_function(struct node* func_node,
 
 static void codegen_generate_function_prototype(struct node* node){
     codegen_register_function(node, 0);
-    asm_push("extern %s", node->func.name);
+    // A prototype of a function defined further down is not external;
+    // NASM rejects a symbol that is both extern and defined.
+    if(!function_defined_in_tree(current_process, node->func.name)){
+        asm_push("extern %s", node->func.name);
+    }
 }
 
 static void codegen_generate_function_arguments(struct vector* argument_vector){

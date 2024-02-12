@@ -1371,6 +1371,7 @@ enum {
 };
 
 bool          function_node_is_prototype(struct node* node);
+bool          function_defined_in_tree(struct compile_process* process, const char* name);
 size_t        function_node_stack_size(struct node* node);
 struct vector* function_node_argument_vec(struct node* node);
 

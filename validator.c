@@ -186,12 +186,29 @@ void validate_function_arguments(struct function_arguments* func_arguments)
 void validate_function_node(struct node* node)
 {
     current_function = node;
-    if (!(node->flags & NODE_FLAG_IS_FORWARD_DECLARATION))
+    // A prototype may be repeated and followed by its definition; only
+    // a second body, or a function named like another symbol, is an
+    // error. Before, `int f(int); int f(int a){...}` was "already
+    // defined".
+    struct symbol* sym = symresolver_get_symbol(validator_current_compile_process, node->func.name);
+    struct node* previous = sym ? symresolver_node(sym) : 0;
+    bool previous_is_function = previous && previous->type == NODE_TYPE_FUNCTION;
+    if (sym && (!previous_is_function || (previous->func.body_n && node->func.body_n)))
     {
-        validate_symbol_unique(node->func.name, "function", node);
+        if (!(node->flags & NODE_FLAG_IS_FORWARD_DECLARATION))
+        {
+            validate_symbol_unique(node->func.name, "function", node);
+        }
     }
 
-    symresolver_register_symbol(validator_current_compile_process, node->func.name, SYMBOL_TYPE_NODE, node);
+    if (!sym)
+    {
+        symresolver_register_symbol(validator_current_compile_process, node->func.name, SYMBOL_TYPE_NODE, node);
+    }
+    else if (previous_is_function && node->func.body_n)
+    {
+        sym->data = node;
+    }
     validation_new_scope(0);
     validate_function_arguments(&node->func.args);
 

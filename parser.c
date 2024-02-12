@@ -26,6 +26,11 @@ enum {
     // operator that opened these parens, so they're a grouping not
     // a function call.
     HISTORY_FLAG_PARENTHESES_IS_NOT_A_FUNCTION_CALL   = 0b01000000,
+    // An initializer is an assignment-expression: a top-level `,`
+    // separates declarators (`int a = 1, b = 2;`) instead of being the
+    // comma operator. Parentheses start a fresh history, so `(a, b)`
+    // inside an initializer is still a comma expression.
+    HISTORY_FLAG_NO_COMMA_OPERATOR                    = 0b10000000,
 };
 
 // ch94/166: parsed_switch_case is defined in compiler.h so codegen
@@ -428,6 +433,11 @@ static void parse_for_normal_unary(void){
     snprintf(what, sizeof(what), "an operand after '%s'", op);
     parser_expect_new_node(count_before, what);
     struct node* operand = node_pop();
+    // Unary plus leaves the value as it is; the operand stands alone.
+    if(S_EQ(op, "+")){
+        node_push(operand);
+        return;
+    }
     make_unary_node(op, operand);
 }
 
@@ -658,6 +668,9 @@ static int parse_exp(struct history* history){
     } else if(S_EQ(token_peek_next()->sval, "?")){
         parse_for_tenary(history);
     } else if(S_EQ(token_peek_next()->sval, ",")){
+        if(history->flags & HISTORY_FLAG_NO_COMMA_OPERATOR){
+            return -1;
+        }
         parse_for_comma(history);
     } else {
         parse_exp_normal(history);
@@ -674,10 +687,17 @@ static void parse_identifier(struct history* history){
 
 // Keywords that prefix or modify a datatype (signed/unsigned, storage
 // class, const, etc.) but don't name a type themselves.
+// volatile, register, inline, auto and restrict are accepted and change
+// nothing: this compiler loads and stores every access (what volatile
+// asks for), keeps no variable in a register, and does not inline.
+// Before, they were not keywords and the declaration was lost (A13).
 static bool is_keyword_variable_modifier(const char* val){
     return S_EQ(val, "unsigned") || S_EQ(val, "signed")
         || S_EQ(val, "static")   || S_EQ(val, "const")
-        || S_EQ(val, "extern")   || S_EQ(val, "__ignore_typecheck__");
+        || S_EQ(val, "extern")   || S_EQ(val, "__ignore_typecheck__")
+        || S_EQ(val, "volatile") || S_EQ(val, "register")
+        || S_EQ(val, "inline")   || S_EQ(val, "auto")
+        || S_EQ(val, "restrict");
 }
 
 // Consume a run of modifier keywords, OR-ing matching DATATYPE_FLAG_*s
@@ -978,7 +998,16 @@ static void parser_datatype_init(struct token* datatype_token,
 static void parse_datatype_type(struct datatype* dtype){
     struct token* datatype_token            = 0;
     struct token* datatype_secondary_token  = 0;
-    parser_get_datatype_tokens(&datatype_token, &datatype_secondary_token);
+    // Only modifiers and no type keyword (`unsigned x`, `const n`): the
+    // type is int. The name was taken as the type before and failed with
+    // "Invalid primitive datatype".
+    static struct token implicit_int = { .type = TOKEN_TYPE_KEYWORD, .sval = "int" };
+    struct token* next = token_peek_next();
+    if(!next || next->type != TOKEN_TYPE_KEYWORD || !keyword_is_datatype(next->sval)){
+        datatype_token = &implicit_int;
+    } else {
+        parser_get_datatype_tokens(&datatype_token, &datatype_secondary_token);
+    }
     int expected_type = parser_datatype_expected_for_type_string(datatype_token->sval);
 
     // For `struct` / `union`, the next token names the type (or is
@@ -1258,7 +1287,7 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
 
     if(token_next_is_operator("=")){
         token_next();
-        parse_expressionable_root(history);
+        parse_expressionable_root(history_down(history, history->flags | HISTORY_FLAG_NO_COMMA_OPERATOR));
         value_node = node_pop();
     }
 
@@ -1726,7 +1755,15 @@ static void parse_variable_function_or_struct_union(struct history* history){
         return;
     }
 
-    parse_variable(&dtype, name_token, history);
+    // Each declarator gets its own copy of the type: parse_variable adds
+    // `[N]` to the type it is given, so with one shared copy `int a[4],
+    // b;` made b an array too. Peers start from the base type without
+    // the first declarator's `*` and read their own.
+    struct datatype base_dtype = dtype;
+    base_dtype.flags &= ~DATATYPE_FLAG_IS_POINTER;
+    base_dtype.pointer_depth = 0;
+    struct datatype first_dtype = dtype;
+    parse_variable(&first_dtype, name_token, history);
 
     // ch43: `int a, b, c;` - gather any comma-separated peers into a
     // NODE_TYPE_VARIABLE_LIST.
@@ -1736,8 +1773,17 @@ static void parse_variable_function_or_struct_union(struct history* history){
         vector_push(var_list, &var_node);
         while(token_is_operator(token_peek_next(), ",")){
             token_next();
+            struct datatype peer_dtype = base_dtype;
+            int depth = parser_get_pointer_depth();
+            if(depth > 0){
+                peer_dtype.flags |= DATATYPE_FLAG_IS_POINTER;
+                peer_dtype.pointer_depth = depth;
+            }
             name_token = token_next();
-            parse_variable(&dtype, name_token, history);
+            if(!name_token || name_token->type != TOKEN_TYPE_IDENTIFIER){
+                compiler_error(current_process, "Expecting a variable name after ',' in the declaration\n");
+            }
+            parse_variable(&peer_dtype, name_token, history);
             var_node = node_pop();
             vector_push(var_list, &var_node);
         }

@@ -414,6 +414,18 @@ bool function_node_is_prototype(struct node* node){
     return node->func.body_n == 0;
 }
 
+// Whether this translation unit also defines the function `name`
+// (gives it a body), so a prototype for it is not an external symbol.
+bool function_defined_in_tree(struct compile_process* process, const char* name){
+    for(int i = 0; i < vector_count(process->node_tree_vec); i++){
+        struct node* node = *(struct node**)vector_at(process->node_tree_vec, i);
+        if(node->type == NODE_TYPE_FUNCTION && node->func.body_n && S_EQ(node->func.name, name)){
+            return true;
+        }
+    }
+    return false;
+}
+
 struct vector* function_node_argument_vec(struct node* node){
     assert(node->type == NODE_TYPE_FUNCTION);
     return node->func.args.vector;

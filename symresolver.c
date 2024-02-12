@@ -78,7 +78,15 @@ static void symresolver_build_for_variable_node(struct compile_process* process,
     symresolver_register_symbol(process, node->var.name, SYMBOL_TYPE_NODE, node);
 }
 
+// A definition that follows its prototype replaces it as the symbol, so
+// lookups see the function that has a body.
 static void symresolver_build_for_function_node(struct compile_process* process, struct node* node){
+    struct symbol* existing = symresolver_get_symbol(process, node->func.name);
+    struct node* previous = existing ? symresolver_node(existing) : 0;
+    if(previous && previous->type == NODE_TYPE_FUNCTION && !previous->func.body_n && node->func.body_n){
+        existing->data = node;
+        return;
+    }
     symresolver_register_symbol(process, node->func.name, SYMBOL_TYPE_NODE, node);
 }
 
