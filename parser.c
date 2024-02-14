@@ -1996,17 +1996,144 @@ static void parse_return(struct history* history){
     expect_sym(';');
 }
 
-// ch232: parse `sizeof(<datatype>)` as a NUMBER node holding the size.
-// Operates entirely at parse time; codegen sees a constant.
+static bool parser_expression_type(struct node* node, struct datatype* out);
+
+// The type the resolver gives a name, member or subscript. A subscript
+// that reaches an element keeps the array's flags in the resolver; for
+// sizeof and the operators around it that is the element type.
+static bool parser_resolved_type(struct node* node, struct datatype* out){
+    struct resolver_result* result = resolver_follow(current_process->resolver, node);
+    if(!resolver_result_ok(result) || !result->last_entity){
+        return false;
+    }
+    struct resolver_entity* last = result->last_entity;
+    *out = last->dtype;
+    if(last->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET && (out->flags & DATATYPE_FLAG_IS_ARRAY)
+       && (int)array_brackets_count(out) <= last->array.index + 1){
+        out->flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    }
+    if(last->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET && (last->flags & RESOLVER_ENTITY_FLAG_IS_POINTER_ARRAY_ENTITY)){
+        out->flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    }
+    return true;
+}
+
+// The type of an expression the parser has just built, for sizeof. The
+// operand of sizeof is not evaluated (C11 6.5.3.4), so only its type is
+// needed, and the parser can work it out: variables are registered with
+// the resolver as they are declared.
+static bool parser_expression_type(struct node* node, struct datatype* out){
+    switch(node->type){
+        case NODE_TYPE_NUMBER:
+            *out = datatype_for_number_node(node);
+            return true;
+        case NODE_TYPE_STRING: {
+            // A string literal is a char array holding its NUL.
+            struct datatype dtype = {0};
+            dtype.type       = DATA_TYPE_CHAR;
+            dtype.type_str   = "char";
+            dtype.size       = DATA_SIZE_BYTE;
+            dtype.flags      = DATATYPE_FLAG_IS_ARRAY;
+            dtype.array.size = strlen(node->sval) + 1;
+            *out = dtype;
+            return true;
+        }
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            return parser_expression_type(node->parenthesis.exp, out);
+        case NODE_TYPE_CAST:
+            *out = node->cast.dtype;
+            return true;
+        case NODE_TYPE_IDENTIFIER:
+            return parser_resolved_type(node, out);
+        case NODE_TYPE_UNARY: {
+            struct datatype operand;
+            if(!parser_expression_type(node->unary.operand, &operand)){
+                return false;
+            }
+            if(op_is_indirection(node->unary.op)){
+                operand = datatype_decay(&operand);
+                *out = *datatype_pointer_reduce(&operand, node->unary.indirection.depth);
+            } else if(op_is_address(node->unary.op)){
+                operand.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+                operand.flags |= DATATYPE_FLAG_IS_POINTER;
+                operand.pointer_depth++;
+                *out = operand;
+            } else if(S_EQ(node->unary.op, "!")){
+                *out = datatype_for_int();
+            } else if(is_increment_operator(node->unary.op)){
+                *out = operand;
+            } else {
+                *out = datatype_promote(&operand);
+            }
+            return true;
+        }
+        case NODE_TYPE_EXPRESSION: {
+            const char* op = node->exp.op;
+            if(is_access_operator(op) || S_EQ(op, "[]") || S_EQ(op, "()")){
+                return parser_resolved_type(node, out);
+            }
+            if(is_logical_operator(op)){
+                *out = datatype_for_int();
+                return true;
+            }
+            if(is_node_assignment(node)){
+                return parser_expression_type(node->exp.left, out);
+            }
+            if(S_EQ(op, ",")){
+                return parser_expression_type(node->exp.right, out);
+            }
+            if(S_EQ(op, "?")){
+                return parser_expression_type(node->exp.right->tenary.true_node, out);
+            }
+            struct datatype left;
+            struct datatype right;
+            if(!parser_expression_type(node->exp.left, &left) || !parser_expression_type(node->exp.right, &right)){
+                return false;
+            }
+            left  = datatype_decay(&left);
+            right = datatype_decay(&right);
+            struct datatype_binary types;
+            datatype_binary_types(&left, &right, op, &types);
+            *out = types.result;
+            return true;
+        }
+    }
+    return false;
+}
+
+// ch232: `sizeof` as a NUMBER node holding the size, worked out at parse
+// time; codegen sees a constant of type size_t. `sizeof(type)` was the
+// only form; `sizeof(expr)` and `sizeof expr` failed.
 static void parse_sizeof(struct history* history){
+    (void)history;
     expect_keyword("sizeof");
-    expect_op("(");
     struct datatype dtype;
-    parse_datatype(&dtype);
+    struct token* after_paren = 0;
+    if(token_next_is_operator("(")){
+        expect_op("(");
+        after_paren = token_peek_next();
+    }
+    if(after_paren && after_paren->type == TOKEN_TYPE_KEYWORD
+       && (keyword_is_datatype(after_paren->sval) || is_keyword_variable_modifier(after_paren->sval))){
+        parse_datatype(&dtype);
+        expect_sym(')');
+    } else {
+        size_t count_before = node_count();
+        if(after_paren){
+            parse_expressionable_root(history_begin(0));
+            expect_sym(')');
+        } else {
+            parse_expressionable(parser_unary_operand_history());
+        }
+        parser_expect_new_node(count_before, "an operand after sizeof");
+        struct node* operand = node_pop();
+        if(!parser_expression_type(operand, &dtype)){
+            compiler_error(current_process, "Cannot work out the size of this sizeof operand\n");
+        }
+    }
     // sizeof yields a size_t, which is unsigned long on every target.
     node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&dtype),
         .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG });
-    expect_sym(')');
 }
 
 static void parse_keyword(struct history* history){
