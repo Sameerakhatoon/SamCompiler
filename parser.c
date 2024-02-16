@@ -1971,7 +1971,26 @@ static void parse_for_stmt(struct history* history){
 
     expect_keyword("for");
     expect_op("(");
-    if(parse_for_loop_part(history))      init_node = node_pop();
+    // `for (int i = 0; ...)`: the declaration is scoped to the loop. It
+    // gets a scope of its own around the loop and its bytes in the
+    // function's frame; it was rejected before.
+    struct token* first = token_peek_next();
+    bool declares = first && first->type == TOKEN_TYPE_KEYWORD
+        && (keyword_is_datatype(first->sval) || is_keyword_variable_modifier(first->sval));
+    if(declares){
+        parser_scope_new();
+        resolver_default_new_scope(current_process->resolver, 0);
+        parse_variable_function_or_struct_union(history);
+        init_node = node_pop();
+        if(init_node->type != NODE_TYPE_VARIABLE && init_node->type != NODE_TYPE_VARIABLE_LIST){
+            compiler_error(current_process, "A for loop can only declare variables\n");
+        }
+        size_t declaration_size = 0;
+        parser_append_size_for_node(history, &declaration_size, init_node);
+        parser_current_function->func.stack_size += declaration_size;
+    } else if(parse_for_loop_part(history)){
+        init_node = node_pop();
+    }
     if(parse_for_loop_part(history))      cond_node = node_pop();
     if(parse_for_loop_part_loop(history)) loop_node = node_pop();
     expect_sym(')');
@@ -1979,6 +1998,10 @@ static void parse_for_stmt(struct history* history){
     size_t var_size = 0;
     parse_body(&var_size, history);
     body_node = node_pop();
+    if(declares){
+        resolver_default_finish_scope(current_process->resolver);
+        parser_scope_finish();
+    }
     make_for_node(init_node, cond_node, loop_node, body_node);
 }
 

@@ -1730,7 +1730,13 @@ static void codegen_generate_while_stmt(struct node* node){
 
 // A for-loop's init and step are evaluated for their effect, like a
 // statement: an assignment or ++/-- there pushes no value.
+static void codegen_generate_statement(struct node* node, struct history* history);
+
 static void codegen_generate_for_effect(struct node* node){
+    if(node->type == NODE_TYPE_VARIABLE || node->type == NODE_TYPE_VARIABLE_LIST){
+        codegen_generate_statement(node, codegen_history_begin(0));
+        return;
+    }
     if(is_node_assignment(node)){
         codegen_generate_exp_node(node, codegen_history_begin(0));
         return;
@@ -1747,6 +1753,12 @@ static void codegen_generate_for_stmt(struct node* node){
     struct for_stmt* fs = &node->stmt.for_stmt;
     int for_loop_start_id = codegen_label_count();
     int for_loop_end_id   = codegen_label_count();
+    // `for (int i = 0; ...)`: i is in scope for the whole loop only.
+    bool declares = fs->init_node
+        && (fs->init_node->type == NODE_TYPE_VARIABLE || fs->init_node->type == NODE_TYPE_VARIABLE_LIST);
+    if(declares){
+        codegen_new_scope(RESOLVER_SCOPE_FLAG_IS_STACK);
+    }
     if(fs->init_node){
         codegen_generate_for_effect(fs->init_node);
     }
@@ -1770,6 +1782,9 @@ static void codegen_generate_for_stmt(struct node* node){
     asm_push("b .Lfor_loop%i", for_loop_start_id);
     asm_push(".Lfor_loop_end%i:", for_loop_end_id);
     codegen_end_entry_exit_point();
+    if(declares){
+        codegen_finish_scope();
+    }
 }
 
 static void codegen_generate_switch_default_stmt(struct node* node){
