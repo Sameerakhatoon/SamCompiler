@@ -2343,16 +2343,17 @@ static void codegen_generate_root(void){
     }
 }
 
+// A byte NASM cannot take inside a quoted character is written as a
+// number: a newline or tab as before, and now also the apostrophe, which
+// ended the quote ("it's" printed "it"), and every other byte
+// outside printable ASCII.
 static bool codegen_write_string_char_escaped(char c){
-    const char* c_out = 0;
-    switch(c){
-        case '\n': c_out = "10"; break;
-        case '\t': c_out = "9";  break;
+    unsigned char ch = (unsigned char)c;
+    if(ch == '\n' || ch == '\t' || ch == '\'' || ch < 32 || ch >= 127){
+        asm_push_no_nl("%u, ", (unsigned)ch);
+        return true;
     }
-    if(c_out){
-        asm_push_no_nl("%s, ", c_out);
-    }
-    return c_out != 0;
+    return false;
 }
 
 static void codegen_write_string(struct string_table_element* element){

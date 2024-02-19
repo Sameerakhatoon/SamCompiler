@@ -2298,9 +2298,12 @@ static void codegen_generate_root(void){
 // One string as .asciz, with everything outside printable ASCII (and
 // the quote and backslash) written as an octal escape.
 static void codegen_write_string(struct string_table_element* element){
-    char out[4096];
+    // Every input byte takes at most four output bytes. The buffer used
+    // to be 4096 bytes and longer strings were cut without a word.
+    size_t len = strlen(element->str);
+    char* out = malloc(len * 4 + 1);
     size_t n = 0;
-    for(const char* c = element->str; *c && n < sizeof(out) - 5; c++){
+    for(const char* c = element->str; *c; c++){
         unsigned char ch = (unsigned char)*c;
         if(ch < 32 || ch >= 127 || ch == '"' || ch == '\\'){
             n += sprintf(out + n, "\\%03o", ch);
@@ -2310,6 +2313,7 @@ static void codegen_write_string(struct string_table_element* element){
     }
     out[n] = 0;
     asm_push("%s: .asciz \"%s\"", element->label, out);
+    free(out);
 }
 
 static void codegen_write_strings(void){

@@ -2,6 +2,7 @@
 #include <string.h>
 #include <assert.h>
 #include "compiler.h"
+#include "helpers/buffer.h"
 #include "helpers/vector.h"
 
 extern struct expressionable_op_precedence_group op_precedence[TOTAL_OPERATOR_GROUPS];
@@ -250,9 +251,29 @@ static void parse_single_token_to_node(void){
         case TOKEN_TYPE_IDENTIFIER:
             node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval  = token->sval  });
             break;
-        case TOKEN_TYPE_STRING:
-            node_create(&(struct node){ .type = NODE_TYPE_STRING,     .sval  = token->sval  });
+        case TOKEN_TYPE_STRING: {
+            // Adjacent string literals are one string (C11 5.1.1.2
+            // translation phase 6): "ab" "cd" is "abcd". The second
+            // literal used to end the statement and drop the function.
+            const char* sval = token->sval;
+            struct token* next = token_peek_next();
+            if(next && next->type == TOKEN_TYPE_STRING){
+                struct buffer* joined = buffer_create();
+                for(const char* c = sval; *c; c++){
+                    buffer_write(joined, *c);
+                }
+                while((next = token_peek_next()) && next->type == TOKEN_TYPE_STRING){
+                    token_next();
+                    for(const char* c = next->sval; *c; c++){
+                        buffer_write(joined, *c);
+                    }
+                }
+                buffer_write(joined, 0x00);
+                sval = buffer_ptr(joined);
+            }
+            node_create(&(struct node){ .type = NODE_TYPE_STRING,     .sval  = sval  });
             break;
+        }
         default:
             compiler_error(current_process, "This is not a single token that can be converted to a node");
     }

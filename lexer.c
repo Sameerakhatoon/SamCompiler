@@ -268,24 +268,52 @@ static struct token* token_make_number(void){
 // opening delimiter (asserted), then everything up to but not including
 // the closing delimiter. ch9 stubs out escapes; ch182 wires the real
 // handler.
-static void lex_handle_escape_number(struct buffer* buf){
-    long long number = read_number();
-    if(number > 255){
-        compiler_error(lex_process->compiler,
-            "Characters must be 0-255 wide chars are not yet supported\n");
+// One escape sequence, the backslash already read (C11 6.4.4.4): the
+// simple escapes, one to three octal digits, or \x and hex digits. Only
+// \n \\ \t \' were known before; anything else became 0 (so "a\"b"
+// ended at the a), and \101 was read as decimal.
+static char lex_read_escape(void){
+    char c = nextc();
+    switch(c){
+        case 'n':  return '\n';
+        case 't':  return '\t';
+        case 'r':  return '\r';
+        case 'a':  return '\a';
+        case 'b':  return '\b';
+        case 'f':  return '\f';
+        case 'v':  return '\v';
+        case '\\': return '\\';
+        case '\'': return '\'';
+        case '"':  return '"';
+        case '?':  return '?';
     }
-    buffer_write(buf, (char)number);
-}
-
-static void lex_handle_escape(struct buffer* buf){
-    char c = peekc();
-    if(isdigit(c)){
-        lex_handle_escape_number(buf);
-        return;
+    if(c >= '0' && c <= '7'){
+        int value = c - '0';
+        for(int i = 0; i < 2 && peekc() >= '0' && peekc() <= '7'; i++){
+            value = value * 8 + (nextc() - '0');
+        }
+        if(value > 255){
+            compiler_error(lex_process->compiler, "The octal escape \\%o does not fit in a char\n", value);
+        }
+        return (char)value;
     }
-    char co = lex_get_escaped_char(c);
-    buffer_write(buf, co);
-    nextc();
+    if(c == 'x'){
+        int value = 0;
+        int digits = 0;
+        while(isxdigit(peekc())){
+            value = value * 16 + lexer_digit_value(nextc());
+            digits++;
+            if(value > 255){
+                compiler_error(lex_process->compiler, "The hex escape does not fit in a char\n");
+            }
+        }
+        if(digits == 0){
+            compiler_error(lex_process->compiler, "\\x needs at least one hex digit\n");
+        }
+        return (char)value;
+    }
+    compiler_error(lex_process->compiler, "Unknown escape sequence \\%c\n", c);
+    return 0;
 }
 
 static struct token* token_make_string(char start_delim, char end_delim){
@@ -293,10 +321,13 @@ static struct token* token_make_string(char start_delim, char end_delim){
     assert(nextc() == start_delim);
 
     char c;
-    for(c = nextc(); c != end_delim && c != EOF; c = nextc()){
-        if(c == '\\'){
+    for(c = nextc(); c != end_delim; c = nextc()){
+        if(c == EOF || c == '\n'){
+            compiler_error(lex_process->compiler, "Missing the closing %c of a string\n", end_delim);
+        }
+        if(c == '\\' && end_delim == '"'){
             // ch182: real escape-sequence handling.
-            lex_handle_escape(buf);
+            buffer_write(buf, lex_read_escape());
             continue;
         }
         buffer_write(buf, c);
@@ -704,8 +735,7 @@ struct token* token_make_quote(void){
     assert_next_char('\'');
     char c = nextc();
     if(c == '\\'){
-        c = nextc();
-        c = lex_get_escaped_char(c);
+        c = lex_read_escape();
     }
     if(nextc() != '\''){
         compiler_error(lex_process->compiler, "You opened a quote ' but did not close it with a ' character");
@@ -754,6 +784,9 @@ struct token* read_next_token(void){
         // previous token's whitespace flag for later parser disambiguation.
         case ' ':
         case '\t':
+        // A CRLF file: the \r before each \n is whitespace. It was an
+        // unexpected character before.
+        case '\r':
             token = handle_whitespace();
             break;
 
