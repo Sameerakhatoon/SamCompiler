@@ -97,6 +97,8 @@ struct compile_process* compile_process_create(const char* filename, const char*
     char* path = malloc(PATH_MAX);
     realpath(filename, path);
     process->cfile.abs_path = path;
+    // The path given may be a caller's stack buffer (compile_include).
+    process->pos.filename   = path;
     node_set_vector(process->node_vec, process->node_tree_vec);
 
     return process;

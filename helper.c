@@ -327,13 +327,26 @@ int array_offset(struct datatype* dtype, int index, int index_value){
 // ch213: arithmetic shim used by the preprocessor expression evaluator.
 // Returns the result of left op right for a fixed set of operators;
 // writes false to *success and returns 0 when op is unsupported.
+// `%`, `&`, `|` and `^` were missing, so `#if 7 % 4 == 3` failed, the
+// result was cut to an int, and dividing by zero crashed the compiler.
 long arithmetic(struct compile_process* compiler, long left_operand, long right_operand, const char* op, bool* success){
     *success = true;
-    int result = 0;
+    long result = 0;
+    if((S_EQ(op, "/") || S_EQ(op, "%")) && right_operand == 0){
+        compiler_error(compiler, "Division by zero in a preprocessor expression\n");
+    }
     if(S_EQ(op, "*")){
         result = left_operand * right_operand;
     } else if(S_EQ(op, "/")){
         result = left_operand / right_operand;
+    } else if(S_EQ(op, "%")){
+        result = left_operand % right_operand;
+    } else if(S_EQ(op, "&")){
+        result = left_operand & right_operand;
+    } else if(S_EQ(op, "|")){
+        result = left_operand | right_operand;
+    } else if(S_EQ(op, "^")){
+        result = left_operand ^ right_operand;
     } else if(S_EQ(op, "+")){
         result = left_operand + right_operand;
     } else if(S_EQ(op, "-")){

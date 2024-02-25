@@ -253,14 +253,14 @@ int preprocessor_definition_argument_exists(struct preprocessor_definition *defi
 {
     vector_set_peek_pointer(definition->standard.arguments, 0);
     int i = 0;
-    const char *current = vector_peek(definition->standard.arguments);
+    const char *current = vector_peek_ptr(definition->standard.arguments);
     while (current)
     {
         if (S_EQ(current, name))
             return i;
 
         i++;
-        current = vector_peek(definition->standard.arguments);
+        current = vector_peek_ptr(definition->standard.arguments);
     }
 
     return -1;
@@ -281,6 +281,19 @@ void preprocessor_token_push_to_function_arguments(struct preprocessor_function_
 }
 
 void preprocessor_function_argument_push_to_vec(struct preprocessor_function_argument *argument, struct vector *vector_out)
+{
+    struct vector *tokens = argument->expanded ? argument->expanded : argument->tokens;
+    vector_set_peek_pointer(tokens, 0);
+    struct token *token = vector_peek(tokens);
+    while (token)
+    {
+        vector_push(vector_out, token);
+        token = vector_peek(tokens);
+    }
+}
+
+// The argument as written, for the operands of ##.
+static void preprocessor_function_argument_push_raw_to_vec(struct preprocessor_function_argument *argument, struct vector *vector_out)
 {
     vector_set_peek_pointer(argument->tokens, 0);
     struct token *token = vector_peek(argument->tokens);
@@ -328,6 +341,7 @@ void preprocessor_initialize(struct preprocessor *preprocessor)
     memset(preprocessor, 0, sizeof(struct preprocessor));
     preprocessor->definitions = vector_create(sizeof(struct preprocessor_definition *));
     preprocessor->includes = vector_create(sizeof(struct preprocessor_included_file *));
+    preprocessor->once_files = vector_create(sizeof(const char *));
     preprocessor_create_definitions(preprocessor);
 }
 
@@ -553,7 +567,11 @@ bool preprocessor_is_preprocessor_keyword(const char *value)
            S_EQ(value, "warning") ||
            S_EQ(value, "error") ||
            S_EQ(value, "if") ||
-           S_EQ(value, "eleif") ||
+           // "eleif" in the book, so #elif never matched.
+           S_EQ(value, "elif") ||
+           S_EQ(value, "else") ||
+           S_EQ(value, "pragma") ||
+           S_EQ(value, "line") ||
            S_EQ(value, "ifdef") ||
            S_EQ(value, "ifndef") ||
            S_EQ(value, "endif") ||
@@ -871,21 +889,50 @@ bool preprocessor_is_next_macro_arguments(struct compile_process *compiler)
     return res;
 }
 
-void preprocessor_parse_macro_argument_declaration(struct compile_process *compiler, struct vector *arguments)
+// The lexer reads `...` as three `.` tokens; this takes the other two.
+static bool preprocessor_take_ellipsis(struct compile_process *compiler, struct token *token)
+{
+    if (!token || !token_is_operator(token, "."))
+    {
+        return false;
+    }
+    for (int i = 0; i < 2; i++)
+    {
+        if (!token_is_operator(preprocessor_next_token(compiler), "."))
+        {
+            compiler_error(compiler, "Expected ... in the macro arguments");
+        }
+    }
+    return true;
+}
+
+// Returns true when the list ends in `...`.
+bool preprocessor_parse_macro_argument_declaration(struct compile_process *compiler, struct vector *arguments)
 {
     if (token_is_operator(preprocessor_next_token_no_increment(compiler), "("))
     {
         // Skip the (
         preprocessor_next_token(compiler);
         struct token *next_token = preprocessor_next_token(compiler);
-        while (!token_is_symbol(next_token, ')'))
+        while (next_token && !token_is_symbol(next_token, ')'))
         {
+            if (preprocessor_take_ellipsis(compiler, next_token))
+            {
+                const char *name = "__VA_ARGS__";
+                vector_push(arguments, &name);
+                if (!token_is_symbol(preprocessor_next_token(compiler), ')'))
+                {
+                    compiler_error(compiler, "... must end the macro arguments");
+                }
+                return true;
+            }
+
             if (next_token->type != TOKEN_TYPE_IDENTIFIER)
             {
                 compiler_error(compiler, "You must provide an identifier in the preprocessor definition!");
             }
 
-            vector_push(arguments, (void *)next_token->sval);
+            vector_push(arguments, &next_token->sval);
             next_token = preprocessor_next_token(compiler);
             if (!token_is_operator(next_token, ",") && !token_is_symbol(next_token, ')'))
             {
@@ -901,22 +948,35 @@ void preprocessor_parse_macro_argument_declaration(struct compile_process *compi
             next_token = preprocessor_next_token(compiler);
         }
     }
+    return false;
 }
 void preprocessor_handle_definition_token(struct compile_process *compiler)
 {
     struct token *name_token = preprocessor_next_token(compiler);
-    struct vector *arguments = vector_create(sizeof(const char *));
-
-    if (preprocessor_is_next_macro_arguments(compiler))
+    if (!name_token || (name_token->type != TOKEN_TYPE_IDENTIFIER && name_token->type != TOKEN_TYPE_KEYWORD))
     {
-        preprocessor_parse_macro_argument_declaration(compiler, arguments);
+        compiler_error(compiler, "#define needs a macro name");
+    }
+    struct vector *arguments = vector_create(sizeof(const char *));
+    bool variadic = false;
+    bool function_like = preprocessor_is_next_macro_arguments(compiler);
+
+    if (function_like)
+    {
+        variadic = preprocessor_parse_macro_argument_declaration(compiler, arguments);
     }
     // Value can be composed of many tokens
     struct vector *value_token_vec = vector_create(sizeof(struct token));
     preprocessor_multi_value_insert_to_vector(compiler, value_token_vec);
 
     struct preprocessor *preprocessor = compiler->preprocessor;
-    preprocessor_definition_create(name_token->sval, value_token_vec, arguments, preprocessor);
+    struct preprocessor_definition *definition = preprocessor_definition_create(name_token->sval, value_token_vec, arguments, preprocessor);
+    definition->standard.variadic = variadic;
+    if (function_like)
+    {
+        // `#define F() ...` takes no arguments but is still called as F().
+        definition->type = PREPROCESSOR_DEFINITION_MACRO_FUNCTION;
+    }
 }
 
 void preprocessor_handle_undef_token(struct compile_process *compiler)
@@ -985,6 +1045,10 @@ void preprocessor_skip_to_endif(struct compile_process *compiler)
 {
     while (!preprocessor_hashtag_and_identifier(compiler, "endif"))
     {
+        if (!preprocessor_next_token_no_increment(compiler))
+        {
+            compiler_error(compiler, "Missing #endif\n");
+        }
         if (preprocessor_is_hashtag_and_any_starting_if(compiler))
         {
             preprocessor_skip_to_endif(compiler);
@@ -994,23 +1058,81 @@ void preprocessor_skip_to_endif(struct compile_process *compiler)
     }
 }
 
+// Drop the rest of a directive line.
+static void preprocessor_skip_line(struct compile_process *compiler)
+{
+    struct token *token = preprocessor_next_token_no_increment(compiler);
+    while (token && token->type != TOKEN_TYPE_NEWLINE)
+    {
+        preprocessor_next_token(compiler);
+        token = preprocessor_next_token_no_increment(compiler);
+    }
+}
+
+// One conditional group, its first condition already evaluated (C11
+// 6.10.1). The tokens of the first branch whose condition holds are
+// processed and every other branch is skipped, nested groups inside a
+// skipped branch whole. An #elif condition is only evaluated while no
+// branch has been taken; #else takes over if none was. Only #endif was
+// recognised before, so `#if 0 ... #else B` dropped B and `#elif` lines
+// went through to the parser.
 void preprocessor_read_to_end_if(struct compile_process *compiler, bool true_clause)
 {
-    while (preprocessor_next_token_no_increment(compiler) && !preprocessor_hashtag_and_identifier(compiler, "endif"))
+    bool taken     = true_clause;
+    bool active    = true_clause;
+    bool seen_else = false;
+    while (true)
     {
-        if (true_clause)
+        if (!preprocessor_next_token_no_increment(compiler))
+        {
+            compiler_error(compiler, "Missing #endif\n");
+        }
+        if (preprocessor_hashtag_and_identifier(compiler, "endif"))
+        {
+            preprocessor_skip_line(compiler);
+            return;
+        }
+        if (preprocessor_hashtag_and_identifier(compiler, "else"))
+        {
+            if (seen_else)
+            {
+                compiler_error(compiler, "A second #else in one conditional\n");
+            }
+            seen_else = true;
+            preprocessor_skip_line(compiler);
+            active = !taken;
+            taken  = true;
+            continue;
+        }
+        if (preprocessor_hashtag_and_identifier(compiler, "elif"))
+        {
+            if (seen_else)
+            {
+                compiler_error(compiler, "#elif after #else\n");
+            }
+            if (taken)
+            {
+                preprocessor_skip_line(compiler);
+                active = false;
+            }
+            else
+            {
+                active = preprocessor_parse_evaluate(compiler, compiler->token_vec_original) > 0;
+                taken  = active;
+            }
+            continue;
+        }
+        if (active)
         {
             preprocessor_handle_token(compiler, preprocessor_next_token(compiler));
             continue;
         }
-
-        // Skip the unexpected token
-        preprocessor_next_token(compiler);
-
         if (preprocessor_is_hashtag_and_any_starting_if(compiler))
         {
             preprocessor_skip_to_endif(compiler);
+            continue;
         }
+        preprocessor_next_token(compiler);
     }
 }
 int preprocessor_evaluate_number(struct preprocessor_node *node)
@@ -1024,7 +1146,9 @@ int preprocessor_evaluate_identifier(struct compile_process *compiler, struct pr
     struct preprocessor_definition *definition = preprocessor_get_definition(preprocessor, node->sval);
     if (!definition)
     {
-        return true;
+        // An identifier that is not a macro is 0 in #if (C11 6.10.1p4).
+        // It was true, so `#if FOO` took the branch.
+        return false;
     }
 
     if (vector_count(preprocessor_definition_value(definition)) > 1)
@@ -1330,28 +1454,27 @@ int preprocessor_macro_function_push_something_definition(struct compile_process
         return 0;
     }
 
-    // We failed so theirs no argument
-    struct preprocessor_definition *arg_definition = preprocessor_get_definition(compiler->preprocessor, arg_name);
-    if (arg_definition)
-    {
-        preprocessor_token_vec_push_src_resolve_definitions(compiler, preprocessor_definition_value(arg_definition), compiler->token_vec);
-        return 0;
-    }
-
-    // Sad day something went wrong.
+    // Not an argument. Other macro names in the replacement stay as
+    // they are here and expand when the result is rescanned.
     return -1;
 }
 void preprocessor_handle_concat_part(struct compile_process *compiler, struct preprocessor_definition *definition,
                                      struct preprocessor_function_arguments *arguments, struct token *token, struct vector *definition_token_vec,
                                      struct vector *value_vec_target)
 {
-    preprocessor_macro_function_push_something(compiler, definition, arguments, token, definition_token_vec, value_vec_target);
+    int argument_index = token->type == TOKEN_TYPE_IDENTIFIER ? preprocessor_definition_argument_exists(definition, token->sval) : -1;
+    if (argument_index != -1)
+    {
+        preprocessor_function_argument_push_raw_to_vec(preprocessor_function_argument_at(arguments, argument_index), value_vec_target);
+        return;
+    }
+    vector_push(value_vec_target, token);
 }
 
 void preprocessor_handle_concat_finalize(struct compile_process *compiler, struct vector *tmp_vec, struct vector *value_vec_target)
 {
     struct vector *joined_vec = tokens_join_vector(compiler, tmp_vec);
-    vector_insert(value_vec_target, joined_vec, 0);
+    preprocessor_token_vec_push_src_to_dst(compiler, joined_vec, value_vec_target);
 }
 
 void preprocessor_handle_concat(struct compile_process *compiler, struct preprocessor_definition *definition,
@@ -1440,7 +1563,66 @@ void preprocessor_handle_function_argument_to_string(struct compile_process *com
     vector_push(value_vec_target, &str_token);
 }
 
-int preprocessor_macro_function_execute(struct compile_process *compiler, const char *function_name, struct preprocessor_function_arguments *arguments, int flags)
+// Check the argument count. For a variadic macro, the arguments from
+// the last named one on become one __VA_ARGS__ argument, commas kept.
+static void preprocessor_match_macro_arguments(struct compile_process *compiler, struct preprocessor_definition *definition, struct preprocessor_function_arguments *arguments)
+{
+    int expected = vector_count(definition->standard.arguments);
+    int given = preprocessor_function_arguments_count(arguments);
+    if (expected == 0 && given == 1 && vector_count(preprocessor_function_argument_at(arguments, 0)->tokens) == 0)
+    {
+        // F() for a macro with no parameters.
+        vector_pop(arguments->arguments);
+        return;
+    }
+
+    if (!definition->standard.variadic)
+    {
+        if (given != expected)
+        {
+            compiler_error(compiler, "Macro %s takes %i arguments, %i given", definition->name, expected, given);
+        }
+        return;
+    }
+
+    if (given < expected - 1)
+    {
+        compiler_error(compiler, "Macro %s takes at least %i arguments, %i given", definition->name, expected - 1, given);
+    }
+
+    struct preprocessor_function_argument rest = {};
+    rest.tokens = vector_create(sizeof(struct token));
+    for (int i = expected - 1; i < given; i++)
+    {
+        if (i > expected - 1)
+        {
+            struct token comma = {};
+            comma.type = TOKEN_TYPE_OPERATOR;
+            comma.sval = ",";
+            vector_push(rest.tokens, &comma);
+        }
+        preprocessor_function_argument_push_raw_to_vec(preprocessor_function_argument_at(arguments, i), rest.tokens);
+    }
+    while (preprocessor_function_arguments_count(arguments) > expected - 1)
+    {
+        vector_pop(arguments->arguments);
+    }
+    vector_push(arguments->arguments, &rest);
+}
+
+// Arguments are macro-expanded before they replace their parameters.
+static void preprocessor_expand_macro_arguments(struct compile_process *compiler, struct preprocessor_function_arguments *arguments)
+{
+    int total = preprocessor_function_arguments_count(arguments);
+    for (int i = 0; i < total; i++)
+    {
+        struct preprocessor_function_argument *argument = preprocessor_function_argument_at(arguments, i);
+        argument->expanded = vector_create(sizeof(struct token));
+        preprocessor_token_vec_push_src_resolve_definitions(compiler, argument->tokens, argument->expanded);
+    }
+}
+
+int preprocessor_macro_function_execute(struct compile_process *compiler, const char *function_name, struct preprocessor_function_arguments *arguments, int flags, struct vector *dst_vec)
 {
     struct preprocessor *preprocessor = compiler->preprocessor;
     struct preprocessor_definition *definition = preprocessor_get_definition(preprocessor, function_name);
@@ -1454,9 +1636,13 @@ int preprocessor_macro_function_execute(struct compile_process *compiler, const 
         compiler_error(compiler, "This definition %s is not a macro function", function_name);
     }
 
-    if (vector_count(definition->standard.arguments) != preprocessor_function_arguments_count(arguments) && definition->type != PREPROCESSOR_DEFINITION_NATIVE_CALLBACK)
+    if (definition->type != PREPROCESSOR_DEFINITION_NATIVE_CALLBACK)
     {
-        compiler_error(compiler, "You passed too many arguments to function %s", function_name);
+        preprocessor_match_macro_arguments(compiler, definition, arguments);
+        if (!(flags & PREPROCESSOR_FLAG_EVALUATE_NODE))
+        {
+            preprocessor_expand_macro_arguments(compiler, arguments);
+        }
     }
 
     struct vector *value_vec_target = vector_create(sizeof(struct token));
@@ -1480,7 +1666,11 @@ int preprocessor_macro_function_execute(struct compile_process *compiler, const 
     {
         return preprocessor_parse_evaluate(compiler, value_vec_target);
     }
-    preprocessor_token_vec_push_src(compiler, value_vec_target);
+
+    // Rescan the result for more macros, with this one switched off.
+    definition->expanding++;
+    preprocessor_token_vec_push_src_resolve_definitions(compiler, value_vec_target, dst_vec);
+    definition->expanding--;
     return 0;
 }
 int preprocessor_evaluate_function_call(struct compile_process *compiler, struct preprocessor_node *node)
@@ -1491,7 +1681,7 @@ int preprocessor_evaluate_function_call(struct compile_process *compiler, struct
 
     // Evaluate all of the preprocessor arguments
     preprocessor_evaluate_function_call_arguments(compiler, call_arguments, arguments);
-    return preprocessor_macro_function_execute(compiler, macro_func_name, arguments, PREPROCESSOR_FLAG_EVALUATE_NODE);
+    return preprocessor_macro_function_execute(compiler, macro_func_name, arguments, PREPROCESSOR_FLAG_EVALUATE_NODE, NULL);
 }
 
 int preprocessor_evaluate_exp(struct compile_process *compiler, struct preprocessor_node *node)
@@ -1552,10 +1742,19 @@ int preprocessor_evaluate(struct compile_process *compiler, struct preprocessor_
 
 int preprocessor_parse_evaluate(struct compile_process *compiler, struct vector *token_vec)
 {
+    struct token *first_token = vector_peek_no_increment(token_vec);
+    if (!first_token || first_token->type == TOKEN_TYPE_NEWLINE)
+    {
+        compiler_error(compiler, "Expected an expression after #if or #elif");
+    }
     struct vector *node_vector = vector_create(sizeof(struct preprocessor_node *));
     struct expressionable *expressionable = expressionable_create(&preprocessor_expressionable_config, token_vec, node_vector, 0);
     expressionable_parse(expressionable);
-    struct preprocessor_node *root_node = expressionable_node_pop(expressionable);
+    struct preprocessor_node *root_node = vector_count(node_vector) ? expressionable_node_pop(expressionable) : NULL;
+    if (!root_node)
+    {
+        compiler_error(compiler, "Expected an expression after #if or #elif");
+    }
     return preprocessor_evaluate(compiler, root_node);
 }
 
@@ -1609,7 +1808,17 @@ void preprocessor_handle_include_token(struct compile_process* compiler)
         compiler_error(compiler, "No file path provided for include");
     }
 
+    // Each nested #include runs the preprocessor again on the C stack;
+    // a file that includes itself without a guard would never end.
+    // gcc stops at the same depth.
+    static int include_depth = 0;
+    if (include_depth >= 200)
+    {
+        compiler_error(compiler, "#include nested more than 200 deep");
+    }
+    include_depth++;
     struct compile_process* new_compile_process = compile_include(file_path_token->sval, compiler);
+    include_depth--;
     if (!new_compile_process)
     {
         PREPROCESSOR_STATIC_INCLUDE_HANDLER_POST_CREATION handler =
@@ -1625,6 +1834,44 @@ void preprocessor_handle_include_token(struct compile_process* compiler)
     }
 
     preprocessor_token_vec_push_src(compiler, new_compile_process->token_vec);
+}
+
+static bool preprocessor_is_once_file(struct preprocessor *preprocessor, const char *path)
+{
+    vector_set_peek_pointer(preprocessor->once_files, 0);
+    const char *once_path = vector_peek_ptr(preprocessor->once_files);
+    while (once_path)
+    {
+        if (S_EQ(once_path, path))
+        {
+            return true;
+        }
+        once_path = vector_peek_ptr(preprocessor->once_files);
+    }
+    return false;
+}
+
+// `#pragma once` records the file; when the file comes back through a
+// second #include, the rest of it is dropped. Any other pragma is
+// ignored, as C11 6.10.6 allows for pragmas an implementation does
+// not know.
+static void preprocessor_handle_pragma_token(struct compile_process *compiler)
+{
+    struct token *token = preprocessor_next_token_no_increment(compiler);
+    if (token && token->type == TOKEN_TYPE_IDENTIFIER && S_EQ(token->sval, "once"))
+    {
+        const char *path = compiler->cfile.abs_path;
+        if (preprocessor_is_once_file(compiler->preprocessor, path))
+        {
+            while (preprocessor_next_token(compiler))
+            {
+            }
+            vector_clear(compiler->token_vec);
+            return;
+        }
+        vector_push(compiler->preprocessor->once_files, &path);
+    }
+    preprocessor_skip_line(compiler);
 }
 
 int preprocessor_handle_hashtag_token(struct compile_process *compiler, struct token *token)
@@ -1672,6 +1919,17 @@ int preprocessor_handle_hashtag_token(struct compile_process *compiler, struct t
         preprocessor_handle_include_token(compiler);
         is_preprocessed = true;
     }
+    else if (preprocessor_token_is_preprocessor_keyword(next_token) && S_EQ(next_token->sval, "pragma"))
+    {
+        preprocessor_handle_pragma_token(compiler);
+        is_preprocessed = true;
+    }
+    else if (preprocessor_token_is_preprocessor_keyword(next_token) && S_EQ(next_token->sval, "line"))
+    {
+        // Line numbers in diagnostics keep counting source lines.
+        preprocessor_skip_line(compiler);
+        is_preprocessed = true;
+    }
 
     return is_preprocessed;
 }
@@ -1715,7 +1973,7 @@ struct token *preprocessor_handle_identifier_macro_call_argument_parse_parenthes
 
 void preprocessor_function_argument_push(struct preprocessor_function_arguments *arguments, struct vector *value_vec)
 {
-    struct preprocessor_function_argument arg;
+    struct preprocessor_function_argument arg = {};
     arg.tokens = vector_clone(value_vec);
     vector_push(arguments->arguments, &arg);
 }
@@ -1771,9 +2029,10 @@ struct preprocessor_function_arguments *preprocessor_handle_identifier_macro_cal
 int preprocessor_handle_identifier_for_token_vector(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec, struct token *token)
 {
     struct preprocessor_definition *definition = preprocessor_get_definition(compiler->preprocessor, token->sval);
-    if (!definition)
+    if (!definition || definition->expanding)
     {
-        // Nothing to do with us, maybe a variable of some kind. Not macro related.
+        // Nothing to do with us, maybe a variable of some kind. Not macro
+        // related. A macro's own name inside its expansion stays too.
         preprocessor_token_push_to_dst(dst_vec, token);
         return -1;
     }
@@ -1784,16 +2043,27 @@ int preprocessor_handle_identifier_for_token_vector(struct compile_process *comp
         return 0;
     }
 
-    if (token_is_operator(vector_peek_no_increment(src_vec), "("))
+    bool is_call = token_is_operator(vector_peek_no_increment(src_vec), "(");
+    if (definition->type == PREPROCESSOR_DEFINITION_MACRO_FUNCTION || (definition->type == PREPROCESSOR_DEFINITION_NATIVE_CALLBACK && is_call))
     {
+        if (!is_call)
+        {
+            // A function-like macro name without a call is a plain name.
+            preprocessor_token_push_to_dst(dst_vec, token);
+            return -1;
+        }
         struct preprocessor_function_arguments *arguments = preprocessor_handle_identifier_macro_call_arguments(compiler, src_vec);
         const char *function_name = token->sval;
-        preprocessor_macro_function_execute(compiler, function_name, arguments, 0);
+        preprocessor_macro_function_execute(compiler, function_name, arguments, 0, dst_vec);
         return 0;
     }
 
-    struct vector *definition_val = preprocessor_definition_value(definition);
-    preprocessor_token_vec_push_src_resolve_definitions(compiler, preprocessor_definition_value(definition), dst_vec);
+    // The replacement is a vector shared by every use of the macro, so
+    // rescan a copy: a nested use would move its peek pointer.
+    struct vector *definition_val = vector_clone(preprocessor_definition_value(definition));
+    definition->expanding++;
+    preprocessor_token_vec_push_src_resolve_definitions(compiler, definition_val, dst_vec);
+    definition->expanding--;
     return 0;
 }
 int preprocessor_handle_identifier(struct compile_process *compiler, struct token *token)

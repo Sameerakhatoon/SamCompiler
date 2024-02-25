@@ -308,6 +308,10 @@ enum {
 struct preprocessor_function_argument {
     // Tokens for this argument; vector of struct token.
     struct vector* tokens;
+
+    // The same tokens with their macros expanded (C11 6.10.3.1); NULL
+    // until a macro call fills it. Operands of # and ## use `tokens`.
+    struct vector* expanded;
 };
 
 struct preprocessor_function_arguments {
@@ -333,6 +337,10 @@ struct preprocessor_definition {
             // Function arguments in order, e.g. ABC(a, b, c).
             // Vector of const char*.
             struct vector* arguments;
+
+            // Set when the list ends in `...`; the last argument is then
+            // named __VA_ARGS__ and takes every argument left over.
+            bool variadic;
         } standard;
 
         struct typedef_preprocessor_definition {
@@ -346,6 +354,10 @@ struct preprocessor_definition {
     };
 
     struct preprocessor* preprocessor;
+
+    // Nonzero while this macro's replacement is being rescanned; its
+    // name is then left alone (C11 6.10.3.4p2), so `#define A A` ends.
+    int expanding;
 };
 
 struct preprocessor_included_file {
@@ -364,6 +376,10 @@ struct preprocessor {
 
     // Vector of struct preprocessor_included_file*.
     struct vector* includes;
+
+    // Vector of const char*: absolute paths of files that said
+    // `#pragma once`; a later #include of one of them adds nothing.
+    struct vector* once_files;
 };
 
 struct preprocessor* preprocessor_create(struct compile_process* compiler);

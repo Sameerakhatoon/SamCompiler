@@ -43,5 +43,5 @@ EOF
 
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || fail "ch227 probe failed to compile"
 got="$("$bin")"
-assert_contains "$got" "n=1 line=1 native=1" "preprocessor_create registers __LINE__ as a NATIVE_CALLBACK definition"
+assert_contains "$got" "n=5 line=1 native=1" "preprocessor_create registers __LINE__ as a NATIVE_CALLBACK definition"
 pass

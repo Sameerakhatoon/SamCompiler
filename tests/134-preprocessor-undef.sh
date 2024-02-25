@@ -38,9 +38,9 @@ int main(void){
 
     preprocessor_run(cp);
 
-    // ch227's __LINE__ stays in definitions; subtract it out for the
+    // The 5 built-in macros stay in definitions; subtract them for the
     // user-visible count.
-    int n = vector_count(cp->preprocessor->definitions) - 1;
+    int n = vector_count(cp->preprocessor->definitions) - 5;
     printf("after_undef_defs=%d\n", n);
     return 0;
 }

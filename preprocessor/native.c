@@ -1,4 +1,5 @@
 #include "compiler.h"
+#include "helpers/vector.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,6 +30,33 @@ struct vector* preprocessor_line_macro_value(struct preprocessor_definition* def
     return preprocessor_build_value_vector_for_integer(previous_token->pos.line);
 }
 
+// __FILE__ is the path of the file that holds the token, as a string
+// literal; in #if it is not a number, so it evaluates to 0.
+int preprocessor_file_macro_evaluate(struct preprocessor_definition* definition, struct preprocessor_function_arguments* arguments)
+{
+    if (arguments)
+    {
+        compiler_error(definition->preprocessor->compiler, "__FILE__ macro expects no arguments");
+    }
+    return 0;
+}
+
+struct vector* preprocessor_file_macro_value(struct preprocessor_definition* definition, struct preprocessor_function_arguments* arguments)
+{
+    struct compile_process* compiler = definition->preprocessor->compiler;
+    if (arguments)
+    {
+        compiler_error(compiler, "__FILE__ macro expects no arguments");
+    }
+    struct token* previous_token = preprocessor_previous_token(compiler);
+    struct vector* token_vec = vector_create(sizeof(struct token));
+    struct token t1 = {};
+    t1.type = TOKEN_TYPE_STRING;
+    t1.sval = previous_token->pos.filename ? previous_token->pos.filename : "";
+    vector_push(token_vec, &t1);
+    return token_vec;
+}
+
 // the target's predefined macros (__i386__, __x86_64__,
 // __aarch64__, __riscv ...). This runs from preprocessor_create
 // before preprocessor->compiler is set, and only for the top-level
@@ -46,6 +74,12 @@ static void preprocessor_create_target_definitions(struct preprocessor* preproce
 void preprocessor_create_definitions(struct preprocessor* preprocessor)
 {
     preprocessor_definition_create_native("__LINE__", preprocessor_line_macro_evaluate, preprocessor_line_macro_value, preprocessor);
+    preprocessor_definition_create_native("__FILE__", preprocessor_file_macro_evaluate, preprocessor_file_macro_value, preprocessor);
+    // C11 6.10.8.1. __STDC_VERSION__ says C99: the language this
+    // compiler aims at.
+    preprocessor_definition_create("__STDC__", preprocessor_build_value_vector_for_integer(1), NULL, preprocessor);
+    preprocessor_definition_create("__STDC_VERSION__", preprocessor_build_value_vector_for_integer(199901), NULL, preprocessor);
+    preprocessor_definition_create("__STDC_HOSTED__", preprocessor_build_value_vector_for_integer(1), NULL, preprocessor);
     preprocessor_create_target_definitions(preprocessor);
 }
 
