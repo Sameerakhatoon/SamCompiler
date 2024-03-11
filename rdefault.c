@@ -157,10 +157,15 @@ static void resolver_default_merge_array_calculate_out_offset(struct datatype* d
 struct resolver_entity* resolver_default_merge_entities(struct resolver_process* process, struct resolver_result* result, struct resolver_entity* left_entity, struct resolver_entity* right_entity){
     (void)resolver_default_merge_array_calculate_out_offset;
     int new_pos = left_entity->offset + right_entity->offset;
+    // The merged entity has the right one's type and array data, so it
+    // also keeps whether that one was subscripted: `x.v[2]` merges x
+    // with v[2], and without the flag the element read as the address
+    // of the whole array v.
+    int flags = left_entity->flags | (right_entity->flags & RESOLVER_ENTITY_FLAG_USES_ARRAY_BRACKETS);
     return resolver_make_entity(process, result, &right_entity->dtype, left_entity->node,
         &(struct resolver_entity){
             .type   = right_entity->type,
-            .flags  = left_entity->flags,
+            .flags  = flags,
             .offset = new_pos,
             .array  = right_entity->array,
         }, left_entity->scope);

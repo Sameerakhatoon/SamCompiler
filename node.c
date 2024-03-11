@@ -63,7 +63,8 @@ bool node_is_expressionable(struct node* node){
          || node->type == NODE_TYPE_UNARY
          || node->type == NODE_TYPE_IDENTIFIER
          || node->type == NODE_TYPE_NUMBER
-         || node->type == NODE_TYPE_STRING);
+         || node->type == NODE_TYPE_STRING
+         || node->type == NODE_TYPE_CAST);
 }
 
 struct node* node_peek_expressionable_or_null(void){

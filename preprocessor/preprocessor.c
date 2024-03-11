@@ -17,7 +17,11 @@ struct typedef_type
     struct vector *value;
     struct typedef_structure
     {
+        // "struct" or "union".
+        const char *keyword;
         const char *sname;
+        // typedef struct Point P; names a type without defining it.
+        bool no_body;
     } structure;
 };
 
@@ -1302,25 +1306,64 @@ void preprocessor_handle_typedef_body_for_brackets(struct compile_process *compi
 void preprocessor_handle_typedef_body_for_struct_or_union(struct compile_process *compiler, struct vector *token_vec, struct typedef_type *td, struct vector *src_vec, bool overflow_use_token_vec)
 {
     struct token *token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    assert(token_is_keyword(token, "struct"));
+    assert(token_is_keyword(token, "struct") || token_is_keyword(token, "union"));
 
     td->type = TYPEDEF_TYPE_STRUCTURE_TYPEDEF;
+    td->structure.keyword = token->sval;
 
-    // Push the struct keyword
+    // Push the struct or union keyword
     vector_push(token_vec, token);
 
     token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
+    while (token && token->type == TOKEN_TYPE_NEWLINE)
+    {
+        token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
+    }
     // Do we have a name for this structure
     if (token->type == TOKEN_TYPE_IDENTIFIER)
     {
         td->structure.sname = token->sval;
         vector_push(token_vec, token);
         token = preprocessor_peek_next_token_with_vector_no_increment(compiler, src_vec, overflow_use_token_vec);
-        if (token->type == TOKEN_TYPE_IDENTIFIER)
+        // `typedef struct _iobuf` then `{` on the next line.
+        while (token && token->type == TOKEN_TYPE_NEWLINE)
         {
-            // just a declaration typedef struct Point point;
-            vector_push(token_vec, token);
+            preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
+            token = preprocessor_peek_next_token_with_vector_no_increment(compiler, src_vec, overflow_use_token_vec);
+        }
+        if (!token_is_symbol(token, '{'))
+        {
+            // No body: typedef struct Point point; or ... *point_ptr;
+            token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
+            while (token && !token_is_symbol(token, ';'))
+            {
+                vector_push(token_vec, token);
+                token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
+            }
+            td->structure.no_body = true;
             return;
+        }
+    }
+    else
+    {
+        // typedef struct { ... } T; the body needs a name the type can
+        // refer to. Names starting with __ belong to the implementation.
+        static int anonymous_count = 0;
+        struct buffer *name = buffer_create();
+        buffer_printf(name, "__anonymous_%i", anonymous_count++);
+        struct token name_token = {};
+        name_token.type = TOKEN_TYPE_IDENTIFIER;
+        name_token.sval = buffer_ptr(name);
+        name_token.pos = token->pos;
+        td->structure.sname = name_token.sval;
+        vector_push(token_vec, &name_token);
+        if (token_is_symbol(token, '{'))
+        {
+            // The { is already consumed here, unlike the named case
+            // the loop below handles.
+            vector_push(token_vec, token);
+            preprocessor_handle_typedef_body_for_brackets(compiler, token_vec, src_vec, overflow_use_token_vec);
+            token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
         }
     }
 
@@ -1369,7 +1412,7 @@ void preprocessor_handle_typedef_body(struct compile_process *compiler, struct v
 
 void preprocessor_token_push_semicolon(struct compile_process *compiler)
 {
-    struct token t1;
+    struct token t1 = {};
     t1.type = TOKEN_TYPE_SYMBOL;
     t1.cval = ';';
     vector_push(compiler->token_vec, &t1);
@@ -1399,14 +1442,42 @@ void preprocessor_handle_typedef_token(struct compile_process *compiler, struct 
     vector_pop(token_vec);
 
     // THis is a typedef structure we need to push the structure body
-    // to the output so it can be found.
+    // to the output so it can be found. The name then stands for
+    // `struct S` plus whatever followed the body, e.g. a `*`.
     if (td.type == TYPEDEF_TYPE_STRUCTURE_TYPEDEF)
     {
-        preprocessor_token_vec_push_src(compiler, token_vec);
-        preprocessor_token_push_semicolon(compiler);
+        // The suffix starts after the body's closing }, or after
+        // `struct S` when there is no body.
+        int suffix_start = 2;
+        if (!td.structure.no_body)
+        {
+            for (int i = vector_count(token_vec) - 1; i >= 0; i--)
+            {
+                if (token_is_symbol(vector_at(token_vec, i), '}'))
+                {
+                    suffix_start = i + 1;
+                    break;
+                }
+            }
+        }
 
-        token_vec = vector_create(sizeof(struct token));
-        preprocessor_token_vec_push_keyword_and_identifier(token_vec, "struct", td.structure.sname);
+        struct vector *value_vec = vector_create(sizeof(struct token));
+        preprocessor_token_vec_push_keyword_and_identifier(value_vec, td.structure.keyword, td.structure.sname);
+        for (int i = suffix_start; i < vector_count(token_vec); i++)
+        {
+            vector_push(value_vec, vector_at(token_vec, i));
+        }
+
+        if (!td.structure.no_body)
+        {
+            while (vector_count(token_vec) > suffix_start)
+            {
+                vector_pop(token_vec);
+            }
+            preprocessor_token_vec_push_src(compiler, token_vec);
+            preprocessor_token_push_semicolon(compiler);
+        }
+        token_vec = value_vec;
     }
 
     struct preprocessor *preprocessor = compiler->preprocessor;

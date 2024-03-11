@@ -32,6 +32,26 @@ size_t datatype_element_size(struct datatype* dtype){
     return dtype->size;
 }
 
+// Alignment of a member of this type inside a struct or union. A
+// scalar aligns to its size, capped at the pointer size, which gives the
+// SysV rules on every target: on i386 a double or a 64-bit integer is
+// 4-aligned in a struct. An array aligns like its element (`size` is
+// the element size), a struct or union like its strictest member.
+size_t datatype_alignment(struct datatype* dtype){
+    size_t max = target_current()->pointer_size;
+    if(dtype->flags & DATATYPE_FLAG_IS_POINTER){
+        return max;
+    }
+    if(datatype_is_struct_or_union(dtype)){
+        struct node* body = dtype->struct_node ? dtype->struct_node->_struct.body_n : 0;
+        return body && body->body.align ? body->body.align : 1;
+    }
+    if(dtype->size == 0){
+        return 1;
+    }
+    return dtype->size < max ? dtype->size : max;
+}
+
 // An int or long of `size` bytes, signed or not, as an operation or a
 // constant has it. `is_long` keeps long ranked above int when the two
 // are the same size (x86).

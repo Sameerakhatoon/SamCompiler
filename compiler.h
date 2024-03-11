@@ -755,6 +755,8 @@ struct node {
             size_t         size;
             bool           padded;
             struct node*   largest_var_node;
+            // Struct and union bodies: the strictest member alignment.
+            size_t         align;
         } body;
 
         // ch78+: control-flow statements share this payload.
@@ -908,6 +910,7 @@ bool datatype_is_struct_or_union(struct datatype* dtype);
 // ch51: size helpers used by codegen + resolver later.
 size_t datatype_size_for_array_access(struct datatype* dtype);
 size_t datatype_element_size(struct datatype* dtype);
+size_t datatype_alignment(struct datatype* dtype);
 // Array-to-pointer decay: `int a[3]` used as a value has type `int*`.
 struct datatype datatype_decay(struct datatype* dtype);
 // C integer typing (C11 6.3.1, 6.4.4.1): the type of a constant, the

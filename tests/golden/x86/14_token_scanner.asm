@@ -1,6 +1,6 @@
 section .data
 ; scanner sc
-sc: times 20 db  0
+sc: times 16 db  0
 section .text
 global is_space
 ; is_space function

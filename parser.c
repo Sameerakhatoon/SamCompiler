@@ -566,6 +566,17 @@ static void parser_deal_with_additional_expression(void){
     }
 }
 
+// Inside a unary operand, `*(p + 1) - 5`, the operators after the
+// parentheses belong to the expression around the unary, which picks
+// them up once the unary node is built (parse_for_unary). Taking them
+// here made the operand (p + 1) - 5.
+static void parser_deal_with_additional_expression_unless_unary(struct history* history){
+    if(history->flags & EXPRESSION_IS_UNARY){
+        return;
+    }
+    parser_deal_with_additional_expression();
+}
+
 // ch77: parse `(...)`. Two flavours:
 //   plain `(expr)`     -> NODE_TYPE_EXPRESSION_PARENTHESES.
 //   `callee(args)`     -> NODE_TYPE_EXPRESSION with op "()", left =
@@ -580,6 +591,7 @@ static void parse_for_parentheses(struct history* history){
     if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_KEYWORD
        && (keyword_is_datatype(token_peek_next()->sval) || is_keyword_variable_modifier(token_peek_next()->sval))){
         parse_for_cast();
+        parser_deal_with_additional_expression_unless_unary(history);
         return;
     }
 
@@ -604,7 +616,7 @@ static void parse_for_parentheses(struct history* history){
         make_exp_node(left_node, parentheses_node, "()");
     }
 
-    parser_deal_with_additional_expression();
+    parser_deal_with_additional_expression_unless_unary(history);
 }
 
 // ch90: `cond ? true : false`. Caller has already left `cond` on the
@@ -627,7 +639,10 @@ static void parse_for_cast(void){
     struct datatype dtype = {0};
     parse_datatype(&dtype);
     expect_sym(')');
-    parse_expressionable(history_begin(0));
+    // A cast binds like a unary operator: `(char)x + 1` casts x only.
+    size_t count_before = node_count();
+    parse_expressionable(parser_unary_operand_history());
+    parser_expect_new_node(count_before, "an operand after the cast");
     struct node* operand_node = node_pop();
     make_cast_node(&dtype, operand_node);
 }
@@ -644,6 +659,16 @@ static void parse_for_array(struct history* history){
     parse_expressionable_root(history);
     expect_sym(']');
     struct node* exp_node = node_pop();
+    if(left_node && left_node->type == NODE_TYPE_STRING){
+        // "abc"[i] is *("abc" + i) (C11 6.5.2.1); the resolver only
+        // follows brackets on variables.
+        make_exp_node(left_node, exp_node, "+");
+        make_unary_node("*", node_pop());
+        struct node* unary = node_pop();
+        unary->unary.indirection.depth = 1;
+        node_push(unary);
+        return;
+    }
     make_bracket_node(exp_node);
     if(left_node){
         struct node* bracket_node = node_pop();
@@ -1116,7 +1141,13 @@ static bool datatype_struct_node_fix(struct fixup* fixup){
     dtype->size        = size_of_struct(dtype->type_str);
     dtype->struct_node = struct_node_for_name(current_process, dtype->type_str);
     if(!dtype->struct_node){
-        return false;
+        // A pointer to a struct that is never defined is fine (C11
+        // 6.2.5p22) as long as nothing reaches through it.
+        if(dtype->flags & DATATYPE_FLAG_IS_POINTER){
+            return true;
+        }
+        compiler_error(current_process, "struct %s is never defined, so %s has no size\n",
+            dtype->type_str, priv->node->var.name ? priv->node->var.name : "a value");
     }
     return true;
 }
@@ -1187,7 +1218,8 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
     // body's padded flag. Tail expression also folds the per-variable
     // padding into the recorded aoffset so codegen gets the address
     // directly.
-    if(node_is_struct_or_union_variable(node) && variable_struct_or_union_body_node(node)->body.padded){
+    struct node* body = variable_struct_or_union_body_node(node);
+    if(body && body->body.padded){
         variable_node(node)->var.padding = padding(upward_stack ? offset : -offset, DATA_SIZE_DWORD);
     }
     variable_node(node)->var.aoffset = offset + (upward_stack
@@ -1203,17 +1235,21 @@ static void parser_scope_offset_for_global(struct node* node, struct history* hi
 
 // Struct members lay out upward (low to high): each new field starts
 // at the previous field's `stack_offset + size`, then padded up.
+// The member starts after the previous one ends (its whole size, so an
+// array counts every element), rounded up to its own alignment. This
+// offset is the one member access uses (struct_offset). It used to add
+// the previous member's element size, and to align only scalars.
 static void parser_scope_offset_for_structure(struct node* node, struct history* history){
     (void)history;
     int offset = 0;
     struct parser_scope_entity* last_entity = scope_last_entity(current_process);
     if(last_entity){
-        offset += last_entity->stack_offset + last_entity->node->var.type.size;
-        if(variable_node_is_primitive(node)){
-            node->var.padding = padding(offset, node->var.type.size);
-        }
-        node->var.aoffset = offset + node->var.padding;
+        struct node* last = variable_node(last_entity->node);
+        offset = last->var.aoffset + (int)variable_size(last);
     }
+    int aligned = align_value(offset, (int)datatype_alignment(&node->var.type));
+    node->var.padding = aligned - offset;
+    node->var.aoffset = aligned;
 }
 
 static void parser_scope_offset(struct node* node, struct history* history){
@@ -1223,6 +1259,13 @@ static void parser_scope_offset(struct node* node, struct history* history){
     }
     if(history->flags & HISTORY_FLAG_INSIDE_STRUCTURE){
         parser_scope_offset_for_structure(node, history);
+        return;
+    }
+    if(history->flags & HISTORY_FLAG_INSIDE_UNION){
+        // Union members all sit at offset 0; they were laid out like
+        // stack locals.
+        node->var.aoffset = 0;
+        node->var.padding = 0;
         return;
     }
     parser_scope_offset_for_stack(node, history);
@@ -1469,6 +1512,50 @@ static void parser_append_size_for_node(struct history* history, size_t* _variab
     }
 }
 
+static void parser_struct_member_extent(struct node* member, size_t* end, size_t* align){
+    size_t member_end = member->var.aoffset + variable_size(member);
+    size_t member_align = datatype_alignment(&member->var.type);
+    if(member_end > *end){
+        *end = member_end;
+    }
+    if(member_align > *align){
+        *align = member_align;
+    }
+}
+
+// A struct ends after its last member, a union after its largest; both
+// round up to their strictest member alignment (C11 6.7.2.1p15-17).
+// The offsets come from parser_scope_offset_for_structure (union
+// members are all at 0).
+static void parser_finalize_struct_or_union_body(struct node* body_node, struct vector* body_vec,
+                                                 struct node* largest_align_eligible_var_node){
+    size_t end   = 0;
+    size_t align = 1;
+    vector_set_peek_pointer(body_vec, 0);
+    struct node* statement = vector_peek_ptr(body_vec);
+    while(statement){
+        if(statement->type == NODE_TYPE_VARIABLE){
+            parser_struct_member_extent(statement, &end, &align);
+        } else if(statement->type == NODE_TYPE_VARIABLE_LIST){
+            struct vector* list = statement->var_list.list;
+            vector_set_peek_pointer(list, 0);
+            struct node* member = vector_peek_ptr(list);
+            while(member){
+                parser_struct_member_extent(member, &end, &align);
+                member = vector_peek_ptr(list);
+            }
+        }
+        statement = vector_peek_ptr(body_vec);
+    }
+
+    int pad = compute_sum_padding(body_vec);
+    body_node->body.largest_var_node = largest_align_eligible_var_node;
+    body_node->body.padded           = (pad != 0);
+    body_node->body.align            = align;
+    body_node->body.size             = align_value((int)end, (int)align);
+    body_node->body.statements       = body_vec;
+}
+
 // ch55: real body finalization. Unions get sized to their largest
 // member; otherwise we sum padding, then realign to the largest
 // align-eligible variable's natural size.
@@ -1476,10 +1563,10 @@ static void parser_finalize_body(struct history* history, struct node* body_node
                                  struct vector* body_vec, size_t* _variable_size,
                                  struct node* largest_align_eligible_var_node,
                                  struct node* largest_possible_var_node){
-    if(history->flags & HISTORY_FLAG_INSIDE_UNION){
-        if(largest_possible_var_node){
-            *_variable_size = variable_size(largest_possible_var_node);
-        }
+    if(history->flags & (HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION)){
+        parser_finalize_struct_or_union_body(body_node, body_vec, largest_align_eligible_var_node);
+        *_variable_size = body_node->body.size;
+        return;
     }
     int pad = compute_sum_padding(body_vec);
     *_variable_size += pad;
@@ -1607,25 +1694,32 @@ static void parse_struct_no_new_scope(struct datatype* dtype, bool is_forward_de
         dtype->size = body_node->body.size;
     }
     dtype->struct_node = struct_node;
+    node_push(struct_node);
+}
 
-    // Optional attached variable: `struct foo {...} v;`
-    // ch68: NULL-safe via token_is_identifier (handles EOF).
+// Optional attached variable: `struct foo {...} v;`. It runs after the
+// body's scope is closed, so `v` lands in the enclosing scope; it used
+// to be registered inside the body's scope, which lost local ones.
+// ch68: NULL-safe via token_is_identifier (handles EOF).
+static void parse_struct_or_union_attached_variable(struct datatype* dtype){
+    struct node* su_node = node_pop();
     if(token_is_identifier(token_peek_next())){
         struct token* var_name = token_next();
-        struct_node->flags |= NODE_FLAG_HAS_VARIABLE_COMBINED;
+        su_node->flags |= NODE_FLAG_HAS_VARIABLE_COMBINED;
         // If the struct was anonymous, the variable name becomes the
         // type name too (so other declarations can refer to it).
         if(dtype->flags & DATATYPE_FLAG_STRUCT_UNION_NO_NAME){
             dtype->type_str     = var_name->sval;
             dtype->flags       &= ~DATATYPE_FLAG_STRUCT_UNION_NO_NAME;
-            struct_node->_struct.name = var_name->sval;
+            su_node->_struct.name = var_name->sval;
         }
         make_variable_node_and_register(history_begin(0), dtype, var_name, 0);
-        struct_node->_struct.var = node_pop();
+        // _struct and _union share their layout.
+        su_node->_struct.var = node_pop();
     }
 
     expect_sym(';');
-    node_push(struct_node);
+    node_push(su_node);
 }
 
 static void parse_struct(struct datatype* dtype){
@@ -1640,6 +1734,7 @@ static void parse_struct(struct datatype* dtype){
         resolver_default_finish_scope(current_process->resolver);
         parser_scope_finish();
     }
+    parse_struct_or_union_attached_variable(dtype);
 }
 
 // ch99: parse_union_no_scope mirrors parse_struct_no_new_scope but
@@ -1658,14 +1753,7 @@ static void parse_union_no_scope(struct datatype* dtype, bool is_forward_declara
     if(body_node){
         dtype->size = body_node->body.size;
     }
-    if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_IDENTIFIER){
-        struct token* var_name = token_next();
-        union_node->flags |= NODE_FLAG_HAS_VARIABLE_COMBINED;
-        make_variable_node_and_register(history_begin(0), dtype, var_name, 0);
-        union_node->_union.var = node_pop();
-    }
-
-    expect_sym(';');
+    dtype->union_node = union_node;
     node_push(union_node);
 }
 
@@ -1681,6 +1769,7 @@ static void parse_union(struct datatype* dtype){
         resolver_default_finish_scope(current_process->resolver);
         parser_scope_finish();
     }
+    parse_struct_or_union_attached_variable(dtype);
 }
 
 // ch73: parse a function's argument list (everything between the
@@ -1746,6 +1835,13 @@ static void parse_variable_function_or_struct_union(struct history* history){
 
         struct node* su_node = node_pop();
         symresolver_build_for_node(current_process, su_node);
+        if((su_node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED)
+           && current_process->scope.current != current_process->scope.root){
+            // A local `struct S {...} v;` is the declaration of v; the
+            // type is already registered.
+            node_push(su_node->_struct.var);
+            return;
+        }
         node_push(su_node);
         return;
     }
@@ -2242,7 +2338,9 @@ static int parse_expressionable_single(struct history* history){
         return -1;
     }
 
-    history->flags |= NODE_FLAG_INSIDE_EXPRESSION;
+    // This ORed NODE_FLAG_INSIDE_EXPRESSION (a node flag, 0b1) into the
+    // history, where 0b1 is HISTORY_FLAG_INSIDE_UNION. The array size in
+    // `int a[3]` then marked the declaration as a union member.
     int res = -1;
     switch(token->type){
         case TOKEN_TYPE_NUMBER:

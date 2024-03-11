@@ -10,16 +10,14 @@ size_t variable_size(struct node* var_node){
 }
 
 // For a struct/union variable, follow the type back to its body node.
-// Unions are still unimplemented; returns NULL for them for now.
 struct node* variable_struct_or_union_body_node(struct node* node){
-    if(!node_is_struct_or_union_variable(node)){
+    if(!node_is_struct_or_union_variable(node) || !node->var.type.struct_node){
         return 0;
     }
     if(node->var.type.type == DATA_TYPE_STRUCT){
         return node->var.type.struct_node->_struct.body_n;
     }
-    // TODO(later): union body.
-    return 0;
+    return node->var.type.union_node->_union.body_n;
 }
 
 // Sum the sizes of every variable in a NODE_TYPE_VARIABLE_LIST.
@@ -115,42 +113,50 @@ struct node* variable_struct_or_union_largest_variable_node(struct node* var_nod
     return body_largest_variable_node(variable_struct_or_union_body_node(var_node));
 }
 
+// The member called `name` among a body's statements, looking inside
+// `int a, b;` lists too; NULL if there is none.
+static struct node* struct_member_named(struct vector* statements, const char* name){
+    vector_set_peek_pointer(statements, 0);
+    struct node* statement = vector_peek_ptr(statements);
+    while(statement){
+        if(statement->type == NODE_TYPE_VARIABLE && S_EQ(statement->var.name, name)){
+            return statement;
+        }
+        if(statement->type == NODE_TYPE_VARIABLE_LIST){
+            struct vector* list = statement->var_list.list;
+            vector_set_peek_pointer(list, 0);
+            struct node* member = vector_peek_ptr(list);
+            while(member){
+                if(S_EQ(member->var.name, name)){
+                    return member;
+                }
+                member = vector_peek_ptr(list);
+            }
+        }
+        statement = vector_peek_ptr(statements);
+    }
+    return 0;
+}
+
 int struct_offset(struct compile_process* compile_proc, const char* struct_name, const char* var_name, struct node** var_node_out, int last_pos, int flags){
     struct symbol* struct_sym = symresolver_get_symbol(compile_proc, struct_name);
     assert(struct_sym && struct_sym->type == SYMBOL_TYPE_NODE);
     struct node* node = struct_sym->data;
     assert(node_is_struct_or_union(node));
 
-    struct vector* struct_vars_vec = node->_struct.body_n->body.statements;
-    vector_set_peek_pointer(struct_vars_vec, 0);
-    if(flags & STRUCT_ACCESS_BACKWARDS){
-        vector_set_peek_pointer_end(struct_vars_vec);
-        vector_set_flag(struct_vars_vec, VECTOR_FLAG_PEEK_DECREMENT);
+    (void)flags;
+    if(!node->_struct.body_n){
+        compiler_error(compile_proc, "%s is an incomplete type, it has no member %s", struct_name, var_name);
     }
-
-    struct node* var_node_cur  = variable_node(vector_peek_ptr(struct_vars_vec));
-    struct node* var_node_last = 0;
-    int position = last_pos;
-    *var_node_out = 0;
-    while(var_node_cur){
-        *var_node_out = var_node_cur;
-        if(var_node_last){
-            position += variable_size(var_node_last);
-            if(variable_node_is_primitive(var_node_cur)){
-                position = align_value_treat_positive(position, var_node_cur->var.type.size);
-            } else {
-                position = align_value_treat_positive(position,
-                    variable_struct_or_union_largest_variable_node(var_node_cur)->var.type.size);
-            }
-        }
-        if(S_EQ(var_node_cur->var.name, var_name)){
-            break;
-        }
-        var_node_last = var_node_cur;
-        var_node_cur  = variable_node(vector_peek_ptr(struct_vars_vec));
+    // The parser recorded each member's offset when it laid the body out
+    // (parser_scope_offset_for_structure; union members are at 0). This
+    // used to recompute the offsets with different rules, and those did
+    // not align a nested struct or count a whole array.
+    *var_node_out = struct_member_named(node->_struct.body_n->body.statements, var_name);
+    if(!*var_node_out){
+        compiler_error(compile_proc, "%s has no member named %s", struct_name, var_name);
     }
-    vector_unset_flag(struct_vars_vec, VECTOR_FLAG_PEEK_DECREMENT);
-    return position;
+    return last_pos + (*var_node_out)->var.aoffset;
 }
 
 // ch127: access / array / parens operator + node predicates. Moved
@@ -301,8 +307,10 @@ struct datatype datatype_for_string(void){
     dtype.type_str      = "char";
     dtype.flags        |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_LITERAL;
     dtype.pointer_depth = 1;
-    // a pointer, so the target pointer size.
-    dtype.size          = target_current()->pointer_size;
+    // A pointer records the size of what it points to, as `char* p`
+    // does; datatype_size and datatype_element_size give the pointer's
+    // own size. The pointer size here made "abc" + 1 step by 4 or 8.
+    dtype.size          = DATA_SIZE_BYTE;
     return dtype;
 }
 
