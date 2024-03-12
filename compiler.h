@@ -15,6 +15,11 @@ struct pos {
 };
 
 enum {
+    LEXICAL_ANALYSIS_ALL_OK,
+    LEXICAL_ANALYSIS_INPUT_ERROR,
+};
+
+enum {
     TOKEN_TYPE_IDENTIFIER,
     TOKEN_TYPE_KEYWORD,
     TOKEN_TYPE_OPERATOR,
@@ -46,14 +51,47 @@ struct token {
     const char* between_brackets;
 };
 
+// Forward decls for the lexer types so the function-pointer typedefs below
+// can name them; the full definitions follow.
+typedef struct lex_process            lex_process_t;
+typedef struct lex_process_functions  lex_process_functions_t;
+typedef struct compile_process        compile_process_t;
+typedef struct compile_process_input_file compile_process_input_file_t;
+
+// A lex_process talks to its input source through this trio of callbacks.
+// Today the source is always a FILE*, but later (preprocessor) we'll plug
+// in a string-backed source by swapping out these functions.
+typedef char (*lex_process_next_char_fn)(struct lex_process* process);
+typedef char (*lex_process_peek_char_fn)(struct lex_process* process);
+typedef void (*lex_process_push_char_fn)(struct lex_process* process, char c);
+
+struct lex_process_functions {
+    lex_process_next_char_fn next_char;
+    lex_process_peek_char_fn peek_char;
+    lex_process_push_char_fn push_char;
+};
+
+struct lex_process {
+    struct pos              pos;
+    struct vector*          token_vec;
+    struct compile_process* compiler;
+
+    // Depth of nested parens we are currently inside. Each '(' bumps it,
+    // each ')' drops it. Lets us capture the text between brackets for
+    // e.g. "((50))".
+    int                           current_expression_count;
+    struct buffer*                parentheses_buffer;
+    struct lex_process_functions* function;
+
+    // Opaque blob owned by the caller; the lexer never touches it.
+    void* private;
+};
+
 // Result codes returned from compile_file.
 enum {
     COMPILER_FILE_COMPILED_OK,
     COMPILER_FAILED_WITH_ERRORS,
 };
-
-typedef struct compile_process compile_process_t;
-typedef struct compile_process_input_file compile_process_input_file_t;
 
 struct compile_process_input_file {
     FILE*       fp;
@@ -64,6 +102,7 @@ struct compile_process {
     // Flags controlling how this file should be compiled.
     int flags;
 
+    struct pos                        pos;
     struct compile_process_input_file cfile;
 
     FILE* ofile;
@@ -71,5 +110,18 @@ struct compile_process {
 
 int                     compile_file(const char* filename, const char* out_filename, int flags);
 struct compile_process* compile_process_create(const char* filename, const char* filename_out, int flags);
+
+// FILE*-backed adapters that plug into lex_process_functions.
+char compile_process_next_char(struct lex_process* lex_process);
+char compile_process_peek_char(struct lex_process* lex_process);
+void compile_process_push_char(struct lex_process* lex_process, char c);
+
+struct lex_process* lex_process_create(struct compile_process* compiler,
+                                       struct lex_process_functions* functions,
+                                       void* private);
+void                lex_process_free(struct lex_process* process);
+void*               lex_process_private(struct lex_process* process);
+struct vector*      lex_process_tokens(struct lex_process* process);
+int                 lex(struct lex_process* process);
 
 #endif

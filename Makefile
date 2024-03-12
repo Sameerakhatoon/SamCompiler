@@ -1,4 +1,5 @@
 OBJECTS  = ./build/compiler.o ./build/cprocess.o \
+           ./build/lexer.o ./build/lex_process.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o
 INCLUDES = -I./
 CFLAGS   = -g -Wall -Wno-unused-variable -Wno-unused-function
@@ -13,6 +14,12 @@ all: ./main
 
 ./build/cprocess.o: ./cprocess.c ./compiler.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./cprocess.c -o ./build/cprocess.o
+
+./build/lexer.o: ./lexer.c ./compiler.h
+	gcc ${INCLUDES} ${CFLAGS} -c ./lexer.c -o ./build/lexer.o
+
+./build/lex_process.o: ./lex_process.c ./compiler.h ./helpers/vector.h
+	gcc ${INCLUDES} ${CFLAGS} -c ./lex_process.c -o ./build/lex_process.o
 
 ./build/helpers/buffer.o: ./helpers/buffer.c ./helpers/buffer.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./helpers/buffer.c -o ./build/helpers/buffer.o
