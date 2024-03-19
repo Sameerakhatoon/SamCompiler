@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Ch9: the lexer reads `"hello" 5838 "abnc494"` as three tokens:
-# STRING("hello"), NUMBER(5838), STRING("abnc494"). Self-contained input.
+# Ch10: the lexer reads `50+20+50+39+28+18*5  ++` as a mix of NUMBER and
+# OPERATOR tokens, with the greedy two-char operator "++" at the end.
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
 
-scratch=$(mktemp /tmp/sam_ch9_input.XXXXXX)
-printf '"hello" 5838 "abnc494"' > "$scratch"
+scratch=$(mktemp /tmp/sam_ch10_input.XXXXXX)
+printf '50+20+50+39+28+18*5  ++' > "$scratch"
 
-probe=$(mktemp /tmp/sam_ch9_probe.XXXXXX.c)
-bin=$(mktemp /tmp/sam_ch9_bin.XXXXXX)
+probe=$(mktemp /tmp/sam_ch10_probe.XXXXXX.c)
+bin=$(mktemp /tmp/sam_ch10_bin.XXXXXX)
 trap 'rm -f "$probe" "$bin" "$scratch"' EXIT
 
 cat > "$probe" <<EOF
@@ -20,7 +20,7 @@ cat > "$probe" <<EOF
 extern struct lex_process_functions compiler_lex_functions;
 
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_ch9_out", 0);
+    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_ch10_out", 0);
     struct lex_process* lp = lex_process_create(cp, &compiler_lex_functions, 0);
     if(lex(lp) != LEXICAL_ANALYSIS_ALL_OK){ printf("FAIL lex\n"); return 1; }
 
@@ -29,10 +29,10 @@ int main(void){
     printf("count=%d\n", n);
     for(int i = 0; i < n; i++){
         struct token* t = vector_at(tv, i);
-        if(t->type == TOKEN_TYPE_STRING){
-            printf("[%d] STR \"%s\"\n", i, t->sval);
-        } else if(t->type == TOKEN_TYPE_NUMBER){
+        if(t->type == TOKEN_TYPE_NUMBER){
             printf("[%d] NUM %llu\n", i, t->llnum);
+        } else if(t->type == TOKEN_TYPE_OPERATOR){
+            printf("[%d] OP %s\n", i, t->sval);
         } else {
             printf("[%d] type=%d\n", i, t->type);
         }
@@ -49,12 +49,14 @@ gcc -I"$REPO_ROOT" "$probe" \
     "$REPO_ROOT"/build/token.o \
     "$REPO_ROOT"/build/helpers/buffer.o \
     "$REPO_ROOT"/build/helpers/vector.o \
-    -o "$bin" 2>&1 | head -5
-[ -x "$bin" ] || fail "ch9 probe failed to compile"
+    -o "$bin" 2>&1 | head -8
+[ -x "$bin" ] || fail "ch10 probe failed to compile"
 
 got="$("$bin")"
-assert_contains "$got" "count=3"           "3 tokens"
-assert_contains "$got" 'STR "hello"'       "first string"
-assert_contains "$got" "NUM 5838"          "middle number"
-assert_contains "$got" 'STR "abnc494"'     "second string"
+# Expect: 50, +, 20, +, 50, +, 39, +, 28, +, 18, *, 5, ++  -> 14 tokens
+assert_contains "$got" "count=14"   "14 tokens"
+assert_contains "$got" "NUM 50"     "first number 50"
+assert_contains "$got" "OP +"       "+ operator present"
+assert_contains "$got" "OP *"       "* operator present"
+assert_contains "$got" "OP ++"      "greedy two-char ++"
 pass

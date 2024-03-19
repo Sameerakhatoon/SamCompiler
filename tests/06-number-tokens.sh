@@ -44,6 +44,7 @@ gcc -I"\$REPO_ROOT" "$probe" \
     "$REPO_ROOT"/build/cprocess.o \
     "$REPO_ROOT"/build/lexer.o \
     "$REPO_ROOT"/build/lex_process.o \
+    "$REPO_ROOT"/build/token.o \
     "$REPO_ROOT"/build/helpers/buffer.o \
     "$REPO_ROOT"/build/helpers/vector.o \
     -I"$REPO_ROOT" \
