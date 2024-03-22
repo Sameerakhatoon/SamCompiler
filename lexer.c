@@ -38,6 +38,7 @@ static struct token*  token_make_operator_or_string(void);
 static struct token*  token_make_symbol(void);
 static struct token*  token_make_identifier_or_keyword(void);
 struct token*         read_special_token(void);
+static bool           is_keyword(const char* str);
 
 struct token* read_next_token(void);
 
@@ -238,6 +239,29 @@ bool lex_is_in_expression(void){
     return lex_process->current_expression_count > 0;
 }
 
+// Reserved-word table. Anything spelled identically becomes a
+// TOKEN_TYPE_KEYWORD instead of a TOKEN_TYPE_IDENTIFIER. "include" is
+// in here so the operator-or-string disambiguation in ch10 can detect
+// `#include <stdio.h>`.
+static bool is_keyword(const char* str){
+    return S_EQ(str, "unsigned") || S_EQ(str, "signed")
+        || S_EQ(str, "char")     || S_EQ(str, "short")
+        || S_EQ(str, "int")      || S_EQ(str, "long")
+        || S_EQ(str, "float")    || S_EQ(str, "double")
+        || S_EQ(str, "void")     || S_EQ(str, "struct")
+        || S_EQ(str, "union")    || S_EQ(str, "static")
+        || S_EQ(str, "__ignore_typecheck")
+        || S_EQ(str, "return")   || S_EQ(str, "include")
+        || S_EQ(str, "sizeof")   || S_EQ(str, "if")
+        || S_EQ(str, "else")     || S_EQ(str, "while")
+        || S_EQ(str, "for")      || S_EQ(str, "do")
+        || S_EQ(str, "break")    || S_EQ(str, "continue")
+        || S_EQ(str, "switch")   || S_EQ(str, "case")
+        || S_EQ(str, "default")  || S_EQ(str, "goto")
+        || S_EQ(str, "typedef")  || S_EQ(str, "const")
+        || S_EQ(str, "extern")   || S_EQ(str, "restrict");
+}
+
 // '<' is the wart: in `#include <stdio.h>` it opens a string literal, not
 // a less-than operator. We disambiguate by peeking at the previous token.
 static struct token* token_make_operator_or_string(void){
@@ -279,6 +303,14 @@ static struct token* token_make_identifier_or_keyword(void){
         c == '_');
 
     buffer_write(buffer, 0x00);
+
+    if(is_keyword(buffer_ptr(buffer))){
+        return token_create(&(struct token){
+            .type = TOKEN_TYPE_KEYWORD,
+            .sval = buffer_ptr(buffer),
+        });
+    }
+
     return token_create(&(struct token){
         .type = TOKEN_TYPE_IDENTIFIER,
         .sval = buffer_ptr(buffer),
