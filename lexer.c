@@ -46,6 +46,11 @@ struct token*         token_make_multiline_comment(void);
 struct token*         handle_comment(void);
 char                  lex_get_escaped_char(char c);
 struct token*         token_make_quote(void);
+void                  lexer_pop_token(void);
+bool                  is_hex_char(char c);
+const char*           read_hex_number_str(void);
+struct token*         token_make_special_number_hexadecimal(void);
+struct token*         token_make_special_number(void);
 
 struct token* read_next_token(void);
 
@@ -419,6 +424,54 @@ char lex_get_escaped_char(char c){
     return co;
 }
 
+// Drop the last token from the vector. Used when read_next_token has
+// already emitted something (e.g. NUMBER 0) and we now realize we want
+// to consume the *next* char (e.g. 'x') and replace the pair with a
+// hex literal.
+void lexer_pop_token(void){
+    vector_pop(lex_process->token_vec);
+}
+
+bool is_hex_char(char c){
+    c = tolower(c);
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+}
+
+const char* read_hex_number_str(void){
+    struct buffer* buffer = buffer_create();
+    char c;
+    LEX_GETC_IF(buffer, c, is_hex_char(c));
+    buffer_write(buffer, 0x00);
+    return buffer_ptr(buffer);
+}
+
+// `0x` is just a hex prefix. By the time we get here, '0' has already
+// been lexed as NUMBER(0); we throw it away, eat the 'x', and parse the
+// real hex digits.
+struct token* token_make_special_number_hexadecimal(void){
+    nextc();   // consume the 'x'
+    const char* number_str = read_hex_number_str();
+    unsigned long number   = strtol(number_str, 0, 16);
+    return token_make_number_for_value(number);
+}
+
+// Called from the 'x' case of the dispatch switch. The preceding NUMBER
+// must be 0 for this to be meaningful; ch18 widens this to also handle
+// '0b' for binary.
+struct token* token_make_special_number(void){
+    struct token* token = 0;
+    /* struct token* last_token = */ lexer_last_token();
+
+    lexer_pop_token();
+
+    char c = peekc();
+    if(c == 'x'){
+        token = token_make_special_number_hexadecimal();
+    }
+
+    return token;
+}
+
 // Char literal: '<one byte>' or '\<escape>'. The value lives in cval but
 // the token type is TOKEN_TYPE_NUMBER (a quoted char is the same as its
 // numeric value in C, and the rest of the pipeline already understands
@@ -458,6 +511,10 @@ struct token* read_next_token(void){
 
         SYMBOL_CASE:
             token = token_make_symbol();
+            break;
+
+        case 'x':
+            token = token_make_special_number();
             break;
 
         case '"':

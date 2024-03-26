@@ -15,7 +15,7 @@ Tracking the build, one chapter at a time.
 - [x] ch13: creating a keyword token (is_keyword whitelist, promotes IDENTIFIER -> KEYWORD)
 - [x] ch14: creating a new-line token ('\n' becomes TOKEN_TYPE_NEWLINE, distinct from whitespace)
 - [x] ch16: handling quotes + comments in the lexer (//, /* */, 'X' char literals, escapes)
-- [ ] ch17: implementing hexadecimal numbers
+- [x] ch17: implementing hexadecimal numbers (0xNN via lexer_pop_token + read_hex_number_str)
 - [ ] ch18: implementing binary numbers
 - [ ] ...
 
