@@ -13,6 +13,10 @@ Tracking the build, one chapter at a time.
 - [x] ch11: creating a symbol token (SYMBOL_CASE, ')' drops paren counter via lex_finish_expression)
 - [x] ch12: creating an identifier token (default-case fallback to read_special_token)
 - [x] ch13: creating a keyword token (is_keyword whitelist, promotes IDENTIFIER -> KEYWORD)
+- [x] ch14: creating a new-line token ('\n' becomes TOKEN_TYPE_NEWLINE, distinct from whitespace)
+- [ ] ch16: handling quotes in the lexer
+- [ ] ch17: implementing hexadecimal numbers
+- [ ] ch18: implementing binary numbers
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
