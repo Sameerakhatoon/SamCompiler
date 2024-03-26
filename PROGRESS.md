@@ -14,7 +14,7 @@ Tracking the build, one chapter at a time.
 - [x] ch12: creating an identifier token (default-case fallback to read_special_token)
 - [x] ch13: creating a keyword token (is_keyword whitelist, promotes IDENTIFIER -> KEYWORD)
 - [x] ch14: creating a new-line token ('\n' becomes TOKEN_TYPE_NEWLINE, distinct from whitespace)
-- [ ] ch16: handling quotes in the lexer
+- [x] ch16: handling quotes + comments in the lexer (//, /* */, 'X' char literals, escapes)
 - [ ] ch17: implementing hexadecimal numbers
 - [ ] ch18: implementing binary numbers
 - [ ] ...
