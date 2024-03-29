@@ -376,7 +376,7 @@ static void codegen_goto_exit_point_maintain_stack(struct node* node);
 static void codegen_begin_switch_statement(void);
 static void codegen_end_switch_statement(void);
 static int  codegen_switch_id(void);
-static void codegen_begin_case_statement(int index);
+static void codegen_begin_case_statement(long long index);
 static void codegen_end_case_statement(void);
 static void codegen_generate_switch_default_stmt(struct node* node);
 // ch162: forward decl for the goto-entry-point helper.
@@ -1944,8 +1944,8 @@ static void codegen_generate_switch_stmt_case_jumps(struct node* node){
     vector_set_peek_pointer(node->stmt.switch_stmt.cases, 0);
     struct parsed_switch_case* sc = vector_peek(node->stmt.switch_stmt.cases);
     while(sc){
-        asm_push("cmp eax, %i", sc->index);
-        asm_push("je .switch_stmt_%i_case_%i", codegen_switch_id(), sc->index);
+        asm_push("cmp eax, %i", (int)sc->index);
+        asm_push("je .switch_stmt_%i_case_%s", codegen_switch_id(), codegen_case_label(sc->index));
         sc = vector_peek(node->stmt.switch_stmt.cases);
     }
     if(node->stmt.switch_stmt.has_default_case){
@@ -1984,7 +1984,7 @@ static void codegen_generate_label(struct node* node){
 static void codegen_generate_switch_case_stmt(struct node* node){
     struct node* case_exp = node->stmt._case.exp;
     assert(case_exp->type == NODE_TYPE_NUMBER);
-    codegen_begin_case_statement(case_exp->llnum);
+    codegen_begin_case_statement((long long)case_exp->llnum);
     asm_push("; CASE %i", (int)case_exp->llnum);
     codegen_end_case_statement();
 }
@@ -2101,6 +2101,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // ch169: label.
         case NODE_TYPE_LABEL:
             codegen_generate_label(node);
+            break;
+        case NODE_TYPE_BODY:
+            // A compound statement `{ ... }` inside a function.
+            codegen_generate_body(node, codegen_history_begin(IS_ALONE_STATEMENT));
             break;
     }
     // ch148: drain leftover result_value pushes.
@@ -2278,9 +2282,9 @@ static int codegen_switch_id(void){
     return gen->_switch.current.id;
 }
 
-static void codegen_begin_case_statement(int index){
+static void codegen_begin_case_statement(long long index){
     struct code_generator* gen = current_process->generator;
-    asm_push(".switch_stmt_%i_case_%i:", gen->_switch.current.id, index);
+    asm_push(".switch_stmt_%i_case_%s:", gen->_switch.current.id, codegen_case_label(index));
 }
 
 static void codegen_end_case_statement(void){

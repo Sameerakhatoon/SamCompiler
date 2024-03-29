@@ -428,7 +428,7 @@ static void codegen_goto_exit_point_maintain_stack(struct node* node);
 static void codegen_begin_switch_statement(void);
 static void codegen_end_switch_statement(void);
 static int  codegen_switch_id(void);
-static void codegen_begin_case_statement(int index);
+static void codegen_begin_case_statement(long long index);
 static void codegen_end_case_statement(void);
 static void codegen_generate_switch_default_stmt(struct node* node);
 static void codegen_goto_entry_point(struct node* node);
@@ -1796,13 +1796,20 @@ static void codegen_generate_switch_default_stmt(struct node* node){
 
 // The compare chain. cmp's immediate is 12 bits unsigned, so the
 // case value goes through w1.
-static void codegen_generate_switch_stmt_case_jumps(struct node* node){
+// A long switch value compares all 64 bits (the old code compared w0).
+static void codegen_generate_switch_stmt_case_jumps(struct node* node, struct datatype* dtype){
+    bool wide = datatype_element_size(dtype) > DATA_SIZE_DWORD;
     vector_set_peek_pointer(node->stmt.switch_stmt.cases, 0);
     struct parsed_switch_case* sc = vector_peek(node->stmt.switch_stmt.cases);
     while(sc){
-        codegen_mov_imm("w1", sc->index);
-        asm_push("cmp w0, w1");
-        asm_push("b.eq .Lswitch_stmt_%i_case_%i", codegen_switch_id(), sc->index);
+        if(wide){
+            codegen_mov_imm("x1", sc->index);
+            asm_push("cmp x0, x1");
+        } else {
+            codegen_mov_imm("w1", (int)sc->index);
+            asm_push("cmp w0, w1");
+        }
+        asm_push("b.eq .Lswitch_stmt_%i_case_%s", codegen_switch_id(), codegen_case_label(sc->index));
         sc = vector_peek(node->stmt.switch_stmt.cases);
     }
     if(node->stmt.switch_stmt.has_default_case){
@@ -1816,8 +1823,11 @@ static void codegen_generate_switch_stmt(struct node* node){
     codegen_begin_entry_exit_point();
     codegen_begin_switch_statement();
     codegen_generate_expressionable(node->stmt.switch_stmt.exp, codegen_history_begin(0));
+    struct datatype dtype = datatype_for_int();
+    asm_datatype_back(&dtype);
+    dtype = datatype_promote(&dtype);
     asm_push_ins_pop_or_ignore("x0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-    codegen_generate_switch_stmt_case_jumps(node);
+    codegen_generate_switch_stmt_case_jumps(node, &dtype);
     codegen_generate_body(node->stmt.switch_stmt.body, codegen_history_begin(IS_ALONE_STATEMENT));
     codegen_end_switch_statement();
     codegen_end_entry_exit_point();
@@ -1834,7 +1844,7 @@ static void codegen_generate_label(struct node* node){
 static void codegen_generate_switch_case_stmt(struct node* node){
     struct node* case_exp = node->stmt._case.exp;
     assert(case_exp->type == NODE_TYPE_NUMBER);
-    codegen_begin_case_statement(case_exp->llnum);
+    codegen_begin_case_statement((long long)case_exp->llnum);
     asm_push("// CASE %i", (int)case_exp->llnum);
     codegen_end_case_statement();
 }
@@ -1935,6 +1945,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
             break;
         case NODE_TYPE_LABEL:
             codegen_generate_label(node);
+            break;
+        case NODE_TYPE_BODY:
+            // A compound statement `{ ... }` inside a function.
+            codegen_generate_body(node, codegen_history_begin(IS_ALONE_STATEMENT));
             break;
     }
     codegen_discard_unused_stack();
@@ -2122,9 +2136,9 @@ static int codegen_switch_id(void){
     return gen->_switch.current.id;
 }
 
-static void codegen_begin_case_statement(int index){
+static void codegen_begin_case_statement(long long index){
     struct code_generator* gen = current_process->generator;
-    asm_push(".Lswitch_stmt_%i_case_%i:", gen->_switch.current.id, index);
+    asm_push(".Lswitch_stmt_%i_case_%s:", gen->_switch.current.id, codegen_case_label(index));
 }
 
 static void codegen_end_case_statement(void){

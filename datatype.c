@@ -85,6 +85,13 @@ struct datatype datatype_for_number_node(struct node* node){
     int flags = node->num.flags;
     unsigned long long value = node->llnum;
     size_t long_size = target_current()->long_size;
+    if(flags & NUMBER_FLAG_TYPED){
+        bool is_long = flags & NUMBER_FLAG_LONG;
+        struct datatype dtype = datatype_integer(is_long ? long_size : DATA_SIZE_DWORD,
+                                                 !(flags & NUMBER_FLAG_UNSIGNED), is_long);
+        dtype.flags |= DATATYPE_FLAG_IS_LITERAL;
+        return dtype;
+    }
     bool any_sign = (flags & NUMBER_FLAG_NOT_DECIMAL) || (flags & NUMBER_FLAG_UNSIGNED);
     struct {
         size_t size;

@@ -1306,7 +1306,7 @@ void preprocessor_handle_typedef_body_for_brackets(struct compile_process *compi
 void preprocessor_handle_typedef_body_for_struct_or_union(struct compile_process *compiler, struct vector *token_vec, struct typedef_type *td, struct vector *src_vec, bool overflow_use_token_vec)
 {
     struct token *token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    assert(token_is_keyword(token, "struct") || token_is_keyword(token, "union"));
+    assert(token_is_keyword(token, "struct") || token_is_keyword(token, "union") || token_is_keyword(token, "enum"));
 
     td->type = TYPEDEF_TYPE_STRUCTURE_TYPEDEF;
     td->structure.keyword = token->sval;
@@ -1400,7 +1400,9 @@ void preprocessor_handle_typedef_body(struct compile_process *compiler, struct v
     memset(td, 0, sizeof(struct typedef_type));
 
     struct token *token = preprocessor_peek_next_token_with_vector_no_increment(compiler, src_vec, overflow_use_token_vec);
-    if (token_is_keyword(token, "struct") || token_is_keyword(token, "union"))
+    // An enum body is emitted once, like a struct body, so its constants
+    // are declared even when the typedef name is never used.
+    if (token_is_keyword(token, "struct") || token_is_keyword(token, "union") || token_is_keyword(token, "enum"))
     {
         preprocessor_handle_typedef_body_for_struct_or_union(compiler, token_vec, td, src_vec, overflow_use_token_vec);
     }

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Ch130: `int b = -5;` parses with a NODE_TYPE_UNARY ("-") wrapping the
-# number. Also covers `*p` indirection depth.
+# number. Also covers `*p` indirection depth. The declaration is a local:
+# a global's initializer is folded to a constant.
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
 
 scratch=$(mktemp /tmp/sam_ch130_input.XXXXXX)
-printf 'int b = -5;' > "$scratch"
+printf 'int f(void){ int b = -5; }' > "$scratch"
 probe=$(mktemp /tmp/sam_ch130_probe.XXXXXX.c)
 bin=$(mktemp /tmp/sam_ch130_bin.XXXXXX)
 trap 'rm -f "$probe" "$bin" "$scratch"' EXIT
@@ -22,7 +23,8 @@ int main(void){
     struct lex_process* lp = lex_process_create(cp, &compiler_lex_functions, 0);
     lex(lp); cp->token_vec = lex_process_tokens(lp); parse(cp);
     struct node** pp = vector_at(cp->node_tree_vec, 0);
-    struct node* var = *pp;
+    struct node** sp = vector_at((*pp)->func.body_n->body.statements, 0);
+    struct node* var = *sp;
     struct node* val = var->var.val;
     printf("val_type=%d op=%s operand_type=%d operand_num=%llu\n",
         val ? val->type : -1,

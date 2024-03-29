@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include "compiler.h"
 #include "helpers/vector.h"
@@ -27,4 +28,19 @@ struct code_generator* codegenerator_new(struct compile_process* process){
     // ch187: custom .data add-ons (per-call function pointer slots).
     gen->custom_data_section = vector_create(sizeof(const char*));
     return gen;
+}
+
+// Non-negative values keep the spelling every backend used, so existing
+// output is unchanged. The buffers rotate so one asm_push can use two.
+const char* codegen_case_label(long long value){
+    static char buffers[4][32];
+    static int next = 0;
+    char* buffer = buffers[next];
+    next = (next + 1) % 4;
+    if(value < 0){
+        snprintf(buffer, sizeof(buffers[0]), "m%llu", 0ULL - (unsigned long long)value);
+    } else {
+        snprintf(buffer, sizeof(buffers[0]), "%lld", value);
+    }
+    return buffer;
 }

@@ -109,6 +109,10 @@ enum {
     NUMBER_FLAG_UNSIGNED    = 0b001,   // u or U
     NUMBER_FLAG_LONG        = 0b010,   // l, L, ll or LL
     NUMBER_FLAG_NOT_DECIMAL = 0b100,   // 0x, 0b or a leading 0
+    // A folded constant expression: its type is exactly int, unsigned
+    // int, long or unsigned long as UNSIGNED and LONG say, and llnum
+    // holds the value in two's complement.
+    NUMBER_FLAG_TYPED       = 0b1000,
 };
 
 enum {
@@ -911,6 +915,16 @@ bool datatype_is_struct_or_union(struct datatype* dtype);
 size_t datatype_size_for_array_access(struct datatype* dtype);
 size_t datatype_element_size(struct datatype* dtype);
 size_t datatype_alignment(struct datatype* dtype);
+
+// constant.c: integer constant expressions (C11 6.6).
+struct constant {
+    // The value as a 64-bit register holds it for `type`.
+    unsigned long long value;
+    struct datatype    type;
+};
+bool               constant_fold(struct compile_process* process, struct node* node, struct constant* out);
+struct node*       constant_node(struct constant* c);
+unsigned long long constant_value_as(struct constant* c, struct datatype* dtype);
 // Array-to-pointer decay: `int a[3]` used as a value has type `int*`.
 struct datatype datatype_decay(struct datatype* dtype);
 // C integer typing (C11 6.3.1, 6.4.4.1): the type of a constant, the
@@ -1029,8 +1043,13 @@ struct string_table_element {
 
 // ch166: moved here from parser.c so codegen can iterate switch cases.
 struct parsed_switch_case {
-    int index;
+    // The case value, already a constant of the case expression's type.
+    long long index;
 };
+
+// The label suffix for a case value: the value, with `m` for a minus
+// sign so `case -1:` gives a valid label (`case_m1`).
+const char* codegen_case_label(long long value);
 
 struct code_generator {
     // ch164: nested switch-statement bookkeeping. `current` is the
@@ -1585,6 +1604,8 @@ enum {
     DATATYPE_FLAG_IS_SECONDARY           = 0b100000000,
     DATATYPE_FLAG_STRUCT_UNION_NO_NAME   = 0b1000000000,
     DATATYPE_FLAG_IS_LITERAL             = 0b10000000000,
+    // _Bool: an unsigned char that only ever holds 0 or 1.
+    DATATYPE_FLAG_IS_BOOL                = 0b100000000000,
 };
 
 enum {

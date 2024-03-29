@@ -95,6 +95,9 @@ static void                         parser_register_case(struct history* history
 
 static struct history* history_begin(int flags);
 static struct history* history_down(struct history* history, int flags);
+static bool            parser_is_bool_object(struct datatype* dtype);
+static struct node*    parser_bool_value(struct node* value);
+static bool            parser_expression_type(struct node* node, struct datatype* out);
 
 static struct compile_process* current_process;
 // ch97: parser-owned fixup system. Forward references to as-yet-
@@ -102,6 +105,11 @@ static struct compile_process* current_process;
 // the full pass and asserts none remain.
 static struct fixup_system*    parser_fixup_sys;
 static struct token*           parser_last_token;
+// The token before parser_last_token: an identifier after `.` or `->`
+// is a member name, never an enumerator.
+static struct token*           parser_previous_token;
+// Set once a _Bool type has been parsed.
+static bool                    parser_saw_bool;
 
 // Defined here so current_process is in scope.
 static struct parser_scope_entity* parser_scope_last_entity_stop_global_scope(void){
@@ -116,7 +124,7 @@ static void          parse_expressionable_for_op(struct history* history, const 
 static void          parse_exp_normal(struct history* history);
 static int           parse_exp(struct history* history);
 static int           parser_get_pointer_depth(void);
-static void          parser_deal_with_additional_expression(void);
+static void          parser_deal_with_additional_expression(struct history* history);
 static void          parse_for_parentheses(struct history* history);
 static void          parse_identifier(struct history* history);
 static bool          is_keyword_variable_modifier(const char* val);
@@ -177,10 +185,21 @@ static void parser_end_switch_statement(struct parser_history_switch* sw){
 }
 
 static void parser_register_case(struct history* history, struct node* case_node){
-    assert(history->flags & HISTORY_FLAG_IN_SWITCH_STATEMENT);
+    if(!(history->flags & HISTORY_FLAG_IN_SWITCH_STATEMENT)){
+        compiler_error(current_process, "case label outside a switch statement\n");
+    }
     struct parsed_switch_case scase;
-    scase.index = case_node->stmt._case.exp->llnum;
-    vector_push(history->_switch.case_data->cases, &scase);
+    scase.index = (long long)case_node->stmt._case.exp->llnum;
+    struct vector* cases = history->_switch.case_data->cases;
+    vector_set_peek_pointer(cases, 0);
+    struct parsed_switch_case* seen = vector_peek(cases);
+    while(seen){
+        if(seen->index == scase.index){
+            compiler_error(current_process, "Duplicate case value %lld\n", scase.index);
+        }
+        seen = vector_peek(cases);
+    }
+    vector_push(cases, &scase);
 }
 
 static void parser_ignore_nl_or_comment(struct token* token){
@@ -193,9 +212,12 @@ static void parser_ignore_nl_or_comment(struct token* token){
 static struct token* token_next(void){
     struct token* next_token = vector_peek_no_increment(current_process->token_vec);
     parser_ignore_nl_or_comment(next_token);
+    // The token after any skipped newlines and comments.
+    next_token = vector_peek_no_increment(current_process->token_vec);
     if(next_token){
         current_process->pos = next_token->pos;
     }
+    parser_previous_token = parser_last_token;
     parser_last_token = next_token;
     return vector_peek(current_process->token_vec);
 }
@@ -233,6 +255,65 @@ static const char* parser_token_text(struct token* token){
     return text;
 }
 
+// Enumeration constants (C11 6.7.2.2). Each is an int constant whose
+// name is visible in the scope that declared it; a variable of the same
+// name declared deeper hides it (a `shadow` entry). The parser turns a
+// use of the name into a number node, so nothing after the parser sees
+// enumerators.
+struct parser_enumerator {
+    const char*     name;
+    struct constant value;
+    int             depth;
+    bool            shadow;
+};
+static struct vector* parser_enumerators;
+
+static int parser_scope_depth(void){
+    int depth = 0;
+    for(struct scope* s = current_process->scope.current; s; s = s->parent){
+        depth++;
+    }
+    return depth;
+}
+
+static void parser_enumerator_push(const char* name, struct constant* value, bool shadow){
+    struct parser_enumerator e = { .name = name, .depth = parser_scope_depth(), .shadow = shadow };
+    if(value){
+        e.value = *value;
+    }
+    vector_push(parser_enumerators, &e);
+}
+
+// Entries of scopes that have closed go away.
+static void parser_enumerators_trim(void){
+    int depth = parser_scope_depth();
+    while(vector_count(parser_enumerators)){
+        struct parser_enumerator* e = vector_back(parser_enumerators);
+        if(e->depth <= depth){
+            break;
+        }
+        vector_pop(parser_enumerators);
+    }
+}
+
+static struct parser_enumerator* parser_enumerator_find(const char* name){
+    for(int i = vector_count(parser_enumerators) - 1; i >= 0; i--){
+        struct parser_enumerator* e = vector_at(parser_enumerators, i);
+        if(S_EQ(e->name, name)){
+            return e->shadow ? 0 : e;
+        }
+    }
+    return 0;
+}
+
+// A variable, parameter or function named like a visible enumerator
+// hides it from here on in this scope.
+static void parser_enumerator_hide(const char* name){
+    if(name && parser_enumerators && parser_enumerator_find(name)){
+        parser_enumerator_push(name, 0, true);
+    }
+}
+
 // A sub-parse that should have left one new node on the stack. If it
 // left none, the caller's node_pop() would take an earlier node, which
 // is how whole functions disappeared from the output.
@@ -248,9 +329,17 @@ static void parse_single_token_to_node(void){
         case TOKEN_TYPE_NUMBER:
             node_create(&(struct node){ .type = NODE_TYPE_NUMBER,     .llnum = token->llnum, .num.flags = token->num.flags });
             break;
-        case TOKEN_TYPE_IDENTIFIER:
+        case TOKEN_TYPE_IDENTIFIER: {
+            bool member = parser_previous_token
+                && (token_is_operator(parser_previous_token, ".") || token_is_operator(parser_previous_token, "->"));
+            struct parser_enumerator* e = member ? 0 : parser_enumerator_find(token->sval);
+            if(e){
+                node_push(constant_node(&e->value));
+                break;
+            }
             node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval  = token->sval  });
             break;
+        }
         case TOKEN_TYPE_STRING: {
             // Adjacent string literals are one string (C11 5.1.1.2
             // translation phase 6): "ab" "cd" is "abcd". The second
@@ -465,14 +554,14 @@ static void parse_for_normal_unary(void){
 // A prefix operator, then whatever operators follow it, with the unary
 // as their left operand. The `*` path used to skip the second step, so
 // in a right operand `1 + *q * 2` became (1 + *q) * 2.
-static void parse_for_unary(void){
+static void parse_for_unary(struct history* history){
     const char* op = token_peek_next()->sval;
     if(op_is_indirection(op)){
         parse_for_indirection_unary();
     } else {
         parse_for_normal_unary();
     }
-    parser_deal_with_additional_expression();
+    parser_deal_with_additional_expression(history);
 }
 
 static bool parser_is_unary_operator(const char* op){
@@ -505,7 +594,7 @@ static void parse_exp_normal(struct history* history){
         if(!parser_is_unary_operator(op)){
             compiler_error(current_process, "The given expression has no left operand");
         }
-        parse_for_unary();
+        parse_for_unary(history);
         return;
     }
 
@@ -531,7 +620,7 @@ static void parse_exp_normal(struct history* history){
         if(S_EQ(token_peek_next()->sval, "(")){
             parse_for_parentheses(history_down(history, history->flags | HISTORY_FLAG_PARENTHESES_IS_NOT_A_FUNCTION_CALL));
         } else if(parser_is_unary_operator(token_peek_next()->sval)){
-            parse_for_unary();
+            parse_for_unary(history);
         } else {
             compiler_error(current_process,
                 "Two operators are expected for a given expression for operator %s\n",
@@ -559,10 +648,13 @@ static void parse_exp_normal(struct history* history){
 // ch77: after a `(`...`)` is parsed, if the next token is an
 // operator, keep parsing - lets `(50+20)+30` reduce as one expression
 // instead of stopping after the close paren.
-static void parser_deal_with_additional_expression(void){
+// The rest keeps the enclosing NO_COMMA flag: in `int a = -1, b = 2;`
+// and `enum { A = -3, B }` the comma after the unary separates
+// declarators, and was read as the comma operator.
+static void parser_deal_with_additional_expression(struct history* history){
     struct token* t = token_peek_next();
     if(t && t->type == TOKEN_TYPE_OPERATOR){
-        parse_expressionable(history_begin(0));
+        parse_expressionable(history_begin(history->flags & HISTORY_FLAG_NO_COMMA_OPERATOR));
     }
 }
 
@@ -574,7 +666,7 @@ static void parser_deal_with_additional_expression_unless_unary(struct history* 
     if(history->flags & EXPRESSION_IS_UNARY){
         return;
     }
-    parser_deal_with_additional_expression();
+    parser_deal_with_additional_expression(history);
 }
 
 // ch77: parse `(...)`. Two flavours:
@@ -644,6 +736,9 @@ static void parse_for_cast(void){
     parse_expressionable(parser_unary_operand_history());
     parser_expect_new_node(count_before, "an operand after the cast");
     struct node* operand_node = node_pop();
+    if(parser_is_bool_object(&dtype)){
+        operand_node = parser_bool_value(operand_node);
+    }
     make_cast_node(&dtype, operand_node);
 }
 
@@ -802,6 +897,7 @@ static void parser_scope_new(void){
 
 static void parser_scope_finish(void){
     scope_finish(current_process);
+    parser_enumerators_trim();
 }
 
 // Push a parser_scope_entity (carries node + flags + offset) into
@@ -934,6 +1030,13 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
     } else if(S_EQ(datatype_token->sval, "char")){
         datatype_out->type = DATA_TYPE_CHAR;
         datatype_out->size = DATA_SIZE_BYTE;
+    } else if(S_EQ(datatype_token->sval, "_Bool")){
+        // A byte holding 0 or 1; conversions to it are `!= 0`
+        // (parser_bool_value). parse_datatype makes it unsigned.
+        datatype_out->type   = DATA_TYPE_CHAR;
+        datatype_out->size   = DATA_SIZE_BYTE;
+        datatype_out->flags |= DATATYPE_FLAG_IS_BOOL;
+        parser_saw_bool = true;
     } else if(S_EQ(datatype_token->sval, "short")){
         datatype_out->type = DATA_TYPE_SHORT;
         datatype_out->size = DATA_SIZE_WORD;
@@ -1041,6 +1144,50 @@ static void parser_datatype_init(struct token* datatype_token,
     }
 }
 
+// Set by parse_datatype_type when the type was `enum ...`, so a
+// declaration with no declarator (`enum color { RED };`) is accepted.
+static bool parser_last_datatype_was_enum;
+
+// `enum [tag] [{ A, B = expr, C, }]`, the `enum` keyword consumed. The
+// tag names nothing this compiler needs (the type is int). Each
+// enumerator is the previous one plus 1, or its constant expression.
+static void parse_enum_specifier(void){
+    if(token_is_identifier(token_peek_next())){
+        token_next();
+    }
+    if(!token_next_is_symbol('{')){
+        return;
+    }
+    expect_sym('{');
+    struct datatype int_type = datatype_for_int();
+    struct constant value = { 0, int_type };
+    bool first = true;
+    while(!token_next_is_symbol('}')){
+        struct token* name = token_next();
+        if(!token_is_identifier(name)){
+            compiler_error(current_process, "Expected an enumerator name but found %s\n", parser_token_text(name));
+        }
+        if(token_next_is_operator("=")){
+            token_next();
+            parse_expressionable_root(history_begin(HISTORY_FLAG_NO_COMMA_OPERATOR));
+            if(!constant_fold(current_process, node_pop(), &value)){
+                compiler_error(current_process, "The value of %s must be an integer constant expression\n", name->sval);
+            }
+        } else if(!first){
+            value.value += 1;
+        }
+        value.value = constant_value_as(&value, &int_type);
+        value.type  = int_type;
+        parser_enumerator_push(name->sval, &value, false);
+        first = false;
+        if(!token_next_is_operator(",")){
+            break;
+        }
+        token_next();
+    }
+    expect_sym('}');
+}
+
 static void parse_datatype_type(struct datatype* dtype){
     struct token* datatype_token            = 0;
     struct token* datatype_secondary_token  = 0;
@@ -1049,7 +1196,15 @@ static void parse_datatype_type(struct datatype* dtype){
     // "Invalid primitive datatype".
     static struct token implicit_int = { .type = TOKEN_TYPE_KEYWORD, .sval = "int" };
     struct token* next = token_peek_next();
-    if(!next || next->type != TOKEN_TYPE_KEYWORD || !keyword_is_datatype(next->sval)){
+    parser_last_datatype_was_enum = false;
+    if(token_is_keyword(next, "enum")){
+        // An enumerated type is int here (its constants all fit, and
+        // gcc picks unsigned int only for values above INT_MAX).
+        token_next();
+        parse_enum_specifier();
+        parser_last_datatype_was_enum = true;
+        datatype_token = &implicit_int;
+    } else if(!next || next->type != TOKEN_TYPE_KEYWORD || !keyword_is_datatype(next->sval)){
         datatype_token = &implicit_int;
     } else {
         parser_get_datatype_tokens(&datatype_token, &datatype_secondary_token);
@@ -1094,6 +1249,25 @@ static void parse_datatype(struct datatype* dtype){
     if(dtype->type == DATA_TYPE_CHAR && !sign_given && current_process->target->plain_char_unsigned){
         dtype->flags &= ~DATATYPE_FLAG_IS_SIGNED;
     }
+    if(dtype->flags & DATATYPE_FLAG_IS_BOOL){
+        dtype->flags &= ~DATATYPE_FLAG_IS_SIGNED;
+    }
+}
+
+// A _Bool object, not a pointer to one or an array of them.
+static bool parser_is_bool_object(struct datatype* dtype){
+    return (dtype->flags & DATATYPE_FLAG_IS_BOOL)
+        && !(dtype->flags & (DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_ARRAY));
+}
+
+// Converting a value to _Bool gives 0 or 1 (C11 6.3.1.2): `(value) != 0`.
+// Without it `_Bool b = 2` stored 2, and `b = 256` stored 0.
+static struct node* parser_bool_value(struct node* value){
+    make_exp_parentheses_node(value);
+    struct node* parenthesized = node_pop();
+    struct constant zero = { 0, datatype_for_int() };
+    make_exp_node(parenthesized, constant_node(&zero), "!=");
+    return node_pop();
 }
 
 // "long int" / "float int" / "double int" are tolerated abbreviations
@@ -1119,11 +1293,67 @@ static void parser_ignore_int(struct datatype* dtype){
 // Parse an expression at "root level" - read it, then leave its node
 // on the stack for the caller to pop. Used when a sub-grammar (like
 // the RHS of `int x = E;`) needs to embed an expressionable result.
+// The value parser_bool_value already made: `(x) != 0`.
+static bool parser_is_bool_value(struct node* node){
+    return node->type == NODE_TYPE_EXPRESSION && S_EQ(node->exp.op, "!=")
+        && node->exp.left->type == NODE_TYPE_EXPRESSION_PARENTHESES
+        && node->exp.right->type == NODE_TYPE_NUMBER && node->exp.right->llnum == 0;
+}
+
+// Assignments to a _Bool store 0 or 1: `b = x` becomes `b = (x) != 0`
+// and `b op= x` becomes `b = (b op x) != 0`. This runs on the finished
+// expression, where the tree is in its final shape; while the operator
+// is parsed, `s.b = 1` has only `b` as the left operand.
+static void parser_convert_bool_assignments(struct node* node){
+    if(!node){
+        return;
+    }
+    switch(node->type){
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            parser_convert_bool_assignments(node->parenthesis.exp);
+            return;
+        case NODE_TYPE_UNARY:
+            parser_convert_bool_assignments(node->unary.operand);
+            return;
+        case NODE_TYPE_CAST:
+            parser_convert_bool_assignments(node->cast.operand);
+            return;
+        case NODE_TYPE_TENARY:
+            parser_convert_bool_assignments(node->tenary.true_node);
+            parser_convert_bool_assignments(node->tenary.false_node);
+            return;
+        case NODE_TYPE_EXPRESSION:
+            break;
+        default:
+            return;
+    }
+    parser_convert_bool_assignments(node->exp.left);
+    parser_convert_bool_assignments(node->exp.right);
+    struct datatype left_type;
+    if(!is_node_assignment(node) || parser_is_bool_value(node->exp.right)
+       || !parser_expression_type(node->exp.left, &left_type) || !parser_is_bool_object(&left_type)){
+        return;
+    }
+    if(!S_EQ(node->exp.op, "=")){
+        // `|=` -> `|`: the operator without its trailing `=`.
+        char* op = strdup(node->exp.op);
+        op[strlen(op) - 1] = '\0';
+        make_exp_node(node->exp.left, node->exp.right, op);
+        node->exp.right = node_pop();
+        node->exp.op    = "=";
+    }
+    node->exp.right = parser_bool_value(node->exp.right);
+}
+
 static void parse_expressionable_root(struct history* history){
     size_t count_before = node_count();
     parse_expressionable(history);
     parser_expect_new_node(count_before, "an expression");
     struct node* result_node = node_pop();
+    // Only a program that declares a _Bool can assign to one.
+    if(parser_saw_bool){
+        parser_convert_bool_assignments(result_node);
+    }
     node_push(result_node);
 }
 
@@ -1280,6 +1510,7 @@ static void make_variable_node_and_register(struct history* history,
                                             struct node* value_node){
     make_variable_node(dtype, name_token, value_node);
     struct node* var_node = node_pop();
+    parser_enumerator_hide(name_token ? name_token->sval : 0);
 
     // Only assign a stack offset if we're inside some non-global
     // scope (a function body / struct body). Global vars get offset 0
@@ -1315,6 +1546,37 @@ static void make_variable_list_node(struct vector* var_list_vec){
 // Each one becomes a NODE_TYPE_BRACKET wrapping the inner expression;
 // they all get collected into an array_brackets struct stored on the
 // datatype's `.array.brackets`.
+// `node` folded to a number, or an error naming `what` when it is not
+// an integer constant expression.
+static struct node* parser_fold_required(struct node* node, const char* what){
+    struct constant c;
+    if(!constant_fold(current_process, node, &c)){
+        compiler_error(current_process, "%s must be an integer constant expression\n", what);
+    }
+    return constant_node(&c);
+}
+
+// A global is initialized at assembly time, so its value must be a
+// constant (C11 6.7.9p4). It is folded here and converted to the
+// variable's type; the backends write llnum as it is, so `int g = 3+4`
+// and `-3` gave 0 and `= h` a garbage value. A string, or
+// the address of something, stays as written.
+static struct node* parser_global_initializer(struct datatype* dtype, struct token* name_token, struct node* value_node){
+    bool is_scalar = !(dtype->flags & DATATYPE_FLAG_IS_ARRAY) && !datatype_is_struct_or_union(dtype);
+    if(!is_scalar || value_node->type == NODE_TYPE_STRING
+       || (value_node->type == NODE_TYPE_UNARY && S_EQ(value_node->unary.op, "&"))){
+        return value_node;
+    }
+    struct constant c;
+    if(!constant_fold(current_process, value_node, &c)){
+        compiler_error(current_process, "The initializer of global %s must be a constant expression\n",
+            name_token ? name_token->sval : "variable");
+    }
+    c.value = constant_value_as(&c, dtype);
+    c.type  = *dtype;
+    return constant_node(&c);
+}
+
 static struct array_brackets* parse_array_brackets(struct history* history){
     struct array_brackets* brackets = array_brackets_new();
     while(token_next_is_operator("[")){
@@ -1327,7 +1589,9 @@ static struct array_brackets* parse_array_brackets(struct history* history){
         parse_expressionable_root(history);
         expect_sym(']');
 
-        struct node* exp_node = node_pop();
+        // The size is a constant expression: `int a[N * 2]`, `char
+        // s[sizeof(int) + 1]`. Variable-length arrays are not supported.
+        struct node* exp_node = parser_fold_required(node_pop(), "An array size");
         make_bracket_node(exp_node);
 
         struct node* bracket_node = node_pop();
@@ -1353,6 +1617,12 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
         token_next();
         parse_expressionable_root(history_down(history, history->flags | HISTORY_FLAG_NO_COMMA_OPERATOR));
         value_node = node_pop();
+        if(parser_is_bool_object(dtype)){
+            value_node = parser_bool_value(value_node);
+        }
+        if(current_process->scope.current == current_process->scope.root){
+            value_node = parser_global_initializer(dtype, name_token, value_node);
+        }
     }
 
     make_variable_node_and_register(history, dtype, name_token, value_node);
@@ -1448,6 +1718,19 @@ static void parse_symbol(void){
 static void parse_statement(struct history* history){
     if(!token_peek_next()){
         compiler_error(current_process, "Expected a statement or '}' but found the end of the file\n");
+    }
+    // `;` alone is an empty statement; a blank node keeps the
+    // one-node-per-statement rule.
+    if(token_is_symbol(token_peek_next(), ';')){
+        expect_sym(';');
+        node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+        return;
+    }
+    // `{ ... }` is a compound statement with its own scope.
+    if(token_is_symbol(token_peek_next(), '{')){
+        size_t var_size = 0;
+        parse_body(&var_size, history);
+        return;
     }
     if(token_peek_next()->type == TOKEN_TYPE_KEYWORD){
         size_t count_before = node_count();
@@ -1850,6 +2133,13 @@ static void parse_variable_function_or_struct_union(struct history* history){
     // ch96/97 lets later `struct dog* x;` references resolve once the
     // real body lands.
     if(token_next_is_symbol(';')){
+        if(parser_last_datatype_was_enum){
+            // `enum color { RED, GREEN };` declares only its constants;
+            // a blank statement keeps the one-node-per-statement rule.
+            expect_sym(';');
+            node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+            return;
+        }
         parse_forward_declaration(&dtype);
         return;
     }
@@ -2027,13 +2317,11 @@ static void parse_goto(struct history* history){
 static void parse_case(struct history* history){
     expect_keyword("case");
     parse_expressionable_root(history);
-    struct node* exp_node = node_pop();
+    // `case -1:`, `case 'a' + 1:` and enumerators are constant
+    // expressions; only a plain number was accepted before.
+    struct node* exp_node = parser_fold_required(node_pop(), "A case label");
     expect_sym(':');
     make_case_node(exp_node);
-
-    if(exp_node->type != NODE_TYPE_NUMBER){
-        compiler_error(current_process, "We only support numbers in our subset of C at this time\n");
-    }
 
     struct node* case_node = node_pop();
     parser_register_case(history, case_node);
@@ -2132,6 +2420,10 @@ static void parse_return(struct history* history){
     }
     parse_expressionable_root(history);
     struct node* exp_node = node_pop();
+    // Returning from a _Bool function converts the value to _Bool.
+    if(parser_current_function && parser_is_bool_object(&parser_current_function->func.rtype)){
+        exp_node = parser_bool_value(exp_node);
+    }
     make_return_node(exp_node);
     expect_sym(';');
 }
@@ -2430,6 +2722,9 @@ static int parse_next(void){
 int parse(struct compile_process* process){
     current_process   = process;
     parser_last_token = 0;
+    parser_previous_token = 0;
+    parser_saw_bool = false;
+    parser_enumerators = vector_create(sizeof(struct parser_enumerator));
     scope_create_root(process);
     // ch66: symresolver_initialize now happens in compile_process_create.
     node_set_vector(process->node_vec, process->node_tree_vec);

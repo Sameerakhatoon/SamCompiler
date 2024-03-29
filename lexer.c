@@ -471,7 +471,8 @@ bool keyword_is_datatype(const char* str){
         || S_EQ(str, "int")   || S_EQ(str, "short")
         || S_EQ(str, "float") || S_EQ(str, "double")
         || S_EQ(str, "long")  || S_EQ(str, "struct")
-        || S_EQ(str, "union");
+        || S_EQ(str, "union") || S_EQ(str, "enum")
+        || S_EQ(str, "_Bool");
 }
 
 // Reserved-word table. Anything spelled identically becomes a
@@ -485,6 +486,7 @@ static bool is_keyword(const char* str){
         || S_EQ(str, "float")    || S_EQ(str, "double")
         || S_EQ(str, "void")     || S_EQ(str, "struct")
         || S_EQ(str, "union")    || S_EQ(str, "static")
+        || S_EQ(str, "enum")     || S_EQ(str, "_Bool")
         || S_EQ(str, "__ignore_typecheck")
         || S_EQ(str, "return")   || S_EQ(str, "include")
         || S_EQ(str, "sizeof")   || S_EQ(str, "if")
