@@ -182,6 +182,11 @@ void*               lex_process_private(struct lex_process* process);
 struct vector*      lex_process_tokens(struct lex_process* process);
 int                 lex(struct lex_process* process);
 
+// ch20: lex a literal string instead of a FILE*. Returns a lex_process
+// whose token_vec has already been populated, or NULL on failure.
+// Lets the preprocessor (much later) re-lex macro expansions.
+struct lex_process* tokens_build_for_string(struct compile_process* compiler, const char* str);
+
 bool token_is_keyword(struct token* token, const char* value);
 
 #endif

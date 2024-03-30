@@ -602,3 +602,44 @@ int lex(struct lex_process* process){
     }
     return LEXICAL_ANALYSIS_ALL_OK;
 }
+
+// ============================================================================
+// String-backed lexer source. The default lex_process v-table reads from a
+// FILE*; this set reads from a `struct buffer*` stored in lex_process->private.
+// Used by tokens_build_for_string() so callers can re-lex preprocessor
+// expansions and similar in-memory text without round-tripping to disk.
+// ============================================================================
+
+char lexer_string_buffer_next_char(struct lex_process* process){
+    struct buffer* buf = lex_process_private(process);
+    return buffer_read(buf);
+}
+
+char lexer_string_buffer_peek_char(struct lex_process* process){
+    struct buffer* buf = lex_process_private(process);
+    return buffer_peek(buf);
+}
+
+void lexer_string_buffer_push_char(struct lex_process* process, char c){
+    struct buffer* buf = lex_process_private(process);
+    buffer_write(buf, c);
+}
+
+struct lex_process_functions lexer_string_buffer_functions = {
+    .next_char = lexer_string_buffer_next_char,
+    .peek_char = lexer_string_buffer_peek_char,
+    .push_char = lexer_string_buffer_push_char,
+};
+
+struct lex_process* tokens_build_for_string(struct compile_process* compiler, const char* str){
+    struct buffer* buffer = buffer_create();
+    buffer_printf(buffer, "%s", str);
+    struct lex_process* lp = lex_process_create(compiler, &lexer_string_buffer_functions, buffer);
+    if(!lp){
+        return 0;
+    }
+    if(lex(lp) != LEXICAL_ANALYSIS_ALL_OK){
+        return 0;
+    }
+    return lp;
+}
