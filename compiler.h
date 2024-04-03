@@ -84,6 +84,15 @@ enum {
     TOKEN_TYPE_NEWLINE,
 };
 
+// Number subtype, recorded on TOKEN_TYPE_NUMBER tokens. Distinguishes
+// `5837` (NORMAL) from `5837L` (LONG) from `1.5f` (FLOAT) etc.
+enum {
+    NUMBER_TYPE_NORMAL,
+    NUMBER_TYPE_LONG,
+    NUMBER_TYPE_FLOAT,
+    NUMBER_TYPE_DOUBLE,
+};
+
 struct token {
     int        type;
     int        flags;
@@ -97,6 +106,11 @@ struct token {
         unsigned long long llnum;
         void*              any;
     };
+
+    // Set on TOKEN_TYPE_NUMBER tokens only. Records L / f / d suffixes.
+    struct token_number {
+        int type;
+    } num;
 
     // True if there is whitespace between this token and the next token.
     // i.e. for input "* a", whitespace is set on the operator token "*".

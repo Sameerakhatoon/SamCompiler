@@ -23,6 +23,7 @@ static struct token*  lexer_last_token(void);
 static struct token*  handle_whitespace(void);
 static const char*    read_number_str(void);
 static unsigned long long read_number(void);
+static int            lexer_number_type(char c);
 static struct token*  token_make_number_for_value(unsigned long long number);
 static struct token*  token_make_number(void);
 static struct token*  token_make_string(char start_delim, char end_delim);
@@ -137,8 +138,27 @@ static unsigned long long read_number(void){
     return atoll(s);
 }
 
+// Peek for an L / f / d suffix. The caller decides whether to consume it.
+static int lexer_number_type(char c){
+    int res = NUMBER_TYPE_NORMAL;
+    if(c == 'L'){
+        res = NUMBER_TYPE_LONG;
+    } else if(c == 'f'){
+        res = NUMBER_TYPE_FLOAT;
+    }
+    return res;
+}
+
 static struct token* token_make_number_for_value(unsigned long long number){
-    return token_create(&(struct token){ .type = TOKEN_TYPE_NUMBER, .llnum = number });
+    int number_type = lexer_number_type(peekc());
+    if(number_type != NUMBER_TYPE_NORMAL){
+        nextc();
+    }
+    return token_create(&(struct token){
+        .type     = TOKEN_TYPE_NUMBER,
+        .llnum    = number,
+        .num.type = number_type,
+    });
 }
 
 static struct token* token_make_number(void){
