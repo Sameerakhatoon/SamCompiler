@@ -8,6 +8,12 @@ cd "$REPO_ROOT"
 
 test_name="$(basename "${0%.*}")"
 
+# Full link list for any test probe that wants to link the compiler
+# libraries. Tests should use $LINK_OBJS instead of hand-listing files,
+# so new modules added in later chapters don't require touching every
+# test.
+LINK_OBJS="$(ls "$REPO_ROOT"/build/*.o "$REPO_ROOT"/build/helpers/*.o 2>/dev/null | tr '\n' ' ')"
+
 pass() { echo "$test_name ... ok"; exit 0; }
 fail() { echo "$test_name ... FAIL: $*" >&2; exit 1; }
 

@@ -179,6 +179,12 @@ struct compile_process {
     // pipeline owns its outputs.
     struct vector* token_vec;
 
+    // Parser output:
+    //   node_vec       - every node ever allocated (parser scratch).
+    //   node_tree_vec  - only the top-level AST roots.
+    struct vector* node_vec;
+    struct vector* node_tree_vec;
+
     FILE* ofile;
 };
 
@@ -209,6 +215,11 @@ struct lex_process* tokens_build_for_string(struct compile_process* compiler, co
 // ============================================================================
 // Parser (ch24+)
 // ============================================================================
+
+enum {
+    PARSE_ALL_OK,
+    PARSE_GENERAL_ERROR,
+};
 
 enum {
     NODE_TYPE_EXPRESSION,
@@ -266,6 +277,8 @@ struct node {
         unsigned long long llnum;
     };
 };
+
+int  parse(struct compile_process* process);
 
 bool token_is_keyword(struct token* token, const char* value);
 

@@ -47,6 +47,7 @@ gcc -I"$REPO_ROOT" "$probe" \
     "$REPO_ROOT"/build/lexer.o \
     "$REPO_ROOT"/build/lex_process.o \
     "$REPO_ROOT"/build/token.o \
+    "$REPO_ROOT"/build/parser.o \
     "$REPO_ROOT"/build/helpers/buffer.o \
     "$REPO_ROOT"/build/helpers/vector.o \
     -o "$bin" 2>&1 | head -8
