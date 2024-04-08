@@ -257,6 +257,26 @@ void validate_node(struct node* node)
         case NODE_TYPE_UNION:
             validate_union_node(node);
             break;
+
+        // Globals (and static locals, which become globals) are in scope
+        // for the functions after them. They were never registered, so a
+        // function that used one in some statements failed with "The
+        // variable does not exist".
+        case NODE_TYPE_VARIABLE:
+            resolver_default_new_scope_entity(validator_current_compile_process->resolver, node, 0, 0);
+            break;
+
+        case NODE_TYPE_VARIABLE_LIST:
+        {
+            vector_set_peek_pointer(node->var_list.list, 0);
+            struct node* var = vector_peek_ptr(node->var_list.list);
+            while (var)
+            {
+                resolver_default_new_scope_entity(validator_current_compile_process->resolver, var, 0, 0);
+                var = vector_peek_ptr(node->var_list.list);
+            }
+            break;
+        }
     }
 }
 

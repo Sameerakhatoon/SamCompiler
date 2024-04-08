@@ -594,6 +594,8 @@ enum {
     NODE_TYPE_BRACKET,
     NODE_TYPE_CAST,
     NODE_TYPE_BLANK,
+    // The brace initializer of a global: its leaves in node->init.
+    NODE_TYPE_INITIALIZER,
 };
 
 enum {
@@ -637,6 +639,14 @@ struct array_brackets {
 };
 
 typedef struct node node_t;
+
+// One scalar (or struct-valued) part of an initializer: the object
+// at `offset` bytes into the variable, of `type`, gets `value`.
+struct initializer_leaf {
+    size_t          offset;
+    struct datatype type;
+    struct node*    value;
+};
 
 // ch115: per-function stack frame model. Every push (local variable,
 // saved register, saved BP, pushed value) is recorded as one of these
@@ -826,6 +836,12 @@ struct node {
             struct datatype dtype;
             struct node*    operand;
         } cast;
+
+        // NODE_TYPE_INITIALIZER: vector of struct initializer_leaf,
+        // sorted by offset, none overlapping.
+        struct initializer {
+            struct vector* leaves;
+        } init;
 
         // ch130: NODE_TYPE_UNARY. For `**p` the op is "*" and the
         // indirection.depth captures the chain length.
@@ -1050,6 +1066,17 @@ struct parsed_switch_case {
 // The label suffix for a case value: the value, with `m` for a minus
 // sign so `case -1:` gives a valid label (`case_m1`).
 const char* codegen_case_label(long long value);
+
+// How a backend writes initialized data (codegen_emit_initializer).
+struct initializer_emitter {
+    void        (*value)(size_t size, long long value);
+    void        (*symbol)(size_t size, const char* symbol);
+    void        (*zero)(size_t count);
+    const char* (*string_label)(const char* str);
+};
+// Writes the bytes of a global whose value is a NODE_TYPE_INITIALIZER:
+// each leaf in turn, zeros between and after them.
+void codegen_emit_initializer(struct node* var_node, const struct initializer_emitter* emitter);
 
 struct code_generator {
     // ch164: nested switch-statement bookkeeping. `current` is the

@@ -722,17 +722,12 @@ struct resolver_entity* resolver_follow_unsupported_unary_node(struct resolver_p
     return resolver_follow_part_return_entity(resolver, node->unary.operand, result);
 }
 
+// The node is generated whole as an expression (UNSUPPORTED entity).
+// The book first walked a unary operand here, which pushed an entity for
+// it as well: `*(int*)&x = 7` then loaded x and stored its old value
+// instead of 7.
 struct resolver_entity* resolver_follow_unsupported_node(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
-    bool followed = false;
-    switch(node->type){
-        case NODE_TYPE_UNARY:
-            resolver_follow_unsupported_unary_node(resolver, node, result);
-            followed = true;
-            break;
-        default:
-            followed = false;
-    }
-    (void)followed;
+    (void)resolver;
     struct resolver_entity* unsupported_entity = resolver_create_new_entity_for_unsupported_node(result, node);
     assert(unsupported_entity);
     resolver_result_entity_push(result, unsupported_entity);

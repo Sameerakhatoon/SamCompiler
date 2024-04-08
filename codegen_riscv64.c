@@ -2207,8 +2207,47 @@ static void codegen_generate_variable_for_array(struct node* node){
     codegen_generate_global_data(node->var.name, variable_size(node), "0");
 }
 
+// A global with a brace initializer (or an address): its bytes, leaf by
+// leaf, from codegen_emit_initializer.
+static const char* codegen_init_gas_size(size_t size){
+    switch(size){
+        case DATA_SIZE_BYTE:  return ".byte";
+        case DATA_SIZE_WORD:  return ".2byte";
+        case DATA_SIZE_DWORD: return ".4byte";
+        default:              return ".8byte";
+    }
+}
+
+static void codegen_init_value(size_t size, long long value){
+    asm_push("%s %lld", codegen_init_gas_size(size), value);
+}
+
+static void codegen_init_symbol(size_t size, const char* symbol){
+    asm_push("%s %s", codegen_init_gas_size(size), symbol);
+}
+
+static void codegen_init_zero(size_t count){
+    asm_push(".zero %lu", (unsigned long)count);
+}
+
+static void codegen_generate_global_initializer(struct node* node){
+    asm_push(".balign %lu", (unsigned long)datatype_alignment(&node->var.type));
+    asm_push("%s:", node->var.name);
+    codegen_emit_initializer(node, &(struct initializer_emitter){
+        .value        = codegen_init_value,
+        .symbol       = codegen_init_symbol,
+        .zero         = codegen_init_zero,
+        .string_label = codegen_register_string,
+    });
+}
+
 static void codegen_generate_global_variable(struct node* node){
     asm_push("# %s %s", node->var.type.type_str, node->var.name);
+    if(node->var.val && node->var.val->type == NODE_TYPE_INITIALIZER){
+        codegen_generate_global_initializer(node);
+        codegen_new_scope_entity(node, 0, 0);
+        return;
+    }
     if(node->var.type.flags & DATATYPE_FLAG_IS_ARRAY){
         codegen_generate_variable_for_array(node);
         codegen_new_scope_entity(node, 0, 0);

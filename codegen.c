@@ -30,6 +30,40 @@ struct code_generator* codegenerator_new(struct compile_process* process){
     return gen;
 }
 
+void codegen_emit_initializer(struct node* var_node, const struct initializer_emitter* emitter){
+    struct vector* leaves = var_node->var.val->init.leaves;
+    size_t size = variable_size(var_node);
+    size_t at = 0;
+    for(int i = 0; i < vector_count(leaves); i++){
+        struct initializer_leaf* leaf = vector_at(leaves, i);
+        if(leaf->offset > at){
+            emitter->zero(leaf->offset - at);
+        }
+        size_t leaf_size = datatype_size(&leaf->type);
+        struct node* value = leaf->value;
+        switch(value->type){
+            case NODE_TYPE_NUMBER:
+                emitter->value(leaf_size, (long long)value->llnum);
+                break;
+            case NODE_TYPE_STRING:
+                emitter->symbol(leaf_size, emitter->string_label(value->sval));
+                break;
+            case NODE_TYPE_UNARY:
+                emitter->symbol(leaf_size, value->unary.operand->sval);
+                break;
+            case NODE_TYPE_IDENTIFIER:
+                emitter->symbol(leaf_size, value->sval);
+                break;
+            default:
+                compiler_node_error(var_node, "BUG: unexpected initializer value");
+        }
+        at = leaf->offset + leaf_size;
+    }
+    if(at < size){
+        emitter->zero(size - at);
+    }
+}
+
 // Non-negative values keep the spelling every backend used, so existing
 // output is unchanged. The buffers rotate so one asm_push can use two.
 const char* codegen_case_label(long long value){

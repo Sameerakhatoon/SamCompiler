@@ -98,6 +98,12 @@ static struct history* history_down(struct history* history, int flags);
 static bool            parser_is_bool_object(struct datatype* dtype);
 static struct node*    parser_bool_value(struct node* value);
 static bool            parser_expression_type(struct node* node, struct datatype* out);
+static const char*     parser_label_name(const char* label);
+static void            parser_add_leaf(struct vector* leaves, size_t offset, struct datatype* type, struct node* value);
+static struct node*    parser_global_initializer_node(struct token* name_token, struct vector* leaves);
+static void            parse_compound_literal(struct datatype* dtype);
+static struct array_brackets* parse_array_brackets(struct history* history);
+static bool            parser_name_in(struct vector* names, const char* name);
 
 static struct compile_process* current_process;
 // ch97: parser-owned fixup system. Forward references to as-yet-
@@ -110,6 +116,16 @@ static struct token*           parser_last_token;
 static struct token*           parser_previous_token;
 // Set once a _Bool type has been parsed.
 static bool                    parser_saw_bool;
+// Statements that belong right after the statement being parsed: the
+// stores a local's brace initializer turns into. parse_body takes them.
+static struct vector*          parser_pending_statements;
+// Statements that belong right before it: the hidden declarations and
+// stores of compound literals in it.
+static struct vector*          parser_preceding_statements;
+// The labels and goto targets of the function being parsed (const char*,
+// already prefixed by parser_label_name).
+static struct vector*          parser_function_labels;
+static struct vector*          parser_function_gotos;
 
 // Defined here so current_process is in scope.
 static struct parser_scope_entity* parser_scope_last_entity_stop_global_scope(void){
@@ -259,12 +275,14 @@ static const char* parser_token_text(struct token* token){
 // name is visible in the scope that declared it; a variable of the same
 // name declared deeper hides it (a `shadow` entry). The parser turns a
 // use of the name into a number node, so nothing after the parser sees
-// enumerators.
+// enumerators. A `rename` entry is a static local instead: its name
+// stands for the global that holds it (parse_static_local).
 struct parser_enumerator {
     const char*     name;
     struct constant value;
     int             depth;
     bool            shadow;
+    const char*     rename;
 };
 static struct vector* parser_enumerators;
 
@@ -333,6 +351,10 @@ static void parse_single_token_to_node(void){
             bool member = parser_previous_token
                 && (token_is_operator(parser_previous_token, ".") || token_is_operator(parser_previous_token, "->"));
             struct parser_enumerator* e = member ? 0 : parser_enumerator_find(token->sval);
+            if(e && e->rename){
+                node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = e->rename });
+                break;
+            }
             if(e){
                 node_push(constant_node(&e->value));
                 break;
@@ -730,7 +752,18 @@ static void parse_for_tenary(struct history* history){
 static void parse_for_cast(void){
     struct datatype dtype = {0};
     parse_datatype(&dtype);
+    // `(int[]){ 1, 2 }`: the abstract declarator's brackets.
+    if(token_next_is_operator("[")){
+        struct array_brackets* brackets = parse_array_brackets(history_begin(0));
+        dtype.array.brackets = brackets;
+        dtype.array.size     = array_brackets_calculate_size(&dtype, brackets);
+        dtype.flags         |= DATATYPE_FLAG_IS_ARRAY;
+    }
     expect_sym(')');
+    if(token_next_is_symbol('{')){
+        parse_compound_literal(&dtype);
+        return;
+    }
     // A cast binds like a unary operator: `(char)x + 1` casts x only.
     size_t count_before = node_count();
     parse_expressionable(parser_unary_operand_history());
@@ -1563,9 +1596,17 @@ static struct node* parser_fold_required(struct node* node, const char* what){
 // the address of something, stays as written.
 static struct node* parser_global_initializer(struct datatype* dtype, struct token* name_token, struct node* value_node){
     bool is_scalar = !(dtype->flags & DATATYPE_FLAG_IS_ARRAY) && !datatype_is_struct_or_union(dtype);
-    if(!is_scalar || value_node->type == NODE_TYPE_STRING
-       || (value_node->type == NODE_TYPE_UNARY && S_EQ(value_node->unary.op, "&"))){
+    if(!is_scalar || value_node->type == NODE_TYPE_STRING){
         return value_node;
+    }
+    // An address (`&g`, an array or function name) is written as a
+    // symbol; the backends printed llnum of the node, a garbage value.
+    if((dtype->flags & DATATYPE_FLAG_IS_POINTER)
+       && ((value_node->type == NODE_TYPE_UNARY && S_EQ(value_node->unary.op, "&"))
+           || value_node->type == NODE_TYPE_IDENTIFIER)){
+        struct vector* leaves = vector_create(sizeof(struct initializer_leaf));
+        parser_add_leaf(leaves, 0, dtype, value_node);
+        return parser_global_initializer_node(name_token, leaves);
     }
     struct constant c;
     if(!constant_fold(current_process, value_node, &c)){
@@ -1577,14 +1618,27 @@ static struct node* parser_global_initializer(struct datatype* dtype, struct tok
     return constant_node(&c);
 }
 
+// A bracket node holding the number `n`.
+static struct node* parser_bracket_of(size_t n){
+    struct constant c = { n, datatype_for_int() };
+    make_bracket_node(constant_node(&c));
+    return node_pop();
+}
+
 static struct array_brackets* parse_array_brackets(struct history* history){
     struct array_brackets* brackets = array_brackets_new();
     while(token_next_is_operator("[")){
         expect_op("[");
         if(token_is_symbol(token_peek_next(), ']')){
-            // `int x[];` - empty brackets, no size.
+            // `int x[];` - empty brackets, no size. An initializer gives
+            // the size (parse_variable); `int m[][3]` keeps a 0 in the
+            // first dimension so the [3] still counts.
             expect_sym(']');
-            break;
+            if(!token_next_is_operator("[")){
+                break;
+            }
+            array_brackets_add(brackets, parser_bracket_of(0));
+            continue;
         }
         parse_expressionable_root(history);
         expect_sym(']');
@@ -1600,6 +1654,523 @@ static struct array_brackets* parse_array_brackets(struct history* history){
     return brackets;
 }
 
+// ---- Brace initializers (C11 6.7.9) ----
+//
+// An initializer is read into leaves: (offset, scalar type, value), one
+// per scalar it sets, following the designators and brace elision of
+// 6.7.9p17-20. A global keeps the leaves for the backends to write as
+// data (NODE_TYPE_INITIALIZER); a local becomes stores after the
+// declaration (parser_lower_local_initializer).
+
+static void parse_initializer_value(struct datatype* type, size_t offset, struct vector* leaves);
+
+static bool parser_is_aggregate(struct datatype* type){
+    return (type->flags & DATATYPE_FLAG_IS_ARRAY)
+        || (datatype_is_struct_or_union(type) && !(type->flags & DATATYPE_FLAG_IS_POINTER));
+}
+
+// The first dimension of an array type; 0 when it is `[]`.
+static size_t parser_array_length(struct datatype* type){
+    struct vector* brackets = type->array.brackets ? type->array.brackets->n_brackets : 0;
+    if(!brackets || !vector_count(brackets)){
+        return 0;
+    }
+    struct node* first = *(struct node**)vector_at(brackets, 0);
+    return first->bracket.inner->llnum;
+}
+
+// The element type of an array type: the same type with its first
+// dimension gone.
+static struct datatype parser_array_element_type(struct datatype* type){
+    struct datatype element = *type;
+    struct vector* brackets = type->array.brackets ? type->array.brackets->n_brackets : 0;
+    int count = brackets ? vector_count(brackets) : 0;
+    if(count <= 1){
+        element.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+        element.array.brackets = 0;
+        element.array.size     = 0;
+        return element;
+    }
+    element.array.brackets = array_brackets_new();
+    for(int i = 1; i < count; i++){
+        array_brackets_add(element.array.brackets, *(struct node**)vector_at(brackets, i));
+    }
+    element.array.size = array_brackets_calculate_size(&element, element.array.brackets);
+    return element;
+}
+
+// The members of a struct or union, `int a, b;` lists flattened.
+static struct vector* parser_struct_members(struct datatype* type){
+    struct vector* members = vector_create(sizeof(struct node*));
+    struct node* su = type->struct_node;
+    if(!su || !su->_struct.body_n){
+        compiler_error(current_process, "Cannot initialize an incomplete struct or union\n");
+    }
+    struct vector* statements = su->_struct.body_n->body.statements;
+    for(int i = 0; i < vector_count(statements); i++){
+        struct node* statement = *(struct node**)vector_at(statements, i);
+        if(statement->type == NODE_TYPE_VARIABLE){
+            vector_push(members, &statement);
+        } else if(statement->type == NODE_TYPE_VARIABLE_LIST){
+            for(int j = 0; j < vector_count(statement->var_list.list); j++){
+                vector_push(members, vector_at(statement->var_list.list, j));
+            }
+        }
+    }
+    return members;
+}
+
+// Element `index` of an aggregate: its type and offset from the start.
+static void parser_aggregate_element(struct datatype* type, struct vector* members, size_t index,
+                                     struct datatype* element_out, size_t* offset_out){
+    if(type->flags & DATATYPE_FLAG_IS_ARRAY){
+        *element_out = parser_array_element_type(type);
+        *offset_out  = index * datatype_size(element_out);
+        return;
+    }
+    struct node* member = *(struct node**)vector_at(members, index);
+    *element_out = member->var.type;
+    *offset_out  = member->var.aoffset;
+}
+
+static void parser_add_leaf(struct vector* leaves, size_t offset, struct datatype* type, struct node* value){
+    struct initializer_leaf leaf = { .offset = offset, .type = *type, .value = value };
+    vector_push(leaves, &leaf);
+}
+
+// `char s[N] = "abc"`: one leaf per byte, the NUL included when it
+// fits. Returns the number of chars the string needs with its NUL.
+static size_t parser_string_initializer(struct datatype* type, size_t offset, struct vector* leaves){
+    struct token* token = token_next();
+    struct buffer* joined = buffer_create();
+    for(const char* c = token->sval; *c; c++){
+        buffer_write(joined, *c);
+    }
+    while(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
+        for(const char* c = token_next()->sval; *c; c++){
+            buffer_write(joined, *c);
+        }
+    }
+    buffer_write(joined, 0x00);
+    const char* str = buffer_ptr(joined);
+    size_t needed = strlen(str) + 1;
+    size_t length = parser_array_length(type);
+    size_t count  = length ? (needed < length ? needed : length) : needed;
+    struct datatype element = parser_array_element_type(type);
+    for(size_t i = 0; i < count; i++){
+        struct constant c = { (unsigned char)str[i], datatype_for_int() };
+        parser_add_leaf(leaves, offset + i, &element, constant_node(&c));
+    }
+    return needed;
+}
+
+static bool parser_is_char_array(struct datatype* type){
+    return (type->flags & DATATYPE_FLAG_IS_ARRAY) && type->array.brackets
+        && vector_count(type->array.brackets->n_brackets) <= 1
+        && datatype_element_size(type) == DATA_SIZE_BYTE
+        && !(type->flags & DATATYPE_FLAG_IS_POINTER);
+}
+
+static bool parser_next_is_designator(void){
+    return token_next_is_operator("[") || token_next_is_operator(".");
+}
+
+// One designator, `[const]` or `.member`; returns the index it selects.
+static size_t parse_designator(struct datatype* type, struct vector* members){
+    if(token_next_is_operator("[")){
+        if(!(type->flags & DATATYPE_FLAG_IS_ARRAY)){
+            compiler_error(current_process, "An array designator [ ] used on a non-array\n");
+        }
+        expect_op("[");
+        parse_expressionable_root(history_begin(0));
+        struct node* index = parser_fold_required(node_pop(), "An array designator");
+        expect_sym(']');
+        size_t length = parser_array_length(type);
+        if((long long)index->llnum < 0 || (length && index->llnum >= length)){
+            compiler_error(current_process, "Array designator index %lld is outside the array\n", (long long)index->llnum);
+        }
+        return index->llnum;
+    }
+    expect_op(".");
+    struct token* name = token_next();
+    if(!members || !token_is_identifier(name)){
+        compiler_error(current_process, "A member designator . used on a non-struct\n");
+    }
+    for(int i = 0; i < vector_count(members); i++){
+        struct node* member = *(struct node**)vector_at(members, i);
+        if(member->var.name && S_EQ(member->var.name, name->sval)){
+            return i;
+        }
+    }
+    compiler_error(current_process, "No member named %s to initialize\n", name->sval);
+    return 0;
+}
+
+// The rest of a designation after its first designator, then `=` and
+// the value: `.a.b = 1`, `[1].x = 2`.
+static void parse_designation_rest(struct datatype* type, size_t offset, struct vector* leaves){
+    if(parser_next_is_designator()){
+        struct vector* members = (type->flags & DATATYPE_FLAG_IS_ARRAY) ? 0
+            : datatype_is_struct_or_union(type) ? parser_struct_members(type) : 0;
+        size_t index = parse_designator(type, members);
+        struct datatype element;
+        size_t element_offset;
+        parser_aggregate_element(type, members, index, &element, &element_offset);
+        parse_designation_rest(&element, offset + element_offset, leaves);
+        return;
+    }
+    expect_op("=");
+    parse_initializer_value(type, offset, leaves);
+}
+
+// The elements of an aggregate from the current list. With `braced`
+// the list is this aggregate's own `{ }`; without, the aggregate takes
+// what it needs from the enclosing list (brace elision) and stops at a
+// designator, which belongs to the enclosing list. Returns how many
+// array elements were set (the highest index + 1).
+static size_t parse_initializer_elements(struct datatype* type, size_t offset, struct vector* leaves, bool braced){
+    bool is_array = type->flags & DATATYPE_FLAG_IS_ARRAY;
+    bool is_union = !is_array && type->type == DATA_TYPE_UNION;
+    struct vector* members = is_array ? 0 : parser_struct_members(type);
+    size_t count = is_array ? parser_array_length(type) : (size_t)vector_count(members);
+    size_t index = 0;
+    size_t highest = 0;
+    while(!token_next_is_symbol('}')){
+        bool designated = false;
+        if(parser_next_is_designator()){
+            if(!braced){
+                break;
+            }
+            index = parse_designator(type, members);
+            designated = true;
+        }
+        if(count && index >= count){
+            if(!braced){
+                break;
+            }
+            compiler_error(current_process, "Too many initializers for the object\n");
+        }
+        struct datatype element;
+        size_t element_offset;
+        parser_aggregate_element(type, members, index, &element, &element_offset);
+        if(designated){
+            parse_designation_rest(&element, offset + element_offset, leaves);
+        } else {
+            parse_initializer_value(&element, offset + element_offset, leaves);
+        }
+        index++;
+        if(index > highest){
+            highest = index;
+        }
+        // A union takes one member unless a designator names another.
+        bool full = (count && index >= count) || (is_union && !braced);
+        if(full && !braced){
+            break;
+        }
+        if(!token_next_is_operator(",")){
+            break;
+        }
+        if(!braced){
+            // Leave the comma to the enclosing list when it ends there or
+            // goes on with a designator.
+            vector_save(current_process->token_vec);
+            token_next();
+            bool stop = token_next_is_symbol('}') || parser_next_is_designator();
+            vector_restore(current_process->token_vec);
+            if(stop){
+                break;
+            }
+        }
+        token_next();
+    }
+    return highest;
+}
+
+// The initializer of one object of `type` at `offset`.
+static void parse_initializer_value(struct datatype* type, size_t offset, struct vector* leaves){
+    bool next_is_string = token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING;
+    if(token_next_is_symbol('{')){
+        expect_sym('{');
+        if(parser_is_char_array(type) && token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
+            parser_string_initializer(type, offset, leaves);
+        } else if(parser_is_aggregate(type)){
+            parse_initializer_elements(type, offset, leaves, true);
+        } else if(!token_next_is_symbol('}')){
+            // `int x = { 5 };`
+            parse_initializer_value(type, offset, leaves);
+        }
+        if(token_next_is_operator(",")){
+            token_next();
+        }
+        expect_sym('}');
+        return;
+    }
+    if(parser_is_char_array(type) && next_is_string){
+        parser_string_initializer(type, offset, leaves);
+        return;
+    }
+    if(type->flags & DATATYPE_FLAG_IS_ARRAY){
+        parse_initializer_elements(type, offset, leaves, false);
+        return;
+    }
+    // A struct initialized from a struct value, or brace elision into a
+    // struct member: an expression of struct type is a value; anything
+    // else fills the members.
+    parse_expressionable_root(history_begin(HISTORY_FLAG_NO_COMMA_OPERATOR));
+    struct node* value = node_pop();
+    if(datatype_is_struct_or_union(type) && !(type->flags & DATATYPE_FLAG_IS_POINTER)){
+        struct datatype value_type;
+        if(!parser_expression_type(value, &value_type) || !datatype_is_struct_or_union(&value_type)
+           || (value_type.flags & DATATYPE_FLAG_IS_POINTER)){
+            compiler_error(current_process, "Expected { or a struct value to initialize a struct member\n");
+        }
+    }
+    if(parser_is_bool_object(type)){
+        value = parser_bool_value(value);
+    }
+    parser_add_leaf(leaves, offset, type, value);
+}
+
+// Reads the initializer after `=` for a variable of `type`. An unsized
+// array gets its length here. Returns the leaves, in source order.
+static struct vector* parse_initializer(struct datatype* type){
+    struct vector* leaves = vector_create(sizeof(struct initializer_leaf));
+    bool unsized = (type->flags & DATATYPE_FLAG_IS_ARRAY) && parser_array_length(type) == 0;
+    size_t length = 0;
+    bool next_is_string = token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING;
+    if(parser_is_char_array(type) && next_is_string){
+        length = parser_string_initializer(type, 0, leaves);
+    } else if(token_next_is_symbol('{') && (type->flags & DATATYPE_FLAG_IS_ARRAY)){
+        expect_sym('{');
+        if(parser_is_char_array(type) && token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
+            length = parser_string_initializer(type, 0, leaves);
+            if(token_next_is_operator(",")){
+                token_next();
+            }
+        } else {
+            length = parse_initializer_elements(type, 0, leaves, true);
+        }
+        expect_sym('}');
+    } else {
+        parse_initializer_value(type, 0, leaves);
+    }
+
+    if(unsized){
+        // The length becomes the first dimension.
+        // `int m[][3]` carries a 0 first dimension (parse_array_brackets);
+        // `int a[]` carries none.
+        struct array_brackets* brackets = array_brackets_new();
+        array_brackets_add(brackets, parser_bracket_of(length));
+        struct vector* old = type->array.brackets ? type->array.brackets->n_brackets : 0;
+        int old_count = old ? vector_count(old) : 0;
+        for(int i = old_count ? 1 : 0; i < old_count; i++){
+            array_brackets_add(brackets, *(struct node**)vector_at(old, i));
+        }
+        type->array.brackets = brackets;
+        type->array.size     = array_brackets_calculate_size(type, brackets);
+    }
+    return leaves;
+}
+
+// Sorted by offset; a later leaf replaces an earlier one it overlaps
+// (`{ [0] = 1, [0] = 2 }` keeps 2).
+static struct vector* parser_sorted_leaves(struct vector* leaves){
+    struct vector* sorted = vector_create(sizeof(struct initializer_leaf));
+    int n = vector_count(leaves);
+    for(int i = 0; i < n; i++){
+        struct initializer_leaf* leaf = vector_at(leaves, i);
+        size_t start = leaf->offset;
+        size_t end   = start + datatype_size(&leaf->type);
+        bool overwritten = false;
+        for(int j = i + 1; j < n && !overwritten; j++){
+            struct initializer_leaf* later = vector_at(leaves, j);
+            size_t later_end = later->offset + datatype_size(&later->type);
+            overwritten = later->offset < end && start < later_end;
+        }
+        if(overwritten){
+            continue;
+        }
+        int at = vector_count(sorted);
+        while(at > 0 && ((struct initializer_leaf*)vector_at(sorted, at - 1))->offset > start){
+            at--;
+        }
+        vector_push_at(sorted, at, leaf);
+    }
+    return sorted;
+}
+
+// A global's leaves must be constants, string literals for pointers,
+// or addresses (`&g`, an array or function name). Constants are folded
+// and converted to the leaf's type.
+static struct node* parser_global_initializer_node(struct token* name_token, struct vector* leaves){
+    struct vector* sorted = parser_sorted_leaves(leaves);
+    for(int i = 0; i < vector_count(sorted); i++){
+        struct initializer_leaf* leaf = vector_at(sorted, i);
+        struct node* value = leaf->value;
+        bool is_address = (value->type == NODE_TYPE_UNARY && S_EQ(value->unary.op, "&")
+                           && value->unary.operand->type == NODE_TYPE_IDENTIFIER)
+                       || value->type == NODE_TYPE_IDENTIFIER
+                       || value->type == NODE_TYPE_STRING;
+        if(is_address && (leaf->type.flags & DATATYPE_FLAG_IS_POINTER)){
+            continue;
+        }
+        struct constant c;
+        if(datatype_is_struct_or_union(&leaf->type) && !(leaf->type.flags & DATATYPE_FLAG_IS_POINTER)){
+            compiler_error(current_process, "The initializer of global %s must be a constant expression\n",
+                name_token ? name_token->sval : "variable");
+        }
+        if(!constant_fold(current_process, value, &c)){
+            compiler_error(current_process, "The initializer of global %s must be a constant expression\n",
+                name_token ? name_token->sval : "variable");
+        }
+        c.value = constant_value_as(&c, &leaf->type);
+        c.type  = leaf->type;
+        leaf->value = constant_node(&c);
+    }
+    node_create(&(struct node){ .type = NODE_TYPE_INITIALIZER, .init.leaves = sorted });
+    return node_pop();
+}
+
+// A pointer to `type`, as a cast target.
+static struct datatype parser_pointer_to(struct datatype* type){
+    struct datatype pointer = *type;
+    pointer.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    pointer.array.brackets = 0;
+    pointer.array.size     = 0;
+    pointer.flags |= DATATYPE_FLAG_IS_POINTER;
+    pointer.pointer_depth = type->pointer_depth + 1;
+    return pointer;
+}
+
+// `*(T*)((char*)&name + offset)`, the object a leaf sets.
+static struct node* parser_object_at(const char* name, size_t offset, struct datatype* type){
+    struct datatype char_type = { .type = DATA_TYPE_CHAR, .size = DATA_SIZE_BYTE, .type_str = "char" };
+    struct datatype char_pointer = parser_pointer_to(&char_type);
+    node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = name });
+    make_unary_node("&", node_pop());
+    make_cast_node(&char_pointer, node_pop());
+    struct node* address = node_pop();
+    if(offset){
+        struct constant c = { offset, datatype_for_int() };
+        make_exp_node(address, constant_node(&c), "+");
+        make_exp_parentheses_node(node_pop());
+        address = node_pop();
+    }
+    struct datatype target = parser_pointer_to(type);
+    make_cast_node(&target, address);
+    make_exp_parentheses_node(node_pop());
+    make_unary_node("*", node_pop());
+    struct node* object = node_pop();
+    object->unary.indirection.depth = 1;
+    return object;
+}
+
+static void parser_pending_store(const char* name, size_t offset, struct datatype* type, struct node* value){
+    make_exp_node(parser_object_at(name, offset, type), value, "=");
+    struct node* store = node_pop();
+    vector_push(parser_pending_statements, &store);
+}
+
+// A local's initializer: the bytes no leaf sets are zeroed (6.7.9p21),
+// in the widest stores that fit, then each leaf is stored. The stores
+// run right after the declaration.
+static void parser_lower_local_initializer(const char* name, struct datatype* type, struct vector* leaves){
+    struct vector* sorted = parser_sorted_leaves(leaves);
+    size_t size = datatype_size(type);
+    char* covered = calloc(size ? size : 1, 1);
+    for(int i = 0; i < vector_count(sorted); i++){
+        struct initializer_leaf* leaf = vector_at(sorted, i);
+        size_t end = leaf->offset + datatype_size(&leaf->type);
+        for(size_t b = leaf->offset; b < end && b < size; b++){
+            covered[b] = 1;
+        }
+    }
+    size_t widest = current_process->target->long_size;
+    for(size_t b = 0; b < size;){
+        if(covered[b]){
+            b++;
+            continue;
+        }
+        size_t chunk = widest;
+        while(chunk > 1 && (b % chunk || b + chunk > size || memchr(covered + b, 1, chunk))){
+            chunk /= 2;
+        }
+        struct datatype zero_type = chunk == DATA_SIZE_BYTE ? (struct datatype){ .type = DATA_TYPE_CHAR, .size = 1, .type_str = "char" }
+                                  : chunk == DATA_SIZE_WORD ? (struct datatype){ .type = DATA_TYPE_SHORT, .size = 2, .type_str = "short" }
+                                  : chunk == DATA_SIZE_DWORD ? (struct datatype){ .type = DATA_TYPE_INTEGER, .size = 4, .type_str = "int" }
+                                  : (struct datatype){ .type = DATA_TYPE_LONG, .size = 8, .type_str = "long" };
+        struct constant zero = { 0, datatype_for_int() };
+        parser_pending_store(name, b, &zero_type, constant_node(&zero));
+        b += chunk;
+    }
+    free(covered);
+    for(int i = 0; i < vector_count(sorted); i++){
+        struct initializer_leaf* leaf = vector_at(sorted, i);
+        parser_pending_store(name, leaf->offset, &leaf->type, leaf->value);
+    }
+}
+
+// `(T){ ... }` (C11 6.5.2.5): an unnamed object initialized like a
+// variable. In a function it is a hidden local `__compound_N`, declared
+// and initialized just before the statement that uses it; at file scope
+// a hidden global. The expression is that object's name.
+static void parse_compound_literal(struct datatype* dtype){
+    static int count = 0;
+    char* name = malloc(32);
+    sprintf(name, "__compound_%i", count++);
+    struct token* name_token = calloc(1, sizeof(struct token));
+    name_token->type = TOKEN_TYPE_IDENTIFIER;
+    name_token->sval = name;
+    name_token->pos  = current_process->pos;
+
+    struct datatype type = *dtype;
+    struct vector* leaves = parse_initializer(&type);
+    if(!parser_current_function || current_process->scope.current == current_process->scope.root){
+        make_variable_node(&type, name_token, parser_global_initializer_node(name_token, leaves));
+        struct node* var_node = node_pop();
+        vector_push(current_process->node_tree_vec, &var_node);
+    } else {
+        int pending_before = vector_count(parser_pending_statements);
+        make_variable_node_and_register(history_begin(0), &type, name_token, 0);
+        struct node* var_node = node_pop();
+        vector_push(parser_preceding_statements, &var_node);
+        parser_lower_local_initializer(name, &type, leaves);
+        for(int i = pending_before; i < vector_count(parser_pending_statements); i++){
+            vector_push(parser_preceding_statements, vector_at(parser_pending_statements, i));
+        }
+        while(vector_count(parser_pending_statements) > pending_before){
+            vector_pop(parser_pending_statements);
+        }
+    }
+    node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = name });
+}
+
+// `static int n = 10;` inside a function keeps its value between calls
+// (C11 6.2.4p3); it was an ordinary stack variable. It
+// becomes a global named `__static_<function>_<name>_<N>`, initialized
+// like one, and the local name stands for it in this scope. The
+// declaration statement itself is blank.
+static void parse_static_local(struct datatype* dtype, struct token* name_token, struct node* value_node){
+    static int count = 0;
+    const char* function = parser_current_function->func.name;
+    char* name = malloc(strlen(function) + strlen(name_token->sval) + 32);
+    sprintf(name, "__static_%s_%s_%i", function, name_token->sval, count++);
+    if(value_node && value_node->type != NODE_TYPE_INITIALIZER){
+        value_node = parser_global_initializer(dtype, name_token, value_node);
+    }
+
+    struct token* global_name = calloc(1, sizeof(struct token));
+    *global_name = *name_token;
+    global_name->sval = name;
+    make_variable_node(dtype, global_name, value_node);
+    struct node* var_node = node_pop();
+    vector_push(current_process->node_tree_vec, &var_node);
+
+    struct parser_enumerator e = { .name = name_token->sval, .depth = parser_scope_depth(), .rename = name };
+    vector_push(parser_enumerators, &e);
+    node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+}
+
 // Variable declarator: `name` already consumed; optionally followed by
 // `[N]...` (ch44) or `= expr`.
 static void parse_variable(struct datatype* dtype, struct token* name_token, struct history* history){
@@ -1613,19 +2184,62 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
         dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
     }
 
+    bool is_global = current_process->scope.current == current_process->scope.root;
+    bool is_static_local = (dtype->flags & DATATYPE_FLAG_IS_STATIC) && name_token && parser_current_function
+       && !is_global
+       && !(history->flags & (HISTORY_FLAG_IS_UPWARD_STACK | HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION));
+    struct vector* leaves = 0;
     if(token_next_is_operator("=")){
         token_next();
-        parse_expressionable_root(history_down(history, history->flags | HISTORY_FLAG_NO_COMMA_OPERATOR));
-        value_node = node_pop();
-        if(parser_is_bool_object(dtype)){
-            value_node = parser_bool_value(value_node);
-        }
-        if(current_process->scope.current == current_process->scope.root){
-            value_node = parser_global_initializer(dtype, name_token, value_node);
+        bool string_for_array = parser_is_char_array(dtype)
+            && token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING;
+        if(token_next_is_symbol('{') || string_for_array){
+            // A brace initializer, or `char s[] = "hi"`, which stored the
+            // low byte of the string's address.
+            leaves = parse_initializer(dtype);
+            if(is_global || is_static_local){
+                value_node = parser_global_initializer_node(name_token, leaves);
+            }
+        } else {
+            parse_expressionable_root(history_down(history, history->flags | HISTORY_FLAG_NO_COMMA_OPERATOR));
+            value_node = node_pop();
+            if(parser_is_bool_object(dtype)){
+                value_node = parser_bool_value(value_node);
+            }
+            if(is_global){
+                value_node = parser_global_initializer(dtype, name_token, value_node);
+            }
         }
     }
 
+    if(is_static_local){
+        parse_static_local(dtype, name_token, value_node);
+        return;
+    }
+
+    // `struct T v = w;` copies the whole struct: it becomes `v = w;`
+    // after the declaration. The initializer path stored one register's
+    // worth of bytes.
+    struct node* struct_value = 0;
+    if(!is_global && value_node && name_token && datatype_is_struct_or_union(dtype)
+       && !(dtype->flags & (DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_ARRAY))){
+        struct_value = value_node;
+        value_node   = 0;
+    }
+
     make_variable_node_and_register(history, dtype, name_token, value_node);
+    if(struct_value){
+        node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = name_token->sval });
+        make_exp_node(node_pop(), struct_value, "=");
+        struct node* copy = node_pop();
+        vector_push(parser_pending_statements, &copy);
+    }
+    if(leaves && !is_global){
+        if(!name_token){
+            compiler_error(current_process, "An initializer needs a variable name\n");
+        }
+        parser_lower_local_initializer(name_token->sval, dtype, leaves);
+    }
 }
 
 // ch72: parse a function body. Adds INSIDE_FUNCTION_BODY to history so
@@ -1660,6 +2274,36 @@ static void parse_variable_full(struct history* history){
 
 // ch72: parse a function declaration / definition. The `(` is the next
 // token. ch73 fills in argument parsing.
+// Labels have function scope (C11 6.2.1p3): the asm label is
+// `<function>_<label>`, so two functions may use the same name. It
+// was `label_<name>`, and the parser never built a label at all.
+static const char* parser_label_name(const char* label){
+    const char* function = parser_current_function ? parser_current_function->func.name : "file";
+    char* name = malloc(strlen(function) + strlen(label) + 2);
+    sprintf(name, "%s_%s", function, label);
+    return name;
+}
+
+static bool parser_name_in(struct vector* names, const char* name){
+    for(int i = 0; i < vector_count(names); i++){
+        if(S_EQ(*(const char**)vector_at(names, i), name)){
+            return true;
+        }
+    }
+    return false;
+}
+
+// Every goto in the function names a label defined in it.
+static void parser_check_gotos(const char* function){
+    for(int i = 0; i < vector_count(parser_function_gotos); i++){
+        const char* name = *(const char**)vector_at(parser_function_gotos, i);
+        if(!parser_name_in(parser_function_labels, name)){
+            compiler_error(current_process, "goto %s: no such label in %s\n",
+                name + strlen(function) + 1, function);
+        }
+    }
+}
+
 static void parse_function(struct datatype* ret_type, struct token* name_token, struct history* history){
     struct vector* arguments_vector = 0;
     parser_scope_new();
@@ -1686,9 +2330,12 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
     }
 
     if(token_next_is_symbol('{')){
+        parser_function_labels = vector_create(sizeof(const char*));
+        parser_function_gotos  = vector_create(sizeof(const char*));
         parse_function_body(history_begin(0));
         struct node* body_node = node_pop();
         function_node->func.body_n = body_node;
+        parser_check_gotos(name_token->sval);
     } else {
         expect_sym(';');
     }
@@ -1725,6 +2372,29 @@ static void parse_statement(struct history* history){
         expect_sym(';');
         node_create(&(struct node){ .type = NODE_TYPE_BLANK });
         return;
+    }
+    // `name:` is a label. It becomes a statement of its own; the
+    // statement it labels follows as the next one.
+    if(token_is_identifier(token_peek_next())){
+        vector_save(current_process->token_vec);
+        struct token* name = token_next();
+        bool is_label = token_is_symbol(token_peek_next(), ':');
+        if(!is_label){
+            vector_restore(current_process->token_vec);
+        } else {
+            vector_save_purge(current_process->token_vec);
+            expect_sym(':');
+            const char* label = parser_label_name(name->sval);
+            if(parser_function_labels){
+                if(parser_name_in(parser_function_labels, label)){
+                    compiler_error(current_process, "Label %s is defined twice\n", name->sval);
+                }
+                vector_push(parser_function_labels, &label);
+            }
+            node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = label });
+            make_label_node(node_pop());
+            return;
+        }
     }
     // `{ ... }` is a compound statement with its own scope.
     if(token_is_symbol(token_peek_next(), '{')){
@@ -1865,6 +2535,30 @@ static void parser_finalize_body(struct history* history, struct node* body_node
     body_node->body.statements       = body_vec;
 }
 
+static void parser_append_size_for_node(struct history* history, size_t* _variable_size, struct node* node);
+
+// The hidden declarations of a statement's compound literals go right
+// before it; their stack space counts like any local's.
+static void parser_take_preceding_statements(struct vector* body_vec, struct history* history, size_t* variable_size){
+    for(int i = 0; i < vector_count(parser_preceding_statements); i++){
+        struct node* statement = *(struct node**)vector_at(parser_preceding_statements, i);
+        vector_push(body_vec, &statement);
+        if(variable_size && statement->type == NODE_TYPE_VARIABLE){
+            parser_append_size_for_node(history, variable_size, statement);
+        }
+    }
+    vector_clear(parser_preceding_statements);
+}
+
+// The statements a declaration left (parser_pending_statements) go
+// right after it in the body.
+static void parser_take_pending_statements(struct vector* body_vec){
+    for(int i = 0; i < vector_count(parser_pending_statements); i++){
+        vector_push(body_vec, vector_at(parser_pending_statements, i));
+    }
+    vector_clear(parser_pending_statements);
+}
+
 // ch49: single-statement body (no braces), e.g. `y = 30;` in
 // `if (x) y = 30;`. Brace bodies come in ch54.
 static void parse_body_single_statement(size_t* variable_size, struct vector* body_vec, struct history* history){
@@ -1875,7 +2569,9 @@ static void parse_body_single_statement(size_t* variable_size, struct vector* bo
 
     parse_statement(history_down(history, history->flags));
     struct node* stmt_node = node_pop();
+    parser_take_preceding_statements(body_vec, history, variable_size);
     vector_push(body_vec, &stmt_node);
+    parser_take_pending_statements(body_vec);
 
     parser_append_size_for_node(history, variable_size, stmt_node);
     struct node* largest_var_node = (stmt_node->type == NODE_TYPE_VARIABLE) ? stmt_node : 0;
@@ -1918,8 +2614,10 @@ static void parse_body_multiple_statements(size_t* variable_size,
             }
         }
 
+        parser_take_preceding_statements(body_vec, history, variable_size);
         vector_push(body_vec, &stmt_node);
         parser_append_size_for_node(history, variable_size, variable_node_or_list(stmt_node));
+        parser_take_pending_statements(body_vec);
     }
 
     expect_sym('}');
@@ -1996,7 +2694,9 @@ static void parse_struct_or_union_attached_variable(struct datatype* dtype){
             dtype->flags       &= ~DATATYPE_FLAG_STRUCT_UNION_NO_NAME;
             su_node->_struct.name = var_name->sval;
         }
-        make_variable_node_and_register(history_begin(0), dtype, var_name, 0);
+        // parse_variable reads `[N]` and `= ...` too: `union u {...} g =
+        // { 1 };` and `struct s {...} a[2];`.
+        parse_variable(dtype, var_name, history_begin(0));
         // _struct and _union share their layout.
         su_node->_struct.var = node_pop();
     }
@@ -2177,7 +2877,10 @@ static void parse_variable_function_or_struct_union(struct history* history){
     if(token_is_operator(token_peek_next(), ",")){
         struct vector* var_list = vector_create(sizeof(struct node*));
         struct node* var_node   = node_pop();
-        vector_push(var_list, &var_node);
+        // A static local leaves a blank in its place (parse_static_local).
+        if(var_node->type != NODE_TYPE_BLANK){
+            vector_push(var_list, &var_node);
+        }
         while(token_is_operator(token_peek_next(), ",")){
             token_next();
             struct datatype peer_dtype = base_dtype;
@@ -2192,9 +2895,15 @@ static void parse_variable_function_or_struct_union(struct history* history){
             }
             parse_variable(&peer_dtype, name_token, history);
             var_node = node_pop();
-            vector_push(var_list, &var_node);
+            if(var_node->type != NODE_TYPE_BLANK){
+                vector_push(var_list, &var_node);
+            }
         }
-        make_variable_list_node(var_list);
+        if(vector_count(var_list)){
+            make_variable_list_node(var_list);
+        } else {
+            node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+        }
     }
 
     expect_sym(';');
@@ -2303,9 +3012,18 @@ static void parse_continue(struct history* history){
 
 // ch88: `goto label;`.
 static void parse_goto(struct history* history){
+    (void)history;
     expect_keyword("goto");
-    parse_identifier(history);
+    struct token* label = token_next();
+    if(!token_is_identifier(label)){
+        compiler_error(current_process, "Expected a label name after goto\n");
+    }
     expect_sym(';');
+    const char* name = parser_label_name(label->sval);
+    if(parser_function_gotos){
+        vector_push(parser_function_gotos, &name);
+    }
+    node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = name });
     struct node* label_node = node_pop();
     make_goto_node(label_node);
 }
@@ -2725,6 +3443,8 @@ int parse(struct compile_process* process){
     parser_previous_token = 0;
     parser_saw_bool = false;
     parser_enumerators = vector_create(sizeof(struct parser_enumerator));
+    parser_pending_statements = vector_create(sizeof(struct node*));
+    parser_preceding_statements = vector_create(sizeof(struct node*));
     scope_create_root(process);
     // ch66: symresolver_initialize now happens in compile_process_create.
     node_set_vector(process->node_vec, process->node_tree_vec);

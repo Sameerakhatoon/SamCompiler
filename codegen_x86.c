@@ -2373,8 +2373,47 @@ static void codegen_generate_variable_for_array(struct node* node){
         asm_keyword_for_size(variable_size(node), tmp_buf));
 }
 
+// A global with a brace initializer (or an address): its bytes, leaf by
+// leaf, from codegen_emit_initializer.
+static const char* codegen_init_nasm_size(size_t size){
+    switch(size){
+        case DATA_SIZE_BYTE:  return "db";
+        case DATA_SIZE_WORD:  return "dw";
+        case DATA_SIZE_DWORD: return "dd";
+        default:              return "dq";
+    }
+}
+
+static void codegen_init_value(size_t size, long long value){
+    asm_push("%s %lld", codegen_init_nasm_size(size), value);
+}
+
+static void codegen_init_symbol(size_t size, const char* symbol){
+    asm_push("%s %s", codegen_init_nasm_size(size), symbol);
+}
+
+static void codegen_init_zero(size_t count){
+    asm_push("times %lu db 0", (unsigned long)count);
+}
+
+static void codegen_generate_global_initializer(struct node* node){
+    asm_push("align %lu, db 0", (unsigned long)datatype_alignment(&node->var.type));
+    asm_push("%s:", node->var.name);
+    codegen_emit_initializer(node, &(struct initializer_emitter){
+        .value        = codegen_init_value,
+        .symbol       = codegen_init_symbol,
+        .zero         = codegen_init_zero,
+        .string_label = codegen_register_string,
+    });
+}
+
 static void codegen_generate_global_variable(struct node* node){
     asm_push("; %s %s", node->var.type.type_str, node->var.name);
+    if(node->var.val && node->var.val->type == NODE_TYPE_INITIALIZER){
+        codegen_generate_global_initializer(node);
+        codegen_new_scope_entity(node, 0, 0);
+        return;
+    }
     // ch179: arrays go through their own emit path and also register
     // a scope entity so the resolver can find them.
     if(node->var.type.flags & DATATYPE_FLAG_IS_ARRAY){
