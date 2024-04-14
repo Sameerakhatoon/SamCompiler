@@ -1,4 +1,6 @@
 #include <assert.h>
+#include <stdlib.h>
+#include <string.h>
 #include "compiler.h"
 #include "helpers/vector.h"
 
@@ -44,4 +46,14 @@ struct node* node_pop(void){
         vector_pop(node_vector_root);
     }
     return last_node;
+}
+
+// Copy the caller's stack-allocated node onto the heap, push onto the
+// scratch stack, and return the heap pointer. TODO: set binded.owner
+// and binded.function when the parser starts threading the AST.
+struct node* node_create(struct node* _node){
+    struct node* node = malloc(sizeof(struct node));
+    memcpy(node, _node, sizeof(struct node));
+    node_push(node);
+    return node;
 }

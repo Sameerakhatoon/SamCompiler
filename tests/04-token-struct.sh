@@ -6,8 +6,8 @@
 ./build.sh >/dev/null 2>&1
 
 probe=$(mktemp /tmp/sam_ch6_probe.XXXXXX.c)
-out=$(mktemp /tmp/sam_ch6_probe.XXXXXX)
-trap 'rm -f "$probe" "$out"' EXIT
+bin=$(mktemp /tmp/sam_ch6_bin.XXXXXX)
+trap 'rm -f "$probe" "$bin"' EXIT
 
 cat > "$probe" <<'EOF'
 #include <stdio.h>
@@ -23,18 +23,14 @@ int main(void){
 
     struct pos p = { .line = 3, .col = 7, .filename = "x.c" };
 
-    printf("type=%d num=%u ws=%d line=%d col=%d file=%s sizes=%zu/%zu\n",
-        t.type, t.inum, (int)t.whitespace, p.line, p.col, p.filename,
-        sizeof(struct token), sizeof(struct pos));
+    printf("type=%d num=%u ws=%d line=%d col=%d file=%s\n",
+        t.type, t.inum, (int)t.whitespace, p.line, p.col, p.filename);
     return 0;
 }
 EOF
 
-gcc -I"$REPO_ROOT" "$probe" -o "$out" 2>&1 | head -10
-if [ ! -x "$out" ]; then
-    fail "probe failed to compile"
-fi
-
-got="$("$out")"
+gcc -I"$REPO_ROOT" "$probe" -o "$bin" 2>&1 | head -5
+[ -x "$bin" ] || fail "probe failed to compile"
+got="$("$bin")"
 assert_contains "$got" "type=4 num=42 ws=1 line=3 col=7 file=x.c" "probe output"
 pass
