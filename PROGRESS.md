@@ -28,7 +28,8 @@ Tracking the build, one chapter at a time.
 - [x] ch25: writing our parser template (parser.c skeleton, parse() stub, node_vec/node_tree_vec)
 - [x] ch26: creating our node file (node.c with set_vector/push/peek/pop, root-aware pop)
 - [x] ch27: creating our first node (parse() NUMBER/IDENTIFIER/STRING -> AST, token_next/peek, node_create)
-- [ ] ch28..ch102: rest of Module 1 parser
+- [x] ch28: creating an expression node (NODE_TYPE_EXPRESSION, history threading, make_exp_node, parse_exp_normal)
+- [ ] ch29..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
