@@ -13,15 +13,8 @@ cat > "$probe" <<'EOF'
 #include <stdio.h>
 #include <string.h>
 #include "compiler.h"
-
-#define TOTAL_OPERATOR_GROUPS 14
-#define MAX_OPERATORS_IN_GROUP 12
-
-struct expressionable_op_precedence_group {
-    char* operators[MAX_OPERATORS_IN_GROUP];
-    int   associtivity;
-};
-
+// ch30 moved the type defs into compiler.h, so we just extern the
+// table here.
 extern struct expressionable_op_precedence_group op_precedence[TOTAL_OPERATOR_GROUPS];
 
 int main(void){
