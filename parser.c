@@ -27,6 +27,7 @@ static void          parse_single_token_to_node(void);
 static void          parse_expressionable_for_op(struct history* history, const char* op);
 static void          parse_exp_normal(struct history* history);
 static int           parse_exp(struct history* history);
+static void          parse_identifier(struct history* history);
 static int           parse_expressionable_single(struct history* history);
 static void          parse_expressionable(struct history* history);
 static int           parse_next(void);
@@ -209,6 +210,14 @@ static int parse_exp(struct history* history){
     return 0;
 }
 
+// Note: the book's assert here compares a TOKEN_TYPE_* with
+// NODE_TYPE_IDENTIFIER, which is wrong type-wise. Shipped verbatim
+// per the "follow the book" rule; the fix lands in g01.
+static void parse_identifier(struct history* history){
+    assert(token_peek_next()->type == NODE_TYPE_IDENTIFIER);
+    parse_single_token_to_node();
+}
+
 static int parse_expressionable_single(struct history* history){
     struct token* token = token_peek_next();
     if(!token){
@@ -224,7 +233,7 @@ static int parse_expressionable_single(struct history* history){
             break;
 
         case TOKEN_TYPE_IDENTIFIER:
-            parse_single_token_to_node();
+            parse_identifier(history);
             res = 0;
             break;
 
