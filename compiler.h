@@ -283,6 +283,8 @@ struct node {
         } exp;
     };
 
+    // Composite node payloads grow chapter by chapter.
+
     union {
         char               cval;
         const char*        sval;
@@ -307,6 +309,7 @@ bool token_is_keyword(struct token* token, const char* value);
 bool token_is_symbol(struct token* token, char c);
 // Preserves the book's "seperator" spelling.
 bool token_is_nl_or_comment_or_newline_seperator(struct token* token);
+bool keyword_is_datatype(const char* str);
 
 // ch27: take a stack-allocated node, copy it to the heap, push onto the
 // parser's node stack, return the new pointer.
@@ -316,6 +319,55 @@ void         make_exp_node(struct node* left_node, struct node* right_node, cons
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
+
+// ============================================================================
+// Datatypes (ch33+)
+// ============================================================================
+
+enum {
+    DATATYPE_FLAG_IS_SIGNED              = 0b00000001,
+    DATATYPE_FLAG_IS_STATIC              = 0b00000010,
+    DATATYPE_FLAG_IS_CONST               = 0b00000100,
+    DATATYPE_FLAG_IS_POINTER             = 0b00001000,
+    DATATYPE_FLAG_IS_ARRAY               = 0b00010000,
+    DATATYPE_FLAG_IS_EXTERN              = 0b00100000,
+    DATATYPE_FLAG_IS_RESTRICT            = 0b01000000,
+    DATATYPE_FLAG_IGNORE_TYPE_CHECKING   = 0b10000000,
+    DATATYPE_FLAG_IS_SECONDARY           = 0b100000000,
+    DATATYPE_FLAG_STRUCT_UNION_NO_NAME   = 0b1000000000,
+    DATATYPE_FLAG_IS_LITERAL             = 0b10000000000,
+};
+
+enum {
+    DATA_TYPE_VOID,
+    DATA_TYPE_CHAR,
+    DATA_TYPE_SHORT,
+    DATA_TYPE_INTEGER,
+    DATA_TYPE_LONG,
+    DATA_TYPE_FLOAT,
+    DATA_TYPE_DOUBLE,
+    DATA_TYPE_STRUCT,
+    DATA_TYPE_UNION,
+    DATA_TYPE_UNKNOWN,
+};
+
+struct datatype {
+    int flags;
+    // The DATA_TYPE_* enum value (CHAR, SHORT, INT, ...).
+    int type;
+    // "long int" -> primary = long, secondary = int.
+    struct datatype* secondary;
+    // Source spelling, e.g. "int".
+    const char* type_str;
+    // sizeof this datatype in bytes.
+    size_t size;
+    int    pointer_depth;
+    // For struct / union types: the matching parser node.
+    union {
+        struct node* struct_node;
+        struct node* union_node;
+    };
+};
 
 // Operator precedence table - definitions moved out of expressionable.c
 // in ch30 so the parser can extern the table and look operators up.

@@ -28,6 +28,12 @@ static void          parse_expressionable_for_op(struct history* history, const 
 static void          parse_exp_normal(struct history* history);
 static int           parse_exp(struct history* history);
 static void          parse_identifier(struct history* history);
+static bool          is_keyword_variable_modifier(const char* val);
+static void          parse_datatype_modifiers(struct datatype* dtype);
+static void          parse_datatype_type(struct datatype* dtype);
+static void          parse_datatype(struct datatype* dtype);
+static void          parse_variable_function_or_struct_union(struct history* history);
+static void          parse_keyword(struct history* history);
 static int           parse_expressionable_single(struct history* history);
 static void          parse_expressionable(struct history* history);
 static int           parse_next(void);
@@ -218,6 +224,90 @@ static void parse_identifier(struct history* history){
     parse_single_token_to_node();
 }
 
+// Keywords that prefix or modify a datatype (signed/unsigned, storage
+// class, const, etc.) but don't name a type themselves.
+static bool is_keyword_variable_modifier(const char* val){
+    return S_EQ(val, "unsigned") || S_EQ(val, "signed")
+        || S_EQ(val, "static")   || S_EQ(val, "const")
+        || S_EQ(val, "extern")   || S_EQ(val, "__ignore_typecheck__");
+}
+
+// Consume a run of modifier keywords, OR-ing matching DATATYPE_FLAG_*s
+// into dtype. Stops at the first non-modifier keyword.
+static void parse_datatype_modifiers(struct datatype* dtype){
+    struct token* token = token_peek_next();
+    while(token && token->type == TOKEN_TYPE_KEYWORD){
+        if(!is_keyword_variable_modifier(token->sval)){
+            break;
+        }
+
+        if(S_EQ(token->sval, "signed")){
+            dtype->flags |= DATATYPE_FLAG_IS_SIGNED;
+        } else if(S_EQ(token->sval, "unsigned")){
+            dtype->flags &= ~DATATYPE_FLAG_IS_SIGNED;
+        } else if(S_EQ(token->sval, "static")){
+            dtype->flags |= DATATYPE_FLAG_IS_STATIC;
+        } else if(S_EQ(token->sval, "const")){
+            dtype->flags |= DATATYPE_FLAG_IS_CONST;
+        } else if(S_EQ(token->sval, "extern")){
+            dtype->flags |= DATATYPE_FLAG_IS_EXTERN;
+        } else if(S_EQ(token->sval, "__ignore_typecheck__")){
+            dtype->flags |= DATATYPE_FLAG_IGNORE_TYPE_CHECKING;
+        }
+
+        token_next();
+        token = token_peek_next();
+    }
+}
+
+// Stub: ch34 fills in the actual primary-type parsing (consuming `int`,
+// `long int`, `struct foo`, etc.). For now we consume one keyword if
+// it's a datatype name so the parser doesn't loop forever on `int x`.
+static void parse_datatype_type(struct datatype* dtype){
+    struct token* token = token_peek_next();
+    if(token && token->type == TOKEN_TYPE_KEYWORD && keyword_is_datatype(token->sval)){
+        dtype->type_str = token->sval;
+        // Coarse mapping; ch34 promotes this to the real switch.
+        if(S_EQ(token->sval, "int"))         dtype->type = DATA_TYPE_INTEGER;
+        else if(S_EQ(token->sval, "void"))   dtype->type = DATA_TYPE_VOID;
+        else if(S_EQ(token->sval, "char"))   dtype->type = DATA_TYPE_CHAR;
+        else if(S_EQ(token->sval, "short"))  dtype->type = DATA_TYPE_SHORT;
+        else if(S_EQ(token->sval, "long"))   dtype->type = DATA_TYPE_LONG;
+        else if(S_EQ(token->sval, "float"))  dtype->type = DATA_TYPE_FLOAT;
+        else if(S_EQ(token->sval, "double")) dtype->type = DATA_TYPE_DOUBLE;
+        else                                  dtype->type = DATA_TYPE_UNKNOWN;
+        token_next();
+    }
+}
+
+// modifier* type modifier*
+static void parse_datatype(struct datatype* dtype){
+    memset(dtype, 0, sizeof(struct datatype));
+    dtype->flags |= DATATYPE_FLAG_IS_SIGNED;
+
+    parse_datatype_modifiers(dtype);
+    parse_datatype_type(dtype);
+    parse_datatype_modifiers(dtype);
+}
+
+// ch33 entry. ch34+ does the variable / function / struct dispatch
+// off the parsed datatype.
+static void parse_variable_function_or_struct_union(struct history* history){
+    struct datatype dtype;
+    parse_datatype(&dtype);
+    // ch34+ will look at the next token to decide variable vs function
+    // vs struct-body and build the appropriate node. For now the
+    // datatype is parsed and discarded.
+}
+
+static void parse_keyword(struct history* history){
+    struct token* token = token_peek_next();
+    if(is_keyword_variable_modifier(token->sval) || keyword_is_datatype(token->sval)){
+        parse_variable_function_or_struct_union(history);
+        return;
+    }
+}
+
 static int parse_expressionable_single(struct history* history){
     struct token* token = token_peek_next();
     if(!token){
@@ -244,6 +334,11 @@ static int parse_expressionable_single(struct history* history){
 
         case TOKEN_TYPE_OPERATOR:
             parse_exp(history);
+            res = 0;
+            break;
+
+        case TOKEN_TYPE_KEYWORD:
+            parse_keyword(history);
             res = 0;
             break;
     }
