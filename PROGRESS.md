@@ -35,7 +35,8 @@ Tracking the build, one chapter at a time.
 - [x] ch32: creating an identifier node (parse_identifier split, ships book's broken assert; fixed in g01)
 - [x] g01: parse_identifier asserts TOKEN_TYPE_IDENTIFIER, not NODE_TYPE_IDENTIFIER
 - [x] ch33: datatypes part 1 (struct datatype, DATATYPE_FLAG_*, DATA_TYPE_* enums, parse_datatype scaffold)
-- [ ] ch34..ch102: rest of Module 1 parser
+- [x] ch34: datatypes part 2 (parse_datatype_type real impl: tokens, pointer depth, struct/union, anonymous names)
+- [ ] ch35..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver

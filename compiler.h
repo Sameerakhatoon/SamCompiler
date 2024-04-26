@@ -310,6 +310,9 @@ bool token_is_symbol(struct token* token, char c);
 // Preserves the book's "seperator" spelling.
 bool token_is_nl_or_comment_or_newline_seperator(struct token* token);
 bool keyword_is_datatype(const char* str);
+bool token_is_primitive_keyword(struct token* token);
+bool token_is_operator(struct token* token, const char* val);
+bool datatype_is_struct_or_union_for_name(const char* name);
 
 // ch27: take a stack-allocated node, copy it to the heap, push onto the
 // parser's node stack, return the new pointer.
@@ -367,6 +370,12 @@ struct datatype {
         struct node* struct_node;
         struct node* union_node;
     };
+};
+
+enum {
+    DATA_TYPE_EXPECT_PRIMITIVE,
+    DATA_TYPE_EXPECT_UNION,
+    DATA_TYPE_EXPECT_STRUCT,
 };
 
 // Operator precedence table - definitions moved out of expressionable.c
