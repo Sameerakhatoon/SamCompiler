@@ -162,6 +162,20 @@ enum {
     COMPILER_FAILED_WITH_ERRORS,
 };
 
+// Lexical scope: a stack of entity pointers + parent. The parser
+// pushes variables, functions, struct members, etc. into the current
+// scope; the resolver later walks back up via parent links.
+typedef struct scope scope_t;
+struct scope {
+    int flags;
+    // Vector of void* (pointers to whatever the entity is).
+    struct vector* entities;
+    // Total bytes this scope's entities occupy (aligned to 16).
+    size_t size;
+    // Parent in the scope chain; NULL for root.
+    struct scope* parent;
+};
+
 struct compile_process_input_file {
     FILE*       fp;
     const char* abs_path;
@@ -184,6 +198,14 @@ struct compile_process {
     //   node_tree_vec  - only the top-level AST roots.
     struct vector* node_vec;
     struct vector* node_tree_vec;
+
+    // Lexical-scope chain. ch38+ uses this to remember declared
+    // entities (variables, functions, struct members) so later passes
+    // can resolve names.
+    struct {
+        struct scope* root;
+        struct scope* current;
+    } scope;
 
     FILE* ofile;
 };
@@ -322,6 +344,24 @@ void         make_exp_node(struct node* left_node, struct node* right_node, cons
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
+
+// Scope chain (ch38+). The parser creates a root scope at the start
+// of a parse, pushes/pops nested scopes as it enters/leaves
+// functions and blocks, and pushes entity pointers as it sees
+// declarations.
+struct scope* scope_create_root(struct compile_process* process);
+void          scope_free_root(struct compile_process* process);
+struct scope* scope_new(struct compile_process* process, int flags);
+void          scope_iteration_start(struct scope* scope);
+void          scope_iteration_end(struct scope* scope);
+void*         scope_iterate_back(struct scope* scope);
+void*         scope_last_entity_at_scope(struct scope* scope);
+void*         scope_last_entity_from_scope_stop_at(struct scope* scope, struct scope* stop_scope);
+void*         scope_last_entity_stop_at(struct compile_process* process, struct scope* stop_scope);
+void*         scope_last_entity(struct compile_process* process);
+void          scope_push(struct compile_process* process, void* ptr, size_t elem_size);
+void          scope_finish(struct compile_process* process);
+struct scope* scope_current(struct compile_process* process);
 
 // ============================================================================
 // Datatypes (ch33+)
