@@ -162,6 +162,21 @@ enum {
     COMPILER_FAILED_WITH_ERRORS,
 };
 
+// Symbol table entry. The resolver builds these out of declaration
+// nodes (ch40+); native (built-in) functions get their own type.
+enum {
+    SYMBOL_TYPE_NODE,
+    SYMBOL_TYPE_NATIVE_FUNCTION,
+    SYMBOL_TYPE_UNKNOWN,
+};
+
+typedef struct symbol symbol_t;
+struct symbol {
+    const char* name;
+    int         type;
+    void*       data;
+};
+
 // Lexical scope: a stack of entity pointers + parent. The parser
 // pushes variables, functions, struct members, etc. into the current
 // scope; the resolver later walks back up via parent links.
@@ -206,6 +221,13 @@ struct compile_process {
         struct scope* root;
         struct scope* current;
     } scope;
+
+    // Symbol tables (ch40+). `table` is the currently-active one;
+    // `tables` keeps the stack of saved tables (struct vector*).
+    struct {
+        struct vector* table;
+        struct vector* tables;
+    } symbols;
 
     FILE* ofile;
 };
@@ -362,6 +384,17 @@ void*         scope_last_entity(struct compile_process* process);
 void          scope_push(struct compile_process* process, void* ptr, size_t elem_size);
 void          scope_finish(struct compile_process* process);
 struct scope* scope_current(struct compile_process* process);
+
+// Symbol resolver (ch40+). The parser feeds declaration nodes in; the
+// resolver indexes them by name.
+void           symresolver_initialize(struct compile_process* process);
+void           symresolver_new_table(struct compile_process* process);
+void           symresolver_end_table(struct compile_process* process);
+struct symbol* symresolver_get_symbol(struct compile_process* process, const char* name);
+struct symbol* symresolver_get_symbol_for_native_function(struct compile_process* process, const char* name);
+struct symbol* symresolver_register_symbol(struct compile_process* process, const char* sym_name, int type, void* data);
+struct node*   symresolver_node(struct symbol* sym);
+void           symresolver_build_for_node(struct compile_process* process, struct node* node);
 
 // ============================================================================
 // Datatypes (ch33+)
