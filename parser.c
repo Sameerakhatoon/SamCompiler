@@ -35,6 +35,10 @@ static void          parse_datatype(struct datatype* dtype);
 static void          parse_variable_function_or_struct_union(struct history* history);
 static bool          parser_is_int_valid_after_datatype(struct datatype* dtype);
 static void          parser_ignore_int(struct datatype* dtype);
+static void          parse_expressionable_root(struct history* history);
+static void          make_variable_node(struct datatype* dtype, struct token* name_token, struct node* value_node);
+static void          make_variable_node_and_register(struct history* history, struct datatype* dtype, struct token* name_token, struct node* value_node);
+static void          parse_variable(struct datatype* dtype, struct token* name_token, struct history* history);
 static void          parse_keyword(struct history* history);
 static int           parse_expressionable_single(struct history* history);
 static void          parse_expressionable(struct history* history);
@@ -484,6 +488,58 @@ static void parser_ignore_int(struct datatype* dtype){
     token_next();   // swallow the redundant "int"
 }
 
+// Parse an expression at "root level" - read it, then leave its node
+// on the stack for the caller to pop. Used when a sub-grammar (like
+// the RHS of `int x = E;`) needs to embed an expressionable result.
+static void parse_expressionable_root(struct history* history){
+    parse_expressionable(history);
+    struct node* result_node = node_pop();
+    node_push(result_node);
+}
+
+static void make_variable_node(struct datatype* dtype, struct token* name_token, struct node* value_node){
+    const char* name_str = 0;
+    if(name_token){
+        name_str = name_token->sval;
+    }
+    node_create(&(struct node){
+        .type     = NODE_TYPE_VARIABLE,
+        .var.name = name_str,
+        .var.type = *dtype,
+        .var.val  = value_node,
+    });
+}
+
+// Build the variable node and (TODO: ch43+) push it into the current
+// scope so name resolution can find it later.
+static void make_variable_node_and_register(struct history* history,
+                                            struct datatype* dtype,
+                                            struct token* name_token,
+                                            struct node* value_node){
+    make_variable_node(dtype, name_token, value_node);
+    struct node* var_node = node_pop();
+
+    // TODO(ch43+): calculate scope offset and scope_push.
+
+    node_push(var_node);
+}
+
+// Variable declarator: `name` already consumed; optionally followed by
+// `[N]` (TODO: ch45) or `= expr`.
+static void parse_variable(struct datatype* dtype, struct token* name_token, struct history* history){
+    struct node* value_node = 0;
+
+    // TODO(ch45): handle `[ ... ]` array brackets here.
+
+    if(token_next_is_operator("=")){
+        token_next();
+        parse_expressionable_root(history);
+        value_node = node_pop();
+    }
+
+    make_variable_node_and_register(history, dtype, name_token, value_node);
+}
+
 // ch33 entry. ch34+ does the variable / function / struct dispatch
 // off the parsed datatype.
 static void parse_variable_function_or_struct_union(struct history* history){
@@ -494,9 +550,18 @@ static void parse_variable_function_or_struct_union(struct history* history){
     // "double int". The book keeps the real type as long/float/double
     // and silently drops the int.
     parser_ignore_int(&dtype);
-    // ch42+ will look at the next token to decide variable vs function
-    // vs struct-body and build the appropriate node. For now the
-    // datatype is parsed and discarded.
+
+    // ch42: `int abc;` - the next token must be the variable name.
+    struct token* name_token = token_next();
+    if(name_token->type != TOKEN_TYPE_IDENTIFIER){
+        compiler_error(current_process,
+            "Expecting a valid name for the given variable declaration\n");
+    }
+
+    // TODO(ch46+): if the next token is `(`, this is a function decl,
+    // not a variable. ch42 only handles the variable path.
+
+    parse_variable(&dtype, name_token, history);
 }
 
 static void parse_keyword(struct history* history){
@@ -549,15 +614,13 @@ static void parse_expressionable(struct history* history){
     }
 }
 
-// Entry from parse_next for top-level keyword declarations (variables,
-// functions, structs, unions at file scope). Drives the keyword
-// parser; ch37+ will push a real declaration node here, and the
-// upstream node_pop() call only makes sense once that happens. We
-// guard it for now so the parser doesn't crash on bare `int`.
+// Entry from parse_next for top-level keyword declarations. As of
+// ch42 these actually push a variable node, so we can pop + re-push
+// the canonical way.
 static void parse_keyword_for_global(void){
     parse_keyword(history_begin(0));
-    // TODO(post-ch37): re-enable when parse_keyword actually pushes:
-    //   struct node* node = node_pop();
+    struct node* node = node_pop();
+    node_push(node);
 }
 
 static int parse_next(void){
