@@ -41,7 +41,8 @@ Tracking the build, one chapter at a time.
 - [x] ch36: datatypes part 4 (parse_keyword_for_global, top-level keyword dispatch)
 - [x] ch38: implementing the scopes (struct scope, scope.c, root+nested+last-entity walk)
 - [x] ch40: implementing the symbol resolver (symresolver.c, table stack, register/lookup/dedup)
-- [ ] ch41..ch102: rest of Module 1 parser
+- [x] ch41: datatypes part 5 (parser_ignore_int: swallow decorative trailing `int`)
+- [ ] ch42..ch102: rest of Module 1 parser
 - [ ] ...
 
 ## Module 2 + 3 - Code generator + resolver
