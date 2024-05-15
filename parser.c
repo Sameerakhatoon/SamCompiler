@@ -282,6 +282,13 @@ static void expect_sym(char c){
     }
 }
 
+static void expect_op(const char* op){
+    struct token* next_token = token_next();
+    if(!next_token || next_token->type != TOKEN_TYPE_OPERATOR || !S_EQ(next_token->sval, op)){
+        compiler_error(current_process, "Expecting the operator %s but something else was provided\n", op);
+    }
+}
+
 // Consume the datatype keyword + (optional) secondary primitive (the
 // "int" in "long int", say) and hand both back to the caller.
 static void parser_get_datatype_tokens(struct token** datatype_token,
@@ -544,12 +551,43 @@ static void make_variable_list_node(struct vector* var_list_vec){
     });
 }
 
+// ch44: eat one or more `[N]` brackets following a declarator name.
+// Each one becomes a NODE_TYPE_BRACKET wrapping the inner expression;
+// they all get collected into an array_brackets struct stored on the
+// datatype's `.array.brackets`.
+static struct array_brackets* parse_array_brackets(struct history* history){
+    struct array_brackets* brackets = array_brackets_new();
+    while(token_next_is_operator("[")){
+        expect_op("[");
+        if(token_is_symbol(token_peek_next(), ']')){
+            // `int x[];` - empty brackets, no size.
+            expect_sym(']');
+            break;
+        }
+        parse_expressionable_root(history);
+        expect_sym(']');
+
+        struct node* exp_node = node_pop();
+        make_bracket_node(exp_node);
+
+        struct node* bracket_node = node_pop();
+        array_brackets_add(brackets, bracket_node);
+    }
+    return brackets;
+}
+
 // Variable declarator: `name` already consumed; optionally followed by
-// `[N]` (TODO: ch45) or `= expr`.
+// `[N]...` (ch44) or `= expr`.
 static void parse_variable(struct datatype* dtype, struct token* name_token, struct history* history){
     struct node* value_node = 0;
 
-    // TODO(ch45): handle `[ ... ]` array brackets here.
+    // ch44: array brackets, e.g. `int x[4][3];`
+    if(token_next_is_operator("[")){
+        struct array_brackets* brackets = parse_array_brackets(history);
+        dtype->array.brackets = brackets;
+        dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
+        dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
+    }
 
     if(token_next_is_operator("=")){
         token_next();
