@@ -35,7 +35,7 @@ int try_compile(const char* src){
 int main(void){
     // Each input now requires a variable name after the datatype
     // (post-ch42 the parser expects a declarator).
-    const char* inputs[] = { "int x", "char x", "short x", "long int x", "float x", "double x", 0 };
+    const char* inputs[] = { "int x;", "char x;", "short x;", "long int x;", "float x;", "double x;", 0 };
     for(int i = 0; inputs[i]; i++){
         printf("%-12s = %d\n", inputs[i], try_compile(inputs[i]));
     }
@@ -46,9 +46,9 @@ EOF
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>&1 | head -5
 [ -x "$bin" ] || fail "ch35 probe failed to compile"
 got="$("$bin")"
-assert_contains "$got" "int x        = 0" "int parses"
-assert_contains "$got" "char x       = 0" "char parses"
-assert_contains "$got" "short x      = 0" "short parses"
-assert_contains "$got" "long int x   = 0" "long int parses with secondary type"
-assert_contains "$got" "float x      = 0" "float parses"
+assert_contains "$got" "int x;       = 0" "int parses"
+assert_contains "$got" "char x;      = 0" "char parses"
+assert_contains "$got" "short x;     = 0" "short parses"
+assert_contains "$got" "long int x;  = 0" "long int parses with secondary type"
+assert_contains "$got" "float x;     = 0" "float parses"
 pass

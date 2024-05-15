@@ -6,7 +6,7 @@
 ./build.sh >/dev/null 2>&1
 
 scratch=$(mktemp /tmp/sam_ch36_input.XXXXXX)
-printf 'unsigned char x' > "$scratch"
+printf 'unsigned char x;' > "$scratch"
 
 probe=$(mktemp /tmp/sam_ch36_probe.XXXXXX.c)
 bin=$(mktemp /tmp/sam_ch36_bin.XXXXXX)

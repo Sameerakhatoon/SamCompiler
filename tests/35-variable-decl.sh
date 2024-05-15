@@ -7,7 +7,7 @@
 ./build.sh >/dev/null 2>&1
 
 scratch=$(mktemp /tmp/sam_ch42_input.XXXXXX)
-printf 'int x = 50' > "$scratch"
+printf 'int x = 50;' > "$scratch"
 
 probe=$(mktemp /tmp/sam_ch42_probe.XXXXXX.c)
 bin=$(mktemp /tmp/sam_ch42_bin.XXXXXX)

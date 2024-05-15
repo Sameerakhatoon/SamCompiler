@@ -39,6 +39,8 @@ static void          parse_expressionable_root(struct history* history);
 static void          make_variable_node(struct datatype* dtype, struct token* name_token, struct node* value_node);
 static void          make_variable_node_and_register(struct history* history, struct datatype* dtype, struct token* name_token, struct node* value_node);
 static void          parse_variable(struct datatype* dtype, struct token* name_token, struct history* history);
+static void          make_variable_list_node(struct vector* var_list_vec);
+static void          expect_sym(char c);
 static void          parse_keyword(struct history* history);
 static int           parse_expressionable_single(struct history* history);
 static void          parse_expressionable(struct history* history);
@@ -269,6 +271,15 @@ static void parse_datatype_modifiers(struct datatype* dtype){
 static bool token_next_is_operator(const char* op){
     struct token* token = token_peek_next();
     return token_is_operator(token, op);
+}
+
+// Consume the next token and assert it's the given symbol character.
+// Fatal compiler_error if not.
+static void expect_sym(char c){
+    struct token* next_token = token_next();
+    if(!next_token || next_token->type != TOKEN_TYPE_SYMBOL || next_token->cval != c){
+        compiler_error(current_process, "Expecting symbol %c however something else was provided\n", c);
+    }
 }
 
 // Consume the datatype keyword + (optional) secondary primitive (the
@@ -524,6 +535,15 @@ static void make_variable_node_and_register(struct history* history,
     node_push(var_node);
 }
 
+// Build a NODE_TYPE_VARIABLE_LIST grouping comma-separated peers
+// (`int a, b, c;` -> one var_list containing three NODE_TYPE_VARIABLE).
+static void make_variable_list_node(struct vector* var_list_vec){
+    node_create(&(struct node){
+        .type          = NODE_TYPE_VARIABLE_LIST,
+        .var_list.list = var_list_vec,
+    });
+}
+
 // Variable declarator: `name` already consumed; optionally followed by
 // `[N]` (TODO: ch45) or `= expr`.
 static void parse_variable(struct datatype* dtype, struct token* name_token, struct history* history){
@@ -562,6 +582,24 @@ static void parse_variable_function_or_struct_union(struct history* history){
     // not a variable. ch42 only handles the variable path.
 
     parse_variable(&dtype, name_token, history);
+
+    // ch43: `int a, b, c;` - gather any comma-separated peers into a
+    // NODE_TYPE_VARIABLE_LIST.
+    if(token_is_operator(token_peek_next(), ",")){
+        struct vector* var_list = vector_create(sizeof(struct node*));
+        struct node* var_node   = node_pop();
+        vector_push(var_list, &var_node);
+        while(token_is_operator(token_peek_next(), ",")){
+            token_next();
+            name_token = token_next();
+            parse_variable(&dtype, name_token, history);
+            var_node = node_pop();
+            vector_push(var_list, &var_node);
+        }
+        make_variable_list_node(var_list);
+    }
+
+    expect_sym(';');
 }
 
 static void parse_keyword(struct history* history){

@@ -348,6 +348,11 @@ struct node {
             const char*     name;
             struct node*    val;
         } var;
+
+        struct varlist {
+            // Vector of struct node* (the comma-separated peers).
+            struct vector* list;
+        } var_list;
     };
 
     // Composite node payloads grow chapter by chapter.
