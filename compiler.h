@@ -375,6 +375,14 @@ struct node {
             // `int x[50]` -> .inner is NODE_TYPE_NUMBER(50).
             struct node* inner;
         } bracket;
+
+        // ch48: NODE_TYPE_STRUCT carries name + body + optional
+        // attached variable (`struct foo { ... } v;`).
+        struct _struct {
+            const char*  name;
+            struct node* body_n;
+            struct node* var;
+        } _struct;
     };
 
     // Composite node payloads grow chapter by chapter.
