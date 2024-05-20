@@ -81,6 +81,21 @@ void make_bracket_node(struct node* inner){
     });
 }
 
+// ch49: the currently-being-parsed body node. The parser writes to it
+// while consuming statements, and binded.owner restores the parent on
+// exit. Exported (not static) because parser.c walks it directly.
+struct node* parser_current_body = 0;
+
+void make_body_node(struct vector* body_vec, size_t size, bool padded, struct node* largest_var_node){
+    node_create(&(struct node){
+        .type                  = NODE_TYPE_BODY,
+        .body.statements       = body_vec,
+        .body.size             = size,
+        .body.padded           = padded,
+        .body.largest_var_node = largest_var_node,
+    });
+}
+
 // Copy the caller's stack-allocated node onto the heap, push onto the
 // scratch stack, and return the heap pointer. TODO: set binded.owner
 // and binded.function when the parser starts threading the AST.
