@@ -425,6 +425,12 @@ bool token_is_operator(struct token* token, const char* val);
 bool datatype_is_struct_or_union_for_name(const char* name);
 bool datatype_is_struct_or_union(struct datatype* dtype);
 
+// ch51: size helpers used by codegen + resolver later.
+size_t datatype_size_for_array_access(struct datatype* dtype);
+size_t datatype_element_size(struct datatype* dtype);
+size_t datatype_size_no_ptr(struct datatype* dtype);
+size_t datatype_size(struct datatype* dtype);
+
 // ch27: take a stack-allocated node, copy it to the heap, push onto the
 // parser's node stack, return the new pointer.
 struct node* node_create(struct node* _node);
