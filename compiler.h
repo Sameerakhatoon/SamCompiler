@@ -431,6 +431,10 @@ size_t datatype_element_size(struct datatype* dtype);
 size_t datatype_size_no_ptr(struct datatype* dtype);
 size_t datatype_size(struct datatype* dtype);
 
+// ch52: size helpers that look at variable nodes (not datatypes).
+size_t variable_size(struct node* var_node);
+size_t variable_size_for_list(struct node* var_list_node);
+
 // ch27: take a stack-allocated node, copy it to the heap, push onto the
 // parser's node stack, return the new pointer.
 struct node* node_create(struct node* _node);
