@@ -644,9 +644,48 @@ static void parse_statement(struct history* history){
     expect_sym(';');
 }
 
+static void parser_append_size_for_node(struct history* history, size_t* _variable_size, struct node* node);
+
+static void parser_append_size_for_node_struct_union(struct history* history,
+                                                    size_t* _variable_size,
+                                                    struct node* node){
+    *_variable_size += variable_size(node);
+    if(node->var.type.flags & DATATYPE_FLAG_IS_POINTER){
+        return;
+    }
+    struct node* body = variable_struct_or_union_body_node(node);
+    if(body){
+        struct node* largest = body->body.largest_var_node;
+        if(largest){
+            *_variable_size += align_value(*_variable_size, largest->var.type.size);
+        }
+    }
+}
+
+static void parser_append_size_for_variable_list(struct history* history,
+                                                 size_t* variable_size,
+                                                 struct vector* vec){
+    vector_set_peek_pointer(vec, 0);
+    struct node* node = vector_peek_ptr(vec);
+    while(node){
+        parser_append_size_for_node(history, variable_size, node);
+        node = vector_peek_ptr(vec);
+    }
+}
+
 static void parser_append_size_for_node(struct history* history, size_t* _variable_size, struct node* node){
-    (void)history; (void)_variable_size; (void)node;
-    // TODO(later): real size + alignment tracking.
+    if(!node){
+        return;
+    }
+    if(node->type == NODE_TYPE_VARIABLE){
+        if(node_is_struct_or_union_variable(node)){
+            parser_append_size_for_node_struct_union(history, _variable_size, node);
+            return;
+        }
+        *_variable_size += variable_size(node);
+    } else if(node->type == NODE_TYPE_VARIABLE_LIST){
+        parser_append_size_for_variable_list(history, _variable_size, node->var_list.list);
+    }
 }
 
 static void parser_finalize_body(struct history* history, struct node* body_node,

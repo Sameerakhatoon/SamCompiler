@@ -9,6 +9,19 @@ size_t variable_size(struct node* var_node){
     return datatype_size(&var_node->var.type);
 }
 
+// For a struct/union variable, follow the type back to its body node.
+// Unions are still unimplemented; returns NULL for them for now.
+struct node* variable_struct_or_union_body_node(struct node* node){
+    if(!node_is_struct_or_union_variable(node)){
+        return 0;
+    }
+    if(node->var.type.type == DATA_TYPE_STRUCT){
+        return node->var.type.struct_node->_struct.body_n;
+    }
+    // TODO(later): union body.
+    return 0;
+}
+
 // Sum the sizes of every variable in a NODE_TYPE_VARIABLE_LIST.
 size_t variable_size_for_list(struct node* var_list_node){
     assert(var_list_node->type == NODE_TYPE_VARIABLE_LIST);
