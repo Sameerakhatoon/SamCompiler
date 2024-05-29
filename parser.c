@@ -15,6 +15,29 @@ enum {
     HISTORY_FLAG_INSIDE_UNION = 0b00000001,
 };
 
+// ch57: parser-side scope entity. Each declared variable becomes one
+// of these in the parser's scope chain. Codegen reads stack_offset
+// from this; the flags help the resolver decide stack vs structure-
+// scoped placement.
+enum {
+    PARSER_SCOPE_ENTITY_ON_STACK        = 0b00000001,
+    PARSER_SCOPE_ENTITY_STRUCTURE_SCOPE = 0b00000010,
+};
+
+struct parser_scope_entity {
+    int          flags;
+    int          stack_offset;
+    struct node* node;
+};
+
+static struct parser_scope_entity* parser_new_scope_entity(struct node* node, int stack_offset, int flags){
+    struct parser_scope_entity* entity = calloc(1, sizeof(struct parser_scope_entity));
+    entity->node         = node;
+    entity->flags        = flags;
+    entity->stack_offset = stack_offset;
+    return entity;
+}
+
 // Parse history. Threaded through every parse_*() call so children can
 // see flags / context their parents pushed (e.g. "we are inside an
 // expression right now"). history_begin() makes a fresh one; history_down()
@@ -295,6 +318,11 @@ static void parser_scope_new(void){
 
 static void parser_scope_finish(void){
     scope_finish(current_process);
+}
+
+// Convenience: push an entity-bearing pointer into the current scope.
+static void parser_scope_push(struct node* node, size_t size){
+    scope_push(current_process, node, size);
 }
 
 // Consume the next token and assert it's the given symbol character.
