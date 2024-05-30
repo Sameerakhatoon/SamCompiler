@@ -365,6 +365,8 @@ struct node {
             // ch53: bytes of padding to insert before this variable
             // to satisfy alignment.
             int             padding;
+            // ch58: aligned offset of this variable in its scope.
+            int             aoffset;
             const char*     name;
             struct node*    val;
         } var;
@@ -433,10 +435,13 @@ size_t datatype_size_for_array_access(struct datatype* dtype);
 size_t datatype_element_size(struct datatype* dtype);
 size_t datatype_size_no_ptr(struct datatype* dtype);
 size_t datatype_size(struct datatype* dtype);
+bool   datatype_is_primitive(struct datatype* dtype);
 
 // ch52: size helpers that look at variable nodes (not datatypes).
-size_t variable_size(struct node* var_node);
-size_t variable_size_for_list(struct node* var_list_node);
+size_t       variable_size(struct node* var_node);
+size_t       variable_size_for_list(struct node* var_list_node);
+struct node* variable_node(struct node* node);
+bool         variable_node_is_primitive(struct node* node);
 
 // ch53: alignment/padding helpers used by the body sizing logic.
 int padding(int val, int to);

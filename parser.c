@@ -12,7 +12,8 @@ extern struct node* parser_current_body;
 
 // ch55: history flags carried through nested parses.
 enum {
-    HISTORY_FLAG_INSIDE_UNION = 0b00000001,
+    HISTORY_FLAG_INSIDE_UNION    = 0b00000001,
+    HISTORY_FLAG_IS_UPWARD_STACK = 0b00000010,
 };
 
 // ch57: parser-side scope entity. Each declared variable becomes one
@@ -38,6 +39,9 @@ static struct parser_scope_entity* parser_new_scope_entity(struct node* node, in
     return entity;
 }
 
+// Forward decl - body lives after current_process declaration.
+static struct parser_scope_entity* parser_scope_last_entity_stop_global_scope(void);
+
 // Parse history. Threaded through every parse_*() call so children can
 // see flags / context their parents pushed (e.g. "we are inside an
 // expression right now"). history_begin() makes a fresh one; history_down()
@@ -51,6 +55,11 @@ static struct history* history_down(struct history* history, int flags);
 
 static struct compile_process* current_process;
 static struct token*           parser_last_token;
+
+// Defined here so current_process is in scope.
+static struct parser_scope_entity* parser_scope_last_entity_stop_global_scope(void){
+    return scope_last_entity_stop_at(current_process, current_process->scope.root);
+}
 
 static void          parser_ignore_nl_or_comment(struct token* token);
 static struct token* token_next(void);
@@ -586,8 +595,36 @@ static void make_variable_node(struct datatype* dtype, struct token* name_token,
     });
 }
 
-// Build the variable node and (TODO: ch43+) push it into the current
-// scope so name resolution can find it later.
+// ch58: compute the variable's stack offset based on the last
+// declared entity in the current (non-global) scope. Local stacks
+// grow downward (offset goes negative); upward-stack call frames
+// reverse the sign.
+static void parser_scope_offset_for_stack(struct node* node, struct history* history){
+    struct parser_scope_entity* last_entity = parser_scope_last_entity_stop_global_scope();
+    bool upward_stack = history->flags & HISTORY_FLAG_IS_UPWARD_STACK;
+    int offset = -(int)variable_size(node);
+    if(upward_stack){
+        // TODO(post-ch58): real upward-stack offsets land later.
+        compiler_error(current_process, "Upward-stack offsets are not yet implemented\n");
+    }
+
+    if(last_entity){
+        offset += variable_node(last_entity->node)->var.aoffset;
+        if(variable_node_is_primitive(node)){
+            variable_node(node)->var.padding =
+                padding(upward_stack ? offset : -offset, node->var.type.size);
+        }
+    }
+    variable_node(node)->var.aoffset = offset;
+}
+
+static void parser_scope_offset(struct node* node, struct history* history){
+    parser_scope_offset_for_stack(node, history);
+}
+
+// Build the variable node and push it into the current scope so name
+// resolution can find it later. Stack offset is recorded on the node
+// itself so codegen can read it back.
 static void make_variable_node_and_register(struct history* history,
                                             struct datatype* dtype,
                                             struct token* name_token,
@@ -595,7 +632,12 @@ static void make_variable_node_and_register(struct history* history,
     make_variable_node(dtype, name_token, value_node);
     struct node* var_node = node_pop();
 
-    // TODO(ch43+): calculate scope offset and scope_push.
+    // Only assign a stack offset if we're inside some non-global
+    // scope (a function body / struct body). Global vars get offset 0
+    // and live in the data segment later.
+    if(current_process->scope.current != current_process->scope.root){
+        parser_scope_offset(var_node, history);
+    }
 
     node_push(var_node);
 }
