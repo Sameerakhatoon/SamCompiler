@@ -14,6 +14,7 @@ extern struct node* parser_current_body;
 enum {
     HISTORY_FLAG_INSIDE_UNION    = 0b00000001,
     HISTORY_FLAG_IS_UPWARD_STACK = 0b00000010,
+    HISTORY_FLAG_IS_GLOBAL_SCOPE = 0b00000100,
 };
 
 // ch57: parser-side scope entity. Each declared variable becomes one
@@ -618,7 +619,18 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
     variable_node(node)->var.aoffset = offset;
 }
 
+// Global vars don't live on the stack; they get offset 0 and the
+// codegen will emit them into the data segment.
+static int parser_scope_offset_for_global(struct node* node, struct history* history){
+    (void)node; (void)history;
+    return 0;
+}
+
 static void parser_scope_offset(struct node* node, struct history* history){
+    if(history->flags & HISTORY_FLAG_IS_GLOBAL_SCOPE){
+        parser_scope_offset_for_global(node, history);
+        return;
+    }
     parser_scope_offset_for_stack(node, history);
 }
 
