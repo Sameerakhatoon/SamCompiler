@@ -331,9 +331,15 @@ static void parser_scope_finish(void){
     scope_finish(current_process);
 }
 
-// Convenience: push an entity-bearing pointer into the current scope.
-static void parser_scope_push(struct node* node, size_t size){
-    scope_push(current_process, node, size);
+// Push a parser_scope_entity (carries node + flags + offset) into
+// the current scope. ch61 retypes this to take the entity, not the
+// raw node.
+static void parser_scope_push(struct parser_scope_entity* entity, size_t size){
+    scope_push(current_process, entity, size);
+}
+
+static struct parser_scope_entity* parser_scope_last_entity(void){
+    return scope_last_entity(current_process);
 }
 
 // Consume the next token and assert it's the given symbol character.
@@ -669,6 +675,13 @@ static void make_variable_node_and_register(struct history* history,
     if(current_process->scope.current != current_process->scope.root){
         parser_scope_offset(var_node, history);
     }
+
+    // ch61: register the variable in the current scope so subsequent
+    // declarations can chain off it (offset math) and name resolution
+    // can find it.
+    parser_scope_push(
+        parser_new_scope_entity(var_node, var_node->var.aoffset, 0),
+        var_node->var.type.size);
 
     node_push(var_node);
 }
