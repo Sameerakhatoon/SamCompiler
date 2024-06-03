@@ -12,9 +12,10 @@ extern struct node* parser_current_body;
 
 // ch55: history flags carried through nested parses.
 enum {
-    HISTORY_FLAG_INSIDE_UNION    = 0b00000001,
-    HISTORY_FLAG_IS_UPWARD_STACK = 0b00000010,
-    HISTORY_FLAG_IS_GLOBAL_SCOPE = 0b00000100,
+    HISTORY_FLAG_INSIDE_UNION     = 0b00000001,
+    HISTORY_FLAG_IS_UPWARD_STACK  = 0b00000010,
+    HISTORY_FLAG_IS_GLOBAL_SCOPE  = 0b00000100,
+    HISTORY_FLAG_INSIDE_STRUCTURE = 0b00001000,
 };
 
 // ch57: parser-side scope entity. Each declared variable becomes one
@@ -621,14 +622,32 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
 
 // Global vars don't live on the stack; they get offset 0 and the
 // codegen will emit them into the data segment.
-static int parser_scope_offset_for_global(struct node* node, struct history* history){
+static void parser_scope_offset_for_global(struct node* node, struct history* history){
     (void)node; (void)history;
-    return 0;
+}
+
+// Struct members lay out upward (low to high): each new field starts
+// at the previous field's `stack_offset + size`, then padded up.
+static void parser_scope_offset_for_structure(struct node* node, struct history* history){
+    (void)history;
+    int offset = 0;
+    struct parser_scope_entity* last_entity = scope_last_entity(current_process);
+    if(last_entity){
+        offset += last_entity->stack_offset + last_entity->node->var.type.size;
+        if(variable_node_is_primitive(node)){
+            node->var.padding = padding(offset, node->var.type.size);
+        }
+        node->var.aoffset = offset + node->var.padding;
+    }
 }
 
 static void parser_scope_offset(struct node* node, struct history* history){
     if(history->flags & HISTORY_FLAG_IS_GLOBAL_SCOPE){
         parser_scope_offset_for_global(node, history);
+        return;
+    }
+    if(history->flags & HISTORY_FLAG_INSIDE_STRUCTURE){
+        parser_scope_offset_for_structure(node, history);
         return;
     }
     parser_scope_offset_for_stack(node, history);
