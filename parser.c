@@ -88,6 +88,7 @@ static void          parse_keyword(struct history* history);
 static int           parse_expressionable_single(struct history* history);
 static void          parse_expressionable(struct history* history);
 static int           parse_next(void);
+static void          parse_body(size_t* variable_size, struct history* history);
 
 static struct history* history_begin(int flags){
     struct history* h = calloc(1, sizeof(struct history));
@@ -742,7 +743,17 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
     make_variable_node_and_register(history, dtype, name_token, value_node);
 }
 
+// ch63: handle the symbol case at statement-start. Only `{` is
+// supported for now - opens a brace body. Other symbols still error.
 static void parse_symbol(void){
+    if(token_next_is_symbol('{')){
+        size_t variable_size = 0;
+        struct history* history = history_begin(HISTORY_FLAG_IS_GLOBAL_SCOPE);
+        parse_body(&variable_size, history);
+        struct node* body_node = node_pop();
+        node_push(body_node);
+        return;
+    }
     compiler_error(current_process, "Symbols are not yet supported\n");
 }
 
@@ -1094,6 +1105,10 @@ static int parse_next(void){
 
         case TOKEN_TYPE_KEYWORD:
             parse_keyword_for_global();
+            break;
+
+        case TOKEN_TYPE_SYMBOL:
+            parse_symbol();
             break;
 
         default:
