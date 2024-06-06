@@ -926,35 +926,50 @@ static void parse_body(size_t* variable_size, struct history* history){
     parser_scope_finish();
 }
 
-// ch47: minimally walk `{ ... }` so the parser doesn't get stuck on
-// the brace. Real body parsing arrives in ch48+.
-static void parse_struct_no_new_scope(struct datatype* dtype){
-    (void)dtype;
-    if(!token_is_symbol(token_peek_next(), '{')){
-        return;
+// ch64: real struct body parser. Walks `{...}` via parse_body,
+// builds a NODE_TYPE_STRUCT, attaches an optional name-variable
+// (the `v` in `struct foo {...} v;`), and demands a trailing `;`.
+static void parse_struct_no_new_scope(struct datatype* dtype, bool is_forward_declaration){
+    struct node* body_node = 0;
+    size_t body_variable_size = 0;
+
+    if(!is_forward_declaration){
+        parse_body(&body_variable_size, history_begin(HISTORY_FLAG_INSIDE_STRUCTURE));
+        body_node = node_pop();
     }
-    expect_sym('{');
-    // Skip every token until the matching '}'. Nested braces aren't
-    // expected in the ch47 input ("struct abc {};") but are tolerated
-    // here so we don't pop into the global parse loop with garbage.
-    int depth = 1;
-    while(depth > 0){
-        struct token* t = token_next();
-        if(!t){
-            compiler_error(current_process, "Unterminated struct body\n");
+
+    make_struct_node(dtype->type_str, body_node);
+    struct node* struct_node = node_pop();
+    if(body_node){
+        dtype->size = body_node->body.size;
+    }
+    dtype->struct_node = struct_node;
+
+    // Optional attached variable: `struct foo {...} v;`
+    if(token_peek_next()->type == TOKEN_TYPE_IDENTIFIER){
+        struct token* var_name = token_next();
+        struct_node->flags |= NODE_FLAG_HAS_VARIABLE_COMBINED;
+        // If the struct was anonymous, the variable name becomes the
+        // type name too (so other declarations can refer to it).
+        if(dtype->flags & DATATYPE_FLAG_STRUCT_UNION_NO_NAME){
+            dtype->type_str     = var_name->sval;
+            dtype->flags       &= ~DATATYPE_FLAG_STRUCT_UNION_NO_NAME;
+            struct_node->_struct.name = var_name->sval;
         }
-        if(t->type == TOKEN_TYPE_SYMBOL && t->cval == '{') depth++;
-        if(t->type == TOKEN_TYPE_SYMBOL && t->cval == '}') depth--;
+        make_variable_node_and_register(history_begin(0), dtype, var_name, 0);
+        struct_node->_struct.var = node_pop();
     }
+
+    expect_sym(';');
+    node_push(struct_node);
 }
 
 static void parse_struct(struct datatype* dtype){
-    // `struct foo;` (no `{`) is a forward declaration - skip scope.
     bool is_forward_declaration = !token_is_symbol(token_peek_next(), '{');
     if(!is_forward_declaration){
         parser_scope_new();
     }
-    parse_struct_no_new_scope(dtype);
+    parse_struct_no_new_scope(dtype, is_forward_declaration);
     if(!is_forward_declaration){
         parser_scope_finish();
     }
@@ -980,16 +995,17 @@ static void parse_variable_function_or_struct_union(struct history* history){
     struct datatype dtype;
     parse_datatype(&dtype);
 
-    // ch47: struct / union body, e.g. `struct abc { ... };`
+    // ch64: struct / union body, e.g. `struct abc { ... };`
+    // parse_struct_or_union builds and pushes the struct node and
+    // consumes the trailing `;`. We pop it, register the symbol, push
+    // back so the caller's pop+push pair sees it.
     if(datatype_is_struct_or_union(&dtype) && token_next_is_symbol('{')){
         parse_struct_or_union(&dtype);
-        // Bare `struct abc { ... };` with no declarator after - swallow
-        // the semicolon and bail; nothing to emit here yet (ch48+
-        // builds the real struct node).
-        if(token_next_is_symbol(';')){
-            expect_sym(';');
-            return;
-        }
+
+        struct node* su_node = node_pop();
+        symresolver_build_for_node(current_process, su_node);
+        node_push(su_node);
+        return;
     }
 
     // ch41: swallow the decorative "int" in "long int" / "float int" /
@@ -1121,6 +1137,8 @@ int parse(struct compile_process* process){
     current_process   = process;
     parser_last_token = 0;
     scope_create_root(process);
+    symresolver_initialize(process);
+    symresolver_new_table(process);
     node_set_vector(process->node_vec, process->node_tree_vec);
 
     struct node* node = 0;
