@@ -34,6 +34,13 @@ struct compile_process* compile_process_create(const char* filename, const char*
     process->pos.filename   = filename;
     process->node_vec       = vector_create(sizeof(struct node*));
     process->node_tree_vec  = vector_create(sizeof(struct node*));
+
+    // ch66: kick off the symbol resolver here so anyone creating a
+    // compile_process gets a usable symbol table without parse() having
+    // to do double duty.
+    symresolver_initialize(process);
+    symresolver_new_table(process);
+
     return process;
 
 out_err:
