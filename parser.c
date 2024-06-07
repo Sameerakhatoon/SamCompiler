@@ -477,6 +477,18 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
     parser_datatype_adjust_size_for_secondary(datatype_out, datatype_secondary_token);
 }
 
+// Look up a previously-defined struct by name; returns body size or 0.
+static size_t size_of_struct(const char* struct_name){
+    struct symbol* sym = symresolver_get_symbol(current_process, struct_name);
+    if(!sym){
+        return 0;
+    }
+    assert(sym->type == SYMBOL_TYPE_NODE);
+    struct node* n = sym->data;
+    assert(n->type == NODE_TYPE_STRUCT);
+    return n->_struct.body_n->body.size;
+}
+
 static void parser_datatype_init_type_and_size(struct token* datatype_token,
                                                struct token* datatype_secondary_token,
                                                struct datatype* datatype_out,
@@ -489,10 +501,11 @@ static void parser_datatype_init_type_and_size(struct token* datatype_token,
             parser_datatype_init_type_and_size_for_primitive(datatype_token, datatype_secondary_token, datatype_out);
             break;
         case DATA_TYPE_EXPECT_STRUCT:
-            // ch47: real struct sizing comes later; for now stamp type
-            // + zero size and let parse_struct fill in the rest.
-            datatype_out->type = DATA_TYPE_STRUCT;
-            datatype_out->size = 0;
+            // ch65: look up by name; size is the body's size, and we
+            // remember the defining node so resolvers can walk it.
+            datatype_out->type        = DATA_TYPE_STRUCT;
+            datatype_out->size        = size_of_struct(datatype_token->sval);
+            datatype_out->struct_node = struct_node_for_name(current_process, datatype_token->sval);
             break;
         case DATA_TYPE_EXPECT_UNION:
             datatype_out->type = DATA_TYPE_UNION;
