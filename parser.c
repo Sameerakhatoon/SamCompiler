@@ -959,7 +959,8 @@ static void parse_struct_no_new_scope(struct datatype* dtype, bool is_forward_de
     dtype->struct_node = struct_node;
 
     // Optional attached variable: `struct foo {...} v;`
-    if(token_peek_next()->type == TOKEN_TYPE_IDENTIFIER){
+    // ch68: NULL-safe via token_is_identifier (handles EOF).
+    if(token_is_identifier(token_peek_next())){
         struct token* var_name = token_next();
         struct_node->flags |= NODE_FLAG_HAS_VARIABLE_COMBINED;
         // If the struct was anonymous, the variable name becomes the
