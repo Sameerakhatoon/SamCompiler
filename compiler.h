@@ -398,6 +398,23 @@ struct node {
             bool           padded;
             struct node*   largest_var_node;
         } body;
+
+        // ch71: NODE_TYPE_FUNCTION payload.
+        struct function {
+            int             flags;
+            struct datatype rtype;
+            const char*     name;
+            struct function_arguments {
+                // Vector of struct node* (NODE_TYPE_VARIABLE).
+                struct vector* vector;
+                // Bytes to add to EBP to reach the first argument.
+                size_t stack_addition;
+            } args;
+            // NULL for a prototype; otherwise the body.
+            struct node* body_n;
+            // Total bytes needed for locals.
+            size_t stack_size;
+        } func;
     };
 
     // Composite node payloads grow chapter by chapter.
@@ -563,6 +580,11 @@ enum {
     DATA_SIZE_WORD   = 2,
     DATA_SIZE_DWORD  = 4,
     DATA_SIZE_DDWORD = 8,
+};
+
+// ch71: flags on NODE_TYPE_FUNCTION (.func.flags).
+enum {
+    FUNCTION_NODE_FLAG_IS_NATIVE = 0b00000001,
 };
 
 // Operator precedence table - definitions moved out of expressionable.c
