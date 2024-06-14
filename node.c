@@ -84,7 +84,9 @@ void make_bracket_node(struct node* inner){
 // ch49: the currently-being-parsed body node. The parser writes to it
 // while consuming statements, and binded.owner restores the parent on
 // exit. Exported (not static) because parser.c walks it directly.
-struct node* parser_current_body = 0;
+struct node* parser_current_body     = 0;
+// ch72: same idea for "which function are we inside".
+struct node* parser_current_function = 0;
 
 void make_body_node(struct vector* body_vec, size_t size, bool padded, struct node* largest_var_node){
     node_create(&(struct node){
@@ -137,12 +139,32 @@ struct node* struct_node_for_name(struct compile_process* process, const char* n
     return node;
 }
 
+// ch72: build a NODE_TYPE_FUNCTION. args_vector / body_node may be
+// NULL; the caller fills them in once parsed.
+struct node* make_function_node(struct datatype* ret_type, const char* name,
+                                struct vector* arguments, struct node* body_node){
+    struct node* func_node = node_create(&(struct node){
+        .type                  = NODE_TYPE_FUNCTION,
+        .func.name             = name,
+        .func.args.vector      = arguments,
+        .func.body_n           = body_node,
+        .func.rtype            = *ret_type,
+        // Default stack_addition = sizeof(void*) for the return EIP.
+        .func.args.stack_addition = DATA_SIZE_DDWORD,
+    });
+    return func_node;
+}
+
 // Copy the caller's stack-allocated node onto the heap, push onto the
 // scratch stack, and return the heap pointer. TODO: set binded.owner
 // and binded.function when the parser starts threading the AST.
 struct node* node_create(struct node* _node){
     struct node* node = malloc(sizeof(struct node));
     memcpy(node, _node, sizeof(struct node));
+    // ch72: stamp binded.owner / binded.function so every node knows
+    // where it sits in the tree without the parser threading args.
+    node->binded.owner    = parser_current_body;
+    node->binded.function = parser_current_function;
     node_push(node);
     return node;
 }
