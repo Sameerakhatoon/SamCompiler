@@ -619,25 +619,26 @@ static void make_variable_node(struct datatype* dtype, struct token* name_token,
     });
 }
 
-// ch58/73: compute the variable's stack offset based on the last
-// declared entity in the current (non-global) scope. Local stacks grow
-// downward (negative offsets). Upward-stack call frames (function
-// args) start at 0 above EBP and grow upward.
+// ch58/73/74: stack-offset computation. Locals grow downward
+// (negative). Function args grow upward starting at the function's
+// stack_addition (defaults to 8 = saved EBP + return EIP).
 static void parser_scope_offset_for_stack(struct node* node, struct history* history){
     struct parser_scope_entity* last_entity = parser_scope_last_entity_stop_global_scope();
     bool upward_stack = history->flags & HISTORY_FLAG_IS_UPWARD_STACK;
-    int  vsize = (int)variable_size(node);
-    int  offset = upward_stack ? 0 : -vsize;
+    int offset = -(int)variable_size(node);
+
+    if(upward_stack){
+        // ch74: anchor to the function's stack_addition; subsequent
+        // args step forward by the previous arg's datatype size.
+        size_t stack_addition = function_node_argument_stack_addition(parser_current_function);
+        offset = (int)stack_addition;
+        if(last_entity){
+            offset = (int)datatype_size(&variable_node(last_entity->node)->var.type);
+        }
+    }
 
     if(last_entity){
-        if(upward_stack){
-            // First arg sits at last->offset + last->size; we record
-            // the new arg's starting position here.
-            offset = variable_node(last_entity->node)->var.aoffset
-                   + (int)variable_size(last_entity->node);
-        } else {
-            offset += variable_node(last_entity->node)->var.aoffset;
-        }
+        offset += variable_node(last_entity->node)->var.aoffset;
         if(variable_node_is_primitive(node)){
             variable_node(node)->var.padding =
                 padding(upward_stack ? offset : -offset, node->var.type.size);

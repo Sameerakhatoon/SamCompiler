@@ -203,3 +203,11 @@ struct node* variable_node_or_list(struct node* node){
     }
     return variable_node(node);
 }
+
+// ch74: stack_addition is the byte gap between EBP and arg 0. Default
+// from make_function_node is DWORD; +DWORD if return type is
+// struct/union by value.
+size_t function_node_argument_stack_addition(struct node* node){
+    assert(node->type == NODE_TYPE_FUNCTION);
+    return node->func.args.stack_addition;
+}
