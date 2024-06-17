@@ -362,6 +362,11 @@ struct node {
             const char*  op;
         } exp;
 
+        // ch77: NODE_TYPE_EXPRESSION_PARENTHESES wraps one inner exp.
+        struct parenthesis {
+            struct node* exp;
+        } parenthesis;
+
         struct var {
             struct datatype type;
             // ch53: bytes of padding to insert before this variable
@@ -480,6 +485,10 @@ struct node* struct_node_for_name(struct compile_process* process, const char* n
 
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);
+// ch77: wrap an inner expression in NODE_TYPE_EXPRESSION_PARENTHESES.
+void         make_exp_parentheses_node(struct node* exp_node);
+bool         node_is_expression_or_parentheses(struct node* node);
+bool         node_is_value_type(struct node* node);
 // ch44: build a NODE_TYPE_BRACKET wrapping a single inner expression.
 void         make_bracket_node(struct node* inner);
 // ch49: build a NODE_TYPE_BODY around a statement vector.

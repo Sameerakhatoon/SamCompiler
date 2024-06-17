@@ -11,6 +11,9 @@ extern struct expressionable_op_precedence_group op_precedence[TOTAL_OPERATOR_GR
 extern struct node* parser_current_body;
 extern struct node* parser_current_function;
 
+// ch77: a NODE_TYPE_BLANK sentinel for empty `()`.
+static struct node* parser_blank_node;
+
 // ch55: history flags carried through nested parses.
 enum {
     HISTORY_FLAG_INSIDE_UNION     = 0b00000001,
@@ -91,6 +94,10 @@ static int           parse_expressionable_single(struct history* history);
 static void          parse_expressionable(struct history* history);
 static int           parse_next(void);
 static void          parse_body(size_t* variable_size, struct history* history);
+static void          expect_op(const char* op);
+static bool          token_next_is_symbol(char c);
+static bool          token_next_is_operator(const char* op);
+static struct token* token_peek_next(void);
 
 static struct history* history_begin(int flags){
     struct history* h = calloc(1, sizeof(struct history));
@@ -265,8 +272,53 @@ static void parse_exp_normal(struct history* history){
     node_push(exp_node);
 }
 
+// ch77: after a `(`...`)` is parsed, if the next token is an
+// operator, keep parsing - lets `(50+20)+30` reduce as one expression
+// instead of stopping after the close paren.
+static void parser_deal_with_additional_expression(void){
+    struct token* t = token_peek_next();
+    if(t && t->type == TOKEN_TYPE_OPERATOR){
+        parse_expressionable(history_begin(0));
+    }
+}
+
+// ch77: parse `(...)`. Two flavours:
+//   plain `(expr)`     -> NODE_TYPE_EXPRESSION_PARENTHESES.
+//   `callee(args)`     -> NODE_TYPE_EXPRESSION with op "()", left =
+//                         the callee that was already on the stack,
+//                         right = the inner expression (or BLANK).
+static void parse_for_parentheses(struct history* history){
+    expect_op("(");
+    struct node* left_node = 0;
+    struct node* tmp_node  = node_peek_or_null();
+    if(tmp_node && node_is_value_type(tmp_node)){
+        left_node = tmp_node;
+        node_pop();
+    }
+
+    struct node* exp_node = parser_blank_node;
+    if(!token_next_is_symbol(')')){
+        parse_expressionable_root(history_begin(0));
+        exp_node = node_pop();
+    }
+    expect_sym(')');
+
+    make_exp_parentheses_node(exp_node);
+
+    if(left_node){
+        struct node* parentheses_node = node_pop();
+        make_exp_node(left_node, parentheses_node, "()");
+    }
+
+    parser_deal_with_additional_expression();
+}
+
 static int parse_exp(struct history* history){
-    parse_exp_normal(history);
+    if(S_EQ(token_peek_next()->sval, "(")){
+        parse_for_parentheses(history);
+    } else {
+        parse_exp_normal(history);
+    }
     return 0;
 }
 
@@ -1256,6 +1308,9 @@ int parse(struct compile_process* process){
     scope_create_root(process);
     // ch66: symresolver_initialize now happens in compile_process_create.
     node_set_vector(process->node_vec, process->node_tree_vec);
+    // ch77: allocate the BLANK sentinel used by empty `()`.
+    parser_blank_node = node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+    node_pop();  // BLANK is referenced by pointer, not via the stack.
 
     struct node* node = 0;
     vector_set_peek_pointer(process->token_vec, 0);
