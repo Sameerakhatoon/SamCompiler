@@ -413,6 +413,13 @@ static void expect_op(const char* op){
     }
 }
 
+static void expect_keyword(const char* keyword){
+    struct token* next_token = token_next();
+    if(!next_token || next_token->type != TOKEN_TYPE_KEYWORD || !S_EQ(next_token->sval, keyword)){
+        compiler_error(current_process, "Expecting the keyword %s but something else was provided\n", keyword);
+    }
+}
+
 // Consume the datatype keyword + (optional) secondary primitive (the
 // "int" in "long int", say) and hand both back to the caller.
 static void parser_get_datatype_tokens(struct token** datatype_token,
@@ -1213,10 +1220,29 @@ static void parse_variable_function_or_struct_union(struct history* history){
     expect_sym(';');
 }
 
+// ch78: parse `if (cond) <body>`. ch79 will chain `else if` / `else`.
+static void parse_if_stmt(struct history* history){
+    expect_keyword("if");
+    expect_op("(");
+    parse_expressionable_root(history);
+    expect_sym(')');
+
+    struct node* cond_node = node_pop();
+    size_t var_size = 0;
+    parse_body(&var_size, history);
+    struct node* body_node = node_pop();
+    make_if_node(cond_node, body_node, 0);
+}
+
 static void parse_keyword(struct history* history){
     struct token* token = token_peek_next();
     if(is_keyword_variable_modifier(token->sval) || keyword_is_datatype(token->sval)){
         parse_variable_function_or_struct_union(history);
+        return;
+    }
+
+    if(S_EQ(token->sval, "if")){
+        parse_if_stmt(history);
         return;
     }
 }
