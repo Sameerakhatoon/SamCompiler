@@ -406,6 +406,10 @@ struct node {
 
         // ch78+: control-flow statements share this payload.
         struct statement {
+            // ch81: `return [expr];`. NULL exp means bare `return;`.
+            struct return_stmt {
+                struct node* exp;
+            } return_stmt;
             struct if_stmt {
                 struct node* cond_node;
                 struct node* body_node;
@@ -515,6 +519,8 @@ struct node* make_function_node(struct datatype* ret_type, const char* name, str
 void         make_if_node(struct node* cond_node, struct node* body_node, struct node* next_node);
 // ch79: build a NODE_TYPE_STATEMENT_ELSE.
 void         make_else_node(struct node* body_node);
+// ch81: build a NODE_TYPE_STATEMENT_RETURN.
+void         make_return_node(struct node* exp_node);
 
 bool         node_is_expressionable(struct node* node);
 struct node* node_peek_expressionable_or_null(void);
