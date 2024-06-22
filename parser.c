@@ -1267,6 +1267,46 @@ static void parse_if_stmt(struct history* history){
     make_if_node(cond_node, body_node, parse_else_or_else_if(history));
 }
 
+// ch82: a `for` part that ends with `;` (init / cond). Returns true if
+// it actually parsed an expression; false for empty.
+static bool parse_for_loop_part(struct history* history){
+    if(token_next_is_symbol(';')){
+        token_next();   // eat `;`
+        return false;
+    }
+    parse_expressionable_root(history);
+    expect_sym(';');
+    return true;
+}
+
+// ch82: the `loop` part terminates with `)`. Returns true if non-empty.
+static bool parse_for_loop_part_loop(struct history* history){
+    if(token_next_is_symbol(')')){
+        return false;
+    }
+    parse_expressionable_root(history);
+    return true;
+}
+
+static void parse_for_stmt(struct history* history){
+    struct node* init_node = 0;
+    struct node* cond_node = 0;
+    struct node* loop_node = 0;
+    struct node* body_node = 0;
+
+    expect_keyword("for");
+    expect_op("(");
+    if(parse_for_loop_part(history))      init_node = node_pop();
+    if(parse_for_loop_part(history))      cond_node = node_pop();
+    if(parse_for_loop_part_loop(history)) loop_node = node_pop();
+    expect_sym(')');
+
+    size_t var_size = 0;
+    parse_body(&var_size, history);
+    body_node = node_pop();
+    make_for_node(init_node, cond_node, loop_node, body_node);
+}
+
 // ch81: `return [expr];`. Bare `return;` -> return-node with NULL exp.
 static void parse_return(struct history* history){
     expect_keyword("return");
@@ -1293,6 +1333,10 @@ static void parse_keyword(struct history* history){
     }
     if(S_EQ(token->sval, "if")){
         parse_if_stmt(history);
+        return;
+    }
+    if(S_EQ(token->sval, "for")){
+        parse_for_stmt(history);
         return;
     }
 }

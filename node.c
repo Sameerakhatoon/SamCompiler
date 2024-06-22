@@ -242,6 +242,17 @@ void make_return_node(struct node* exp_node){
     });
 }
 
+void make_for_node(struct node* init_node, struct node* cond_node,
+                   struct node* loop_node, struct node* body_node){
+    node_create(&(struct node){
+        .type                    = NODE_TYPE_STATEMENT_FOR,
+        .stmt.for_stmt.init_node = init_node,
+        .stmt.for_stmt.cond_node = cond_node,
+        .stmt.for_stmt.loop_node = loop_node,
+        .stmt.for_stmt.body_node = body_node,
+    });
+}
+
 bool node_is_expression_or_parentheses(struct node* node){
     return node && (node->type == NODE_TYPE_EXPRESSION_PARENTHESES
                  || node->type == NODE_TYPE_EXPRESSION);
