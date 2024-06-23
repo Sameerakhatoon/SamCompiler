@@ -313,9 +313,26 @@ static void parse_for_parentheses(struct history* history){
     parser_deal_with_additional_expression();
 }
 
+// ch90: `cond ? true : false`. Caller has already left `cond` on the
+// node stack.
+static void parse_for_tenary(struct history* history){
+    struct node* condition_node = node_pop();
+    expect_op("?");
+    parse_expressionable_root(history_down(history, history->flags));
+    struct node* true_result_node = node_pop();
+    expect_sym(':');
+    parse_expressionable_root(history_down(history, history->flags));
+    struct node* false_result_node = node_pop();
+    make_tenary_node(true_result_node, false_result_node);
+    struct node* tenary_node = node_pop();
+    make_exp_node(condition_node, tenary_node, "?");
+}
+
 static int parse_exp(struct history* history){
     if(S_EQ(token_peek_next()->sval, "(")){
         parse_for_parentheses(history);
+    } else if(S_EQ(token_peek_next()->sval, "?")){
+        parse_for_tenary(history);
     } else {
         parse_exp_normal(history);
     }
