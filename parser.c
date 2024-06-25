@@ -98,6 +98,8 @@ static void          expect_op(const char* op);
 static bool          token_next_is_symbol(char c);
 static bool          token_next_is_operator(const char* op);
 static struct token* token_peek_next(void);
+static void          parse_datatype(struct datatype* dtype);
+static void          parse_for_cast(void);
 
 static struct history* history_begin(int flags){
     struct history* h = calloc(1, sizeof(struct history));
@@ -289,6 +291,13 @@ static void parser_deal_with_additional_expression(void){
 //                         right = the inner expression (or BLANK).
 static void parse_for_parentheses(struct history* history){
     expect_op("(");
+    // ch93: `(int) x` - a keyword right after the open paren means
+    // this is a cast expression, not a parenthesised value.
+    if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_KEYWORD){
+        parse_for_cast();
+        return;
+    }
+
     struct node* left_node = 0;
     struct node* tmp_node  = node_peek_or_null();
     if(tmp_node && node_is_value_type(tmp_node)){
@@ -326,6 +335,16 @@ static void parse_for_tenary(struct history* history){
     make_tenary_node(true_result_node, false_result_node);
     struct node* tenary_node = node_pop();
     make_exp_node(condition_node, tenary_node, "?");
+}
+
+// ch93: `(T) operand`. Opening `(` already consumed by caller.
+static void parse_for_cast(void){
+    struct datatype dtype = {0};
+    parse_datatype(&dtype);
+    expect_sym(')');
+    parse_expressionable(history_begin(0));
+    struct node* operand_node = node_pop();
+    make_cast_node(&dtype, operand_node);
 }
 
 // ch92: `arr[index]`. Pops the array as the left side, eats `[`,

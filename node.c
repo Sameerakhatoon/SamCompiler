@@ -321,6 +321,14 @@ void make_tenary_node(struct node* true_node, struct node* false_node){
     });
 }
 
+void make_cast_node(struct datatype* dtype, struct node* operand_node){
+    node_create(&(struct node){
+        .type         = NODE_TYPE_CAST,
+        .cast.dtype   = *dtype,
+        .cast.operand = operand_node,
+    });
+}
+
 bool node_is_expression_or_parentheses(struct node* node){
     return node && (node->type == NODE_TYPE_EXPRESSION_PARENTHESES
                  || node->type == NODE_TYPE_EXPRESSION);
