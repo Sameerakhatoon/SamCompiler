@@ -1465,6 +1465,10 @@ static void parse_case(struct history* history){
 
     struct node* case_node = node_pop();
     parser_register_case(history, case_node);
+    // G03: book forgets to push the case node back, so the enclosing
+    // body's `node_pop()` blows up on the first `case` it sees. Push
+    // it back so the case appears as a body statement too.
+    node_push(case_node);
 }
 
 static void parse_default(struct history* history){
