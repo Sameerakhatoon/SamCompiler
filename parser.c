@@ -672,6 +672,18 @@ static size_t size_of_struct(const char* struct_name){
     return n->_struct.body_n->body.size;
 }
 
+// ch99: union version of size_of_struct.
+static size_t size_of_union(const char* union_name){
+    struct symbol* sym = symresolver_get_symbol(current_process, union_name);
+    if(!sym){
+        return 0;
+    }
+    assert(sym->type == SYMBOL_TYPE_NODE);
+    struct node* n = sym->data;
+    assert(n->type == NODE_TYPE_UNION);
+    return n->_union.body_n->body.size;
+}
+
 static void parser_datatype_init_type_and_size(struct token* datatype_token,
                                                struct token* datatype_secondary_token,
                                                struct datatype* datatype_out,
@@ -691,8 +703,10 @@ static void parser_datatype_init_type_and_size(struct token* datatype_token,
             datatype_out->struct_node = struct_node_for_name(current_process, datatype_token->sval);
             break;
         case DATA_TYPE_EXPECT_UNION:
-            datatype_out->type = DATA_TYPE_UNION;
-            datatype_out->size = 0;
+            // ch99: real union lookup now lands.
+            datatype_out->type        = DATA_TYPE_UNION;
+            datatype_out->size        = size_of_union(datatype_token->sval);
+            datatype_out->struct_node = union_node_for_name(current_process, datatype_token->sval);
             break;
         default:
             compiler_error(current_process, "BUG: Unsupported datatype expectation\n");
@@ -1279,6 +1293,44 @@ static void parse_struct(struct datatype* dtype){
     }
 }
 
+// ch99: parse_union_no_scope mirrors parse_struct_no_new_scope but
+// runs the body with HISTORY_FLAG_INSIDE_UNION so the body layout
+// code keeps the largest field's size instead of summing.
+static void parse_union_no_scope(struct datatype* dtype, bool is_forward_declaration){
+    struct node* body_node = 0;
+    size_t body_variable_size = 0;
+    if(!is_forward_declaration){
+        parse_body(&body_variable_size, history_begin(HISTORY_FLAG_INSIDE_UNION));
+        body_node = node_pop();
+    }
+
+    make_union_node(dtype->type_str, body_node);
+    struct node* union_node = node_pop();
+    if(body_node){
+        dtype->size = body_node->body.size;
+    }
+    if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_IDENTIFIER){
+        struct token* var_name = token_next();
+        union_node->flags |= NODE_FLAG_HAS_VARIABLE_COMBINED;
+        make_variable_node_and_register(history_begin(0), dtype, var_name, 0);
+        union_node->_union.var = node_pop();
+    }
+
+    expect_sym(';');
+    node_push(union_node);
+}
+
+static void parse_union(struct datatype* dtype){
+    bool is_forward_declaration = !token_is_symbol(token_peek_next(), '{');
+    if(!is_forward_declaration){
+        parser_scope_new();
+    }
+    parse_union_no_scope(dtype, is_forward_declaration);
+    if(!is_forward_declaration){
+        parser_scope_finish();
+    }
+}
+
 // ch73: parse a function's argument list (everything between the
 // already-consumed `(` and the upcoming `)`).
 static struct vector* parse_function_arguments(struct history* history){
@@ -1311,7 +1363,8 @@ static void parse_struct_or_union(struct datatype* dtype){
             parse_struct(dtype);
             break;
         case DATA_TYPE_UNION:
-            // ch48+ adds union parsing; nothing here for now.
+            // ch99: real union body now parses.
+            parse_union(dtype);
             break;
         default:
             compiler_error(current_process,
