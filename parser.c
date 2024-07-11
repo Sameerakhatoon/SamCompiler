@@ -1321,6 +1321,13 @@ static void parse_struct_or_union(struct datatype* dtype){
 
 // ch33 entry. ch34+ does the variable / function / struct dispatch
 // off the parsed datatype.
+// ch98: `struct dog;` - parse the structure as a forward declaration.
+// We delegate to parse_struct; the lack of a `{` body causes
+// make_struct_node to set NODE_FLAG_IS_FORWARD_DECLARATION.
+static void parse_forward_declaration(struct datatype* dtype){
+    parse_struct(dtype);
+}
+
 static void parse_variable_function_or_struct_union(struct history* history){
     struct datatype dtype;
     parse_datatype(&dtype);
@@ -1335,6 +1342,14 @@ static void parse_variable_function_or_struct_union(struct history* history){
         struct node* su_node = node_pop();
         symresolver_build_for_node(current_process, su_node);
         node_push(su_node);
+        return;
+    }
+
+    // ch98: `struct dog;` - forward declaration. The fixup system from
+    // ch96/97 lets later `struct dog* x;` references resolve once the
+    // real body lands.
+    if(token_next_is_symbol(';')){
+        parse_forward_declaration(&dtype);
         return;
     }
 
