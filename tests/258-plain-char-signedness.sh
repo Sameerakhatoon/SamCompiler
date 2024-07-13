@@ -19,7 +19,8 @@ for t in x86_64 aarch64 riscv64; do
         || fail "$t: did not compile"
 done
 assert_contains "$(cat "$tmp/c_x86_64.s")"  "movsx"  "x86_64 loads a plain char signed"
-assert_contains "$(cat "$tmp/c_aarch64.s")" "ldurb"  "aarch64 loads a plain char unsigned"
+# exp64 loads through the address in x0: ldrb, not ldursb.
+assert_contains "$(cat "$tmp/c_aarch64.s")" "ldrb w0" "aarch64 loads a plain char unsigned"
 assert_contains "$(cat "$tmp/c_riscv64.s")" "lbu"    "riscv64 loads a plain char unsigned"
 
 pass

@@ -10,6 +10,8 @@
 static const char* main_link_cmd(const struct target* target);
 static int         main_parse_target(int argc, char** argv, const struct target** target_out);
 
+static const char* main_sysroot;
+
 // The asm is written to a temporary file next to the output and renamed
 // over it only once compilation succeeds, so a failed compile leaves the
 // old output alone. compiler_error() exits from
@@ -77,20 +79,59 @@ static const char* main_link_cmd(const struct target* target){
 }
 
 // `-target=NAME` options come before the positional arguments.
-// Returns how many argv entries they used, or -1 on a bad name.
+// so do `-I<dir>` and `-sysroot=<dir>`. Returns how many argv
+// entries they used, or -1 on a bad name.
 static int main_parse_target(int argc, char** argv, const struct target** target_out){
     int used = 0;
-    for(int i = 1; i < argc && strncmp(argv[i], "-target=", 8) == 0; i++){
-        const char* name = argv[i] + 8;
-        const struct target* target = target_for_name(name);
-        if(!target){
-            fprintf(stderr, "Unknown target %s, expected x86, x86_64, aarch64 or riscv64\n", name);
-            return -1;
+    for(int i = 1; i < argc && argv[i][0] == '-'; i++){
+        if(strncmp(argv[i], "-target=", 8) == 0){
+            const char* name = argv[i] + 8;
+            const struct target* target = target_for_name(name);
+            if(!target){
+                fprintf(stderr, "Unknown target %s, expected x86, x86_64, aarch64, riscv64, "
+                    "samos-x86_64, samos-aarch64 or samos-riscv64\n", name);
+                return -1;
+            }
+            *target_out = target;
+        } else if(strncmp(argv[i], "-sysroot=", 9) == 0){
+            main_sysroot = argv[i] + 9;
+        } else if(strncmp(argv[i], "-I", 2) == 0 && argv[i][2]){
+            compiler_add_include_dir(argv[i] + 2);
+        } else {
+            break;
         }
-        *target_out = target;
         used++;
     }
     return used;
+}
+
+// a samos target reads its headers from <sysroot>/include, then
+// SamCompiler's own pc_includes (stdarg.h, stddef.h, stdint.h,
+// stdbool.h), found next to this binary rather than in the working
+// directory. Nothing from /usr/include.
+static int main_setup_samos(const struct target* target){
+    if(!main_sysroot){
+        main_sysroot = getenv("SAMOS_SYSROOT");
+    }
+    if(!main_sysroot || !main_sysroot[0]){
+        fprintf(stderr, "Target %s needs -sysroot=DIR or SAMOS_SYSROOT (DIR/include, DIR/lib)\n", target->name);
+        return -1;
+    }
+    static char sysroot_include[PATH_MAX];
+    static char own_includes[PATH_MAX];
+    snprintf(sysroot_include, sizeof(sysroot_include), "%s/include", main_sysroot);
+    compiler_add_include_dir(sysroot_include);
+
+    ssize_t n = readlink("/proc/self/exe", own_includes, sizeof(own_includes) - 32);
+    if(n > 0){
+        own_includes[n] = 0;
+        char* slash = strrchr(own_includes, '/');
+        if(slash){
+            strcpy(slash, "/pc_includes");
+            compiler_add_include_dir(own_includes);
+        }
+    }
+    return 0;
 }
 
 // ch143: CLI driver. Reads input/output paths from argv and decides
@@ -112,6 +153,9 @@ int main(int argc, char** argv){
         return 1;
     }
     target_set_current(target);
+    if(target->samos && main_setup_samos(target) < 0){
+        return 1;
+    }
 
     if(argc > 1){ input_file  = argv[1]; }
     if(argc > 2){ output_file = argv[2]; }
@@ -165,7 +209,7 @@ int main(int argc, char** argv){
         char quoted_output[PATH_MAX * 4 + 3];
         char quoted_object[PATH_MAX * 4 + 3];
         char asm_cmd[sizeof(quoted_output) * 2 + 64];
-        char link_cmd[sizeof(quoted_output) * 2 + 64];
+        char link_cmd[sizeof(quoted_output) * 6 + 256];
         char nasm_cmd[sizeof(asm_cmd) + sizeof(link_cmd) + 8];
         snprintf(nasm_output_file, sizeof(nasm_output_file), "%s.o", output_file);
         if(!main_shell_quote(output_file, quoted_output, sizeof(quoted_output)) ||
@@ -177,7 +221,16 @@ int main(int argc, char** argv){
         if(compile_flags & COMPILE_PROCESS_EXPORT_AS_OBJECT){
             snprintf(nasm_cmd, sizeof(nasm_cmd), "%s", asm_cmd);
         } else {
-            snprintf(link_cmd, sizeof(link_cmd), main_link_cmd(target), quoted_object, quoted_output);
+            if(target->samos){
+                char quoted_sysroot[PATH_MAX * 4 + 3];
+                if(!main_shell_quote(main_sysroot, quoted_sysroot, sizeof(quoted_sysroot))){
+                    fprintf(stderr, "The sysroot path %s is too long\n", main_sysroot);
+                    return 1;
+                }
+                snprintf(link_cmd, sizeof(link_cmd), target->link_cmd, quoted_sysroot, quoted_object, quoted_output);
+            } else {
+                snprintf(link_cmd, sizeof(link_cmd), main_link_cmd(target), quoted_object, quoted_output);
+            }
             snprintf(nasm_cmd, sizeof(nasm_cmd), "%s && %s", asm_cmd, link_cmd);
         }
         printf("%s\n", nasm_cmd);

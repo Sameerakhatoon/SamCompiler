@@ -741,7 +741,9 @@ static void parse_for_tenary(struct history* history){
     parse_expressionable_root(history_down(history, history->flags));
     struct node* true_result_node = node_pop();
     expect_sym(':');
-    parse_expressionable_root(history_down(history, history->flags));
+    // The false branch is a conditional expression, so it ends at a
+    // comma: `f(c ? a : b, x)` has two arguments.
+    parse_expressionable_root(history_down(history, history->flags | HISTORY_FLAG_NO_COMMA_OPERATOR));
     struct node* false_result_node = node_pop();
     make_tenary_node(true_result_node, false_result_node);
     struct node* tenary_node = node_pop();
@@ -749,9 +751,16 @@ static void parse_for_tenary(struct history* history){
 }
 
 // ch93: `(T) operand`. Opening `(` already consumed by caller.
+static bool          parser_next_is_function_pointer(void);
+static struct token* parser_function_pointer_declarator(struct datatype* dtype);
+
 static void parse_for_cast(void){
     struct datatype dtype = {0};
     parse_datatype(&dtype);
+    // a function pointer type, `(void (*)(void))addr`.
+    if(parser_next_is_function_pointer()){
+        parser_function_pointer_declarator(&dtype);
+    }
     // `(int[]){ 1, 2 }`: the abstract declarator's brackets.
     if(token_next_is_operator("[")){
         struct array_brackets* brackets = parse_array_brackets(history_begin(0));
@@ -784,7 +793,9 @@ static void parse_for_array(struct history* history){
         node_pop();
     }
     expect_op("[");
-    parse_expressionable_root(history);
+    // The index is a whole expression of its own, also inside a unary's
+    // operand (`&a[i & 1]`).
+    parse_expressionable_root(history_begin(0));
     expect_sym(']');
     struct node* exp_node = node_pop();
     if(left_node && left_node->type == NODE_TYPE_STRING){
@@ -969,8 +980,17 @@ static void expect_keyword(const char* keyword){
 
 // Consume the datatype keyword + (optional) secondary primitive (the
 // "int" in "long int", say) and hand both back to the caller.
+// `unsigned` or `signed` alone is an int (`unsigned base`).
+static struct token parser_implicit_int = { .type = TOKEN_TYPE_KEYWORD, .sval = "int" };
+static bool         parser_sign_given;
+
 static void parser_get_datatype_tokens(struct token** datatype_token,
                                        struct token** datatype_secondary_token){
+    struct token* next = token_peek_next();
+    if(parser_sign_given && !(next && next->type == TOKEN_TYPE_KEYWORD && keyword_is_datatype(next->sval))){
+        *datatype_token = &parser_implicit_int;
+        return;
+    }
     *datatype_token = token_next();
     struct token* next_token = token_peek_next();
     if(token_is_primitive_keyword(next_token)){
@@ -1265,8 +1285,9 @@ static void parse_datatype_type(struct datatype* dtype){
         dtype->flags |= DATATYPE_FLAG_IS_POINTER;
     }
 
+    // once. A second parser_datatype_init_type_and_size here
+    // undid the `long long` clamp: sizeof(long long) was 16.
     parser_datatype_init(datatype_token, datatype_secondary_token, dtype, pointer_depth, expected_type);
-    parser_datatype_init_type_and_size(datatype_token, datatype_secondary_token, dtype, pointer_depth, expected_type);
 }
 
 // modifier* type modifier*
@@ -1275,7 +1296,10 @@ static void parse_datatype(struct datatype* dtype){
     dtype->flags |= DATATYPE_FLAG_IS_SIGNED;
 
     bool sign_given = parse_datatype_modifiers(dtype);
+    // `unsigned` or `signed` alone is an int (parser_get_datatype_tokens).
+    parser_sign_given = sign_given;
     parse_datatype_type(dtype);
+    parser_sign_given = false;
     sign_given |= parse_datatype_modifiers(dtype);
     // Plain char is unsigned on aarch64 and riscv64; it was
     // always signed, so `char c = 200` read back as -56 there.
@@ -1308,6 +1332,7 @@ static struct node* parser_bool_value(struct node* value){
 // `int` is a hard error.
 static bool parser_is_int_valid_after_datatype(struct datatype* dtype){
     return dtype->type == DATA_TYPE_LONG
+        || dtype->type == DATA_TYPE_SHORT
         || dtype->type == DATA_TYPE_FLOAT
         || dtype->type == DATA_TYPE_DOUBLE;
 }
@@ -1505,7 +1530,11 @@ static void parser_scope_offset_for_global(struct node* node, struct history* hi
 static void parser_scope_offset_for_structure(struct node* node, struct history* history){
     (void)history;
     int offset = 0;
-    struct parser_scope_entity* last_entity = scope_last_entity(current_process);
+    // the previous member of this struct only. scope_last_entity
+    // also searches the enclosing scopes, so the first member came
+    // after the last global (`int g; struct s { long a; };` gave the
+    // struct 4 bytes of padding plus alignment in its size).
+    struct parser_scope_entity* last_entity = vector_back_ptr_or_null(current_process->scope.current->entities);
     if(last_entity){
         struct node* last = variable_node(last_entity->node);
         offset = last->var.aoffset + (int)variable_size(last);
@@ -1652,6 +1681,47 @@ static struct array_brackets* parse_array_brackets(struct history* history){
         array_brackets_add(brackets, bracket_node);
     }
     return brackets;
+}
+
+// `ret (*name)(params)`, a pointer to a function, as a struct
+// member, a parameter or a variable. The type is a pointer to ret
+// marked DATATYPE_FLAG_IS_FUNCTION_POINTER; a call through it returns
+// ret. The parameter list is skipped: a call passes what it is given.
+static bool parser_next_is_function_pointer(void){
+    if(!token_next_is_operator("(")){
+        return false;
+    }
+    vector_save(current_process->token_vec);
+    token_next();
+    bool star = token_is_operator(token_peek_next(), "*");
+    vector_restore(current_process->token_vec);
+    return star;
+}
+
+static struct token* parser_function_pointer_declarator(struct datatype* dtype){
+    expect_op("(");
+    expect_op("*");
+    struct token* name_token = 0;
+    if(token_is_identifier(token_peek_next())){
+        name_token = token_next();
+    }
+    expect_sym(')');
+    expect_op("(");
+    int depth = 1;
+    while(depth > 0){
+        struct token* token = token_next();
+        if(!token){
+            compiler_error(current_process, "Unterminated function pointer parameter list\n");
+        }
+        if(token_is_operator(token, "(")){
+            depth++;
+        } else if(token->type == TOKEN_TYPE_SYMBOL && token->cval == ')'){
+            depth--;
+        }
+    }
+    dtype->flags |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_FUNCTION_POINTER;
+    dtype->pointer_depth++;
+    return name_token;
 }
 
 // ---- Brace initializers (C11 6.7.9) ----
@@ -2266,7 +2336,9 @@ static void parse_variable_full(struct history* history){
     parse_datatype(&dtype);
 
     struct token* name_token = 0;
-    if(token_is_identifier(token_peek_next())){
+    if(parser_next_is_function_pointer()){
+        name_token = parser_function_pointer_declarator(&dtype);
+    } else if(token_is_identifier(token_peek_next())){
         name_token = token_next();
     }
     parse_variable(&dtype, name_token, history);
@@ -2315,8 +2387,9 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
 
     // For functions returning struct/union by value, the caller pushes
     // a hidden first arg (pointer to result), so the real args start
-    // one slot further along. One target arg slot.
-    if(datatype_is_struct_or_union(ret_type)){
+    // one slot further along. One target arg slot. Not
+    // for a pointer to a struct, which comes back in a register.
+    if(datatype_is_struct_or_union_non_pointer(ret_type)){
         function_node->func.args.stack_addition += current_process->target->arg_slot_size;
     }
 
@@ -2362,7 +2435,45 @@ static void parse_symbol(void){
 
 // One statement: keyword-led (declarations / control-flow) or a bare
 // expression-statement terminated by `;`.
+// `__asm__ [volatile] ("text" [: ...]);`. Basic asm: the
+// strings are one instruction text; clobbers after `:` are read and
+// ignored (nothing lives in registers across a statement), operands
+// are not supported.
+static bool parser_next_is_asm(void){
+    struct token* token = token_peek_next();
+    return token_is_identifier(token) && (S_EQ(token->sval, "__asm__") || S_EQ(token->sval, "asm"));
+}
+
+static void parse_asm(void){
+    token_next();
+    while(token_is_keyword(token_peek_next(), "volatile")
+          || (token_is_identifier(token_peek_next()) && S_EQ(token_peek_next()->sval, "__volatile__"))){
+        token_next();
+    }
+    expect_op("(");
+    struct buffer* text = buffer_create();
+    while(token_peek_next()->type == TOKEN_TYPE_STRING){
+        for(const char* c = token_next()->sval; *c; c++){
+            buffer_write(text, *c);
+        }
+    }
+    buffer_write(text, 0);
+    while(!token_next_is_symbol(')')){
+        struct token* token = token_next();
+        if(token_is_operator(token, "(")){
+            compiler_error(current_process, "asm operands are not supported, only clobbers\n");
+        }
+    }
+    expect_sym(')');
+    expect_sym(';');
+    node_create(&(struct node){ .type = NODE_TYPE_ASM, .sval = buffer_ptr(text) });
+}
+
 static void parse_statement(struct history* history){
+    if(parser_next_is_asm()){
+        parse_asm();
+        return;
+    }
     if(!token_peek_next()){
         compiler_error(current_process, "Expected a statement or '}' but found the end of the file\n");
     }
@@ -2849,6 +2960,16 @@ static void parse_variable_function_or_struct_union(struct history* history){
     // and silently drops the int.
     parser_ignore_int(&dtype);
 
+    if(parser_next_is_function_pointer()){
+        struct token* name_token = parser_function_pointer_declarator(&dtype);
+        if(!name_token){
+            compiler_error(current_process, "Expecting a name for the function pointer\n");
+        }
+        parse_variable(&dtype, name_token, history);
+        expect_sym(';');
+        return;
+    }
+
     // ch42: `int abc;` - the next token must be the variable name.
     struct token* name_token = token_next();
     if(name_token->type != TOKEN_TYPE_IDENTIFIER){
@@ -3103,7 +3224,7 @@ static void parse_for_stmt(struct history* history){
     if(declares){
         parser_scope_new();
         resolver_default_new_scope(current_process->resolver, 0);
-        parse_variable_function_or_struct_union(history);
+        parse_variable_function_or_struct_union(history_down(history, history->flags));
         init_node = node_pop();
         if(init_node->type != NODE_TYPE_VARIABLE && init_node->type != NODE_TYPE_VARIABLE_LIST){
             compiler_error(current_process, "A for loop can only declare variables\n");
@@ -3111,11 +3232,15 @@ static void parse_for_stmt(struct history* history){
         size_t declaration_size = 0;
         parser_append_size_for_node(history, &declaration_size, init_node);
         parser_current_function->func.stack_size += declaration_size;
-    } else if(parse_for_loop_part(history)){
+    } else if(parse_for_loop_part(history_down(history, history->flags))){
         init_node = node_pop();
     }
-    if(parse_for_loop_part(history))      cond_node = node_pop();
-    if(parse_for_loop_part_loop(history)) loop_node = node_pop();
+    // Each part parses on its own copy of the history. The expression
+    // parser sets flags on the one it is given, and the body read the
+    // loop part's EXPRESSION_FLAG_RIGHT_NODE as HISTORY_FLAG_INSIDE_UNION:
+    // its locals were sized as a union and the frame left them out.
+    if(parse_for_loop_part(history_down(history, history->flags)))      cond_node = node_pop();
+    if(parse_for_loop_part_loop(history_down(history, history->flags))) loop_node = node_pop();
     expect_sym(')');
 
     size_t var_size = 0;

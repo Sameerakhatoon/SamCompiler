@@ -60,7 +60,8 @@ struct compile_process* compile_include_for_include_dir(const char* include_dir,
         compiler_error(parent_process, "Include path %s/%s is longer than %i characters", include_dir, filename, PATH_MAX - 1);
     }
     if(file_exists(tmp_filename)){
-        filename = tmp_filename;
+        // The process keeps the name for its error positions.
+        filename = strdup(tmp_filename);
     }
     struct compile_process* process = compile_process_create(filename, NULL, parent_process->flags, parent_process);
     if(!process){
@@ -93,6 +94,19 @@ struct compile_process* compile_include_for_include_dir(const char* include_dir,
  */
 struct compile_process* compile_include(const char* filename, struct compile_process* parent_process){
     struct compile_process* new_process = NULL;
+    // the including file's own directory first, as for a quoted
+    // include in C (the lexer does not tell "x.h" from <x.h>).
+    char own_dir[PATH_MAX];
+    char own_path[PATH_MAX + 256];
+    snprintf(own_dir, sizeof(own_dir), "%s", parent_process->cfile.abs_path);
+    char* slash = strrchr(own_dir, '/');
+    if(slash){
+        *slash = 0;
+        snprintf(own_path, sizeof(own_path), "%s/%s", own_dir, filename);
+        if(file_exists(own_path)){
+            return compile_include_for_include_dir(own_dir, filename, parent_process);
+        }
+    }
     const char* include_dir = compiler_include_dir_begin(parent_process);
     while(include_dir && !new_process){
         new_process = compile_include_for_include_dir(include_dir, filename, parent_process);

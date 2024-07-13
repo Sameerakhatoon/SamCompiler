@@ -142,7 +142,7 @@ static const char* read_number_str(void){
 
 static unsigned long long read_number(void){
     const char* s = read_number_str();
-    return atoll(s);
+    return strtoull(s, 0, 10);
 }
 
 // Peek for an L / f / d suffix. The caller decides whether to consume it.
@@ -398,13 +398,18 @@ static const char* read_op(void){
     buffer_write(buffer, op);
 
     // If the first char isn't a "treated-as-one" op, try to greedily eat
-    // one more char to form a two-char op.
-    if(!op_treated_as_one(op)){
+    // one more char to form a two-char op. `*=` too, and the
+    // three-char `<<=` and `>>=`.
+    char first = op;
+    if(!op_treated_as_one(op) || (op == '*' && peekc() == '=')){
         op = peekc();
         if(is_single_operator(op)){
             buffer_write(buffer, op);
             nextc();
             single_operator = false;
+            if((first == '<' || first == '>') && op == first && peekc() == '='){
+                buffer_write(buffer, nextc());
+            }
         }
     }
 
@@ -650,6 +655,16 @@ char lex_get_escaped_char(char c){
         case '\\':  co = '\\'; break;
         case 't':   co = '\t'; break;
         case '\'':  co = '\''; break;
+        // the rest of C's simple escapes (the shell prints
+        // `\"a b\"` and `\f`); these gave 0, which cut a string short.
+        // '\0' in a char literal still comes out 0 below.
+        case '"':   co = '"';  break;
+        case 'r':   co = '\r'; break;
+        case 'f':   co = '\f'; break;
+        case 'a':   co = '\a'; break;
+        case 'b':   co = '\b'; break;
+        case 'v':   co = '\v'; break;
+        case '?':   co = '?';  break;
     }
     return co;
 }
@@ -742,7 +757,11 @@ struct token* token_make_quote(void){
     if(nextc() != '\''){
         compiler_error(lex_process->compiler, "You opened a quote ' but did not close it with a ' character");
     }
-    return token_create(&(struct token){ .type = TOKEN_TYPE_NUMBER, .cval = c });
+    // A char constant is an int with the value the char has as a plain
+    // char: '\xff' is -1 where char is signed and 255 where it is not
+    // (aarch64, riscv64). The byte alone in cval read as 255 everywhere.
+    long long value = target_current()->plain_char_unsigned ? (long long)(unsigned char)c : (long long)(signed char)c;
+    return token_create(&(struct token){ .type = TOKEN_TYPE_NUMBER, .llnum = value });
 }
 
 struct token* read_next_token(void){

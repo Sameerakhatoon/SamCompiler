@@ -1,5 +1,6 @@
 #include <string.h>
 #include "compiler.h"
+#include "helpers/vector.h"
 
 // Helpers that operate on datatypes from the parser side. ch34 starts
 // it; later chapters keep piling on.
@@ -30,6 +31,22 @@ size_t datatype_element_size(struct datatype* dtype){
         return target_current()->pointer_size;
     }
     return dtype->size;
+}
+
+// the type an array has when used as a value: a pointer to its
+// first element (`char b[5]` -> `char*`, `char* v[4]` -> `char**`).
+struct datatype datatype_array_decay(struct datatype* dtype){
+    struct datatype decayed = *dtype;
+    decayed.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    decayed.flags |= DATATYPE_FLAG_IS_POINTER;
+    decayed.pointer_depth++;
+    return decayed;
+}
+
+// an array not yet indexed down to one element. After a bracket
+// the resolver keeps IS_ARRAY but shrinks array.size to the element.
+bool datatype_is_whole_array(struct datatype* dtype){
+    return (dtype->flags & DATATYPE_FLAG_IS_ARRAY) && dtype->array.size > datatype_element_size(dtype);
 }
 
 // Alignment of a member of this type inside a struct or union. A

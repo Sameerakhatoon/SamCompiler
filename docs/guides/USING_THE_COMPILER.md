@@ -186,12 +186,27 @@ An unknown name is rejected:
 
 ```
 $ ./main -target=sparc tests/golden/inputs/01_return_const.c /tmp/d2
-Unknown target sparc, expected x86, x86_64, aarch64 or riscv64
+Unknown target sparc, expected x86, x86_64, aarch64, riscv64, samos-x86_64, samos-aarch64 or samos-riscv64
 ```
 
 The preprocessor predefines `__x86_64__`, `__aarch64__` or
 `__riscv` (with `__riscv_xlen` = 64) for the 64-bit targets, and
 `__LP64__` on all three; x86 adds none.
+
+`-I<dir>` adds an include directory, searched before the defaults.
+
+### SamOS programs
+
+`-target=samos-x86_64`, `samos-aarch64` and `samos-riscv64` build a
+static ELF for SamOS against a SamOS sysroot (SamOS's Makefile writes
+`build/<arch>/sysroot`), given as `-sysroot=DIR` or `SAMOS_SYSROOT`.
+They predefine `__samos__` as well, take headers from
+`DIR/include` and `pc_includes` only, and link `DIR/lib/crt0.o`, the
+program and `DIR/lib/libsamos.a` with `DIR/lib/user.ld`.
+
+```
+./main -target=samos-riscv64 -sysroot=$SAMOS/build/riscv64/sysroot hello.c HELLO.ELF
+```
 
 That second column is the one you read to debug codegen. The
 first is the one you `./output_file` to run.

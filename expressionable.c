@@ -485,10 +485,27 @@ int expressionable_parse_single_with_flags(struct expressionable* expressionable
     {
         expressionable_parse_single(expressionable);
         void* additional_node = expressionable_node_peek_or_null(expressionable);
-        if (expressionable_callbacks(expressionable)->should_join_nodes(expressionable, node, additional_node))
+        struct expressionable_callbacks* callbacks = expressionable_callbacks(expressionable);
+        if (callbacks->should_join_nodes(expressionable, node, additional_node))
         {
-            void* new_node = expressionable_callbacks(expressionable)->join_nodes(expressionable, node, additional_node);
+            // the parentheses after `defined` take the rest of the
+            // expression with them: `defined(A) || B` arrives as
+            // `(A) || B`. defined applies to the leftmost operand only.
+            void* owner = 0;
+            void* operand = additional_node;
+            while (callbacks->get_node_type(expressionable, operand) == EXPRESSIONABLE_GENERIC_TYPE_EXPRESSION)
+            {
+                owner = operand;
+                operand = callbacks->get_left_node(expressionable, operand);
+            }
+            void* new_node = callbacks->join_nodes(expressionable, node, operand);
             expressionable_node_pop(expressionable);
+            if (owner)
+            {
+                callbacks->set_exp_node(expressionable, owner, new_node, callbacks->get_right_node(expressionable, owner),
+                                        callbacks->get_node_operator(expressionable, owner));
+                new_node = additional_node;
+            }
             node = new_node;
         }
     }

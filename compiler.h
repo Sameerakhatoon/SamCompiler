@@ -440,6 +440,11 @@ struct target {
     // macros the preprocessor predefines for this target,
     // ended by a { 0 } entry.
     const struct target_macro* macros;
+
+    // a SamOS target. Headers come from the SamOS sysroot and
+    // pc_includes, never /usr/include, and link_cmd takes (sysroot,
+    // obj, out): crt0.o, libsamos.a and user.ld from <sysroot>/lib.
+    bool samos;
 };
 
 // what a code generator provides. codegen() calls generate;
@@ -519,6 +524,9 @@ struct compile_process* compile_process_create(const char* filename, const char*
 const char* compiler_include_dir_begin(struct compile_process* process);
 const char* compiler_include_dir_next(struct compile_process* process);
 void        compiler_setup_default_include_directories(struct vector* include_vec);
+// directories the driver adds (-I, the samos sysroot). They come
+// before the defaults; a samos target uses only these.
+void        compiler_add_include_dir(const char* dir);
 struct compile_process* compile_include(const char* filename, struct compile_process* parent_process);
 
 // ch229: helpers.
@@ -594,6 +602,8 @@ enum {
     NODE_TYPE_BRACKET,
     NODE_TYPE_CAST,
     NODE_TYPE_BLANK,
+    // `__asm__ volatile("text");`, the text in sval.
+    NODE_TYPE_ASM,
     // The brace initializer of a global: its leaves in node->init.
     NODE_TYPE_INITIALIZER,
 };
@@ -930,6 +940,8 @@ bool datatype_is_struct_or_union(struct datatype* dtype);
 // ch51: size helpers used by codegen + resolver later.
 size_t datatype_size_for_array_access(struct datatype* dtype);
 size_t datatype_element_size(struct datatype* dtype);
+struct datatype datatype_array_decay(struct datatype* dtype);
+bool   datatype_is_whole_array(struct datatype* dtype);
 size_t datatype_alignment(struct datatype* dtype);
 
 // constant.c: integer constant expressions (C11 6.6).
@@ -1157,6 +1169,60 @@ int                    codegen_aarch64(struct compile_process* process);
 int                    codegen_riscv64(struct compile_process* process);
 struct code_generator* codegenerator_new(struct compile_process* process);
 
+// exp64.c, the expression generator of the 64-bit backends.
+// The backend supplies the machine operations below. R0 (register 0)
+// is the value register, R1 (register 1) the second operand; every
+// value is canonical in 64 bits (signed types sign extended, unsigned
+// zero extended). push/pop use the expression stack and its ledger.
+enum {
+    EXP64_BRANCH_IF_ZERO,
+    EXP64_BRANCH_IF_NOT_ZERO,
+    EXP64_BRANCH_ALWAYS,
+};
+
+struct exp64_ops {
+    void (*push)(struct datatype* dtype);                       // push R0
+    void (*pop)(int reg);                                       // pop into R0 or R1
+    void (*mov_r1)(void);                                       // R1 = R0
+    void (*swap)(void);                                         // R0 <-> R1
+    // Jump to label unless R0 op R1 holds; with op NULL, if R0 is 0.
+    void (*branch_false)(const char* op, bool is_signed, const char* label);
+    void (*imm)(int reg, long long value);
+    void (*frame_address)(int offset);                          // R0 = frame + offset
+    void (*symbol_address)(const char* name);                   // R0 = &name
+    void (*string_address)(const char* str);                    // R0 = the literal's address
+    void (*add_imm)(long long value);                           // R0 += value
+    void (*mul_imm)(int reg, long long value);                  // reg *= value
+    void (*load)(int size, bool is_signed);                     // R0 = *R0
+    void (*store)(int size);                                    // *R1 = R0
+    void (*copy)(int size);                                     // size bytes from [R1] to [R0]
+    void (*zero_frame)(int offset, int size);                   // zero a local
+    void (*extend)(int reg, int size, bool is_signed);          // reg = canonical low `size` bytes
+    void (*binop)(const char* op, int size, bool is_signed);    // R0 = R0 op R1 on size bytes
+    void (*compare)(const char* op, bool is_signed);            // R0 = R0 op R1, 64 bits, 0 or 1
+    void (*unop)(const char* op, int size);                     // - ~ !
+    void (*branch)(int label, int when);
+    void (*label)(int label);
+    // Room for a struct a call returns, on the expression stack.
+    void (*reserve)(int size);
+    // The arguments are pushed, the first on top; the callee is
+    // `symbol`, or (when NULL) pushed under the arguments. With
+    // struct_size the hidden result pointer is the reserved room
+    // under them, and R0 is its address after the call.
+    void (*call)(int arguments, const char* symbol, int struct_size);
+    void (*asm_text)(const char* text);                         // inline asm
+};
+
+void            exp64_begin(const struct exp64_ops* ops, struct compile_process* process);
+void            exp64_set_function(struct node* function);
+bool            exp64_output_muted(void);
+struct datatype exp64_generate(struct node* node);
+struct datatype exp64_push(struct node* node);
+struct datatype exp64_typeof(struct node* node);
+void            exp64_initialize_local(struct node* var);
+void            exp64_condition(struct node* node, const char* false_label);
+struct node*    exp64_static_local(struct resolver_entity* entity, struct node* var);
+
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);
 // ch77: wrap an inner expression in NODE_TYPE_EXPRESSION_PARENTHESES.
@@ -1208,6 +1274,11 @@ int array_multiplier(struct datatype* dtype, int index, int index_value);
 int array_offset(struct datatype* dtype, int index, int index_value);
 // ch62: pass through for VARIABLE_LIST; else unwrap to underlying var.
 struct node* variable_node_or_list(struct node* node);
+
+// initializer.c: the assembler operand of a scalar global's value.
+// Brace initializers are leaves (NODE_TYPE_INITIALIZER, written by
+// codegen_emit_initializer).
+void           initializer_value_asm(struct node* value, const char* (*register_string)(const char* str), char* out, size_t len);
 
 // ch44: array-bracket helpers.
 struct array_brackets* array_brackets_new(void);
@@ -1631,8 +1702,10 @@ enum {
     DATATYPE_FLAG_IS_SECONDARY           = 0b100000000,
     DATATYPE_FLAG_STRUCT_UNION_NO_NAME   = 0b1000000000,
     DATATYPE_FLAG_IS_LITERAL             = 0b10000000000,
+    // a pointer to a function, `int (*f)(int)`.
+    DATATYPE_FLAG_IS_FUNCTION_POINTER    = 0b100000000000,
     // _Bool: an unsigned char that only ever holds 0 or 1.
-    DATATYPE_FLAG_IS_BOOL                = 0b100000000000,
+    DATATYPE_FLAG_IS_BOOL                = 0b1000000000000,
 };
 
 enum {

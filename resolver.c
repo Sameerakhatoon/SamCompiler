@@ -395,6 +395,12 @@ struct resolver_entity* resolver_create_new_entity_for_function_call(struct reso
         return 0;
     }
     entity->dtype = left_operand_entity->dtype;
+    // a call through a function pointer has the pointee's
+    // return type.
+    if(entity->dtype.flags & DATATYPE_FLAG_IS_FUNCTION_POINTER){
+        entity->dtype = *datatype_pointer_reduce(&entity->dtype, 1);
+        entity->dtype.flags &= ~DATATYPE_FLAG_IS_FUNCTION_POINTER;
+    }
     // ch237: stamp the name so codegen can chase native-function
     // entries back to their registered callbacks.
     entity->name  = left_operand_entity->name;
@@ -652,6 +658,9 @@ void resolver_build_function_call_arguments(struct resolver_process* resolver, s
 struct resolver_entity* resolver_follow_function_call(struct resolver_process* resolver, struct resolver_result* result, struct node* node){
     resolver_follow_part(resolver, node->exp.left, result);
     struct resolver_entity* left_entity = resolver_result_peek(result);
+    if(!left_entity){
+        compiler_error(resolver->compiler, "Cannot resolve the function being called\n");
+    }
     struct resolver_entity* func_call_entity = resolver_create_new_entity_for_function_call(result, resolver, left_entity, 0);
     assert(func_call_entity);
     func_call_entity->flags |= RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_NEXT_ENTITY | RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_LEFT_ENTITY;
@@ -664,7 +673,11 @@ struct resolver_entity* resolver_follow_function_call(struct resolver_process* r
 // is an identifier, this is a function call; otherwise it's just a
 // grouped expression.
 struct resolver_entity* resolver_follow_parentheses(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
-    if(node->exp.left->type == NODE_TYPE_IDENTIFIER){
+    // also a call through a function pointer member or element,
+    // `builtins[i].run(argc, argv)`.
+    struct node* left = node->exp.left;
+    if(left->type == NODE_TYPE_IDENTIFIER
+        || (left->type == NODE_TYPE_EXPRESSION && (is_access_node(left) || is_array_node(left)))){
         return resolver_follow_function_call(resolver, result, node);
     }
     return resolver_follow_exp(resolver, node->parenthesis.exp, result);
@@ -1065,7 +1078,19 @@ static void resolver_finalize_result_flags(struct resolver_process* resolver, st
         flags |= RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
     }
 
-    if(does_get_address){
+    // an element read with a variable index (`arr[i]`, or
+    // `tab[i]` of `char* tab[4]`) is left as its address as well; only
+    // a partly indexed array (`m[i]` of `int m[3][4]`) is an address
+    // as a value.
+    if(last_entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET
+       && !(last_entity->flags & RESOLVER_ENTITY_FLAG_IS_POINTER_ARRAY_ENTITY)
+       && last_entity->array.index + 1 >= (int)array_brackets_count(&last_entity->dtype)){
+        flags |= RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+    }
+
+    // a call's result is a value, also when the callee came
+    // through a chain (`tab[1].run(3, 0)`).
+    if(does_get_address || last_entity->type == RESOLVER_ENTITY_TYPE_FUNCTION_CALL){
         flags &= ~RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
     }
     result->flags |= flags;

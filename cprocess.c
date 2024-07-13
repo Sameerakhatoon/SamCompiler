@@ -12,6 +12,15 @@ const char* default_include_dirs[] = {
     "/usr/include",
 };
 
+static struct vector* compiler_extra_include_dirs;
+
+void compiler_add_include_dir(const char* dir){
+    if(!compiler_extra_include_dirs){
+        compiler_extra_include_dirs = vector_create(sizeof(const char*));
+    }
+    vector_push(compiler_extra_include_dirs, &dir);
+}
+
 const char* compiler_include_dir_begin(struct compile_process* process){
     vector_set_peek_pointer(process->include_dirs, 0);
     const char* dir = vector_peek_ptr(process->include_dirs);
@@ -86,8 +95,19 @@ struct compile_process* compile_process_create(const char* filename, const char*
     else{
         process->preprocessor = preprocessor_create(process);
         process->include_dirs = vector_create(sizeof(const char*));
-        // ch229: load the default include directories.
-        compiler_setup_default_include_directories(process->include_dirs);
+        if(compiler_extra_include_dirs){
+            vector_set_peek_pointer(compiler_extra_include_dirs, 0);
+            const char* dir = vector_peek_ptr(compiler_extra_include_dirs);
+            while(dir){
+                vector_push(process->include_dirs, &dir);
+                dir = vector_peek_ptr(compiler_extra_include_dirs);
+            }
+        }
+        // ch229: load the default include directories. Not for
+        // a samos target, whose headers must not be glibc's.
+        if(!process->target->samos){
+            compiler_setup_default_include_directories(process->include_dirs);
+        }
     }
 
     // ch235: resolve the source path to absolute form so include

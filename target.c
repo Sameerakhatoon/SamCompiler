@@ -152,11 +152,107 @@ static const struct target target_riscv64_desc = {
     .macros            = target_riscv64_macros,
 };
 
+// the SamOS targets. The same machines and backends as above,
+// with __samos__ predefined and the program linked static against the
+// SamOS sysroot instead of glibc: <sysroot>/lib/crt0.o (_start and
+// c_start), the program, <sysroot>/lib/libsamos.a (syscall stubs and
+// libc) at 0x400000 by <sysroot>/lib/user.ld. The stdlib in the
+// sysroot is built by gcc; SamCompiler code calls it through the
+// register-argument ABI the 64-bit backends already use.
+static const struct target_macro target_samos_x86_64_macros[] = {
+    { "__x86_64__", 1 },
+    { "__LP64__",   1 },
+    { "__samos__",  1 },
+    { 0 },
+};
+
+static const struct target_macro target_samos_aarch64_macros[] = {
+    { "__aarch64__", 1 },
+    { "__LP64__",    1 },
+    { "__samos__",   1 },
+    { 0 },
+};
+
+static const struct target_macro target_samos_riscv64_macros[] = {
+    { "__riscv",      1 },
+    { "__riscv_xlen", 64 },
+    { "__LP64__",     1 },
+    { "__samos__",    1 },
+    { 0 },
+};
+
+// link_cmd arguments: 1 sysroot, 2 object, 3 output.
+#define SAMOS_LINK_FLAGS "-nostdlib -static -no-pie -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 " \
+    "-T %1$s/lib/user.ld %1$s/lib/crt0.o %2$s %1$s/lib/libsamos.a"
+
+static const struct target target_samos_x86_64_desc = {
+    .name              = "samos-x86_64",
+    .pointer_size      = DATA_SIZE_DDWORD,
+    .long_size         = DATA_SIZE_DDWORD,
+    .stack_slot_size   = DATA_SIZE_DDWORD,
+    .frame_header_size = 16,
+    .arg_slot_size     = DATA_SIZE_DDWORD,
+    .stack_align       = C_STACK_ALIGNMENT,
+    .max_reg_args      = 6,
+    .backend           = &codegen_backend_x86_64,
+    .asm_cmd           = "nasm -f elf64 %s -o %s",
+    // The host gcc only drives ld here: -nostdlib, no crt, no libc.
+    .link_cmd          = "gcc " SAMOS_LINK_FLAGS " -o %3$s",
+    .link_fallback_cmd = 0,
+    .run_cmd           = "",
+    .macros            = target_samos_x86_64_macros,
+    .samos             = true,
+};
+
+static const struct target target_samos_aarch64_desc = {
+    .name              = "samos-aarch64",
+    .pointer_size      = DATA_SIZE_DDWORD,
+    .long_size         = DATA_SIZE_DDWORD,
+    // The same psABI as above: plain char is unsigned.
+    .plain_char_unsigned = true,
+    .stack_slot_size   = 16,
+    .frame_header_size = 16,
+    .arg_slot_size     = DATA_SIZE_DDWORD,
+    .stack_align       = C_STACK_ALIGNMENT,
+    .max_reg_args      = 8,
+    .backend           = &codegen_backend_aarch64,
+    .asm_cmd           = "aarch64-linux-gnu-as %s -o %s",
+    // libgcc as SamOS's own Makefile links it (no glibc in it).
+    .link_cmd          = "aarch64-linux-gnu-gcc " SAMOS_LINK_FLAGS " -lgcc -o %3$s",
+    .link_fallback_cmd = 0,
+    .run_cmd           = "",
+    .macros            = target_samos_aarch64_macros,
+    .samos             = true,
+};
+
+static const struct target target_samos_riscv64_desc = {
+    .name              = "samos-riscv64",
+    .pointer_size      = DATA_SIZE_DDWORD,
+    .long_size         = DATA_SIZE_DDWORD,
+    // The same psABI as above: plain char is unsigned.
+    .plain_char_unsigned = true,
+    .stack_slot_size   = 16,
+    .frame_header_size = 16,
+    .arg_slot_size     = DATA_SIZE_DDWORD,
+    .stack_align       = C_STACK_ALIGNMENT,
+    .max_reg_args      = 8,
+    .backend           = &codegen_backend_riscv64,
+    .asm_cmd           = "riscv64-linux-gnu-as %s -o %s",
+    .link_cmd          = "riscv64-linux-gnu-gcc " SAMOS_LINK_FLAGS " -lgcc -o %3$s",
+    .link_fallback_cmd = 0,
+    .run_cmd           = "",
+    .macros            = target_samos_riscv64_macros,
+    .samos             = true,
+};
+
 static const struct target* target_all[] = {
     &target_x86_desc,
     &target_x86_64_desc,
     &target_aarch64_desc,
     &target_riscv64_desc,
+    &target_samos_x86_64_desc,
+    &target_samos_aarch64_desc,
+    &target_samos_riscv64_desc,
     0,
 };
 

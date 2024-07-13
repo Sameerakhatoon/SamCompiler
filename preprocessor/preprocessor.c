@@ -1062,6 +1062,8 @@ void preprocessor_skip_to_endif(struct compile_process *compiler)
     }
 }
 
+int preprocessor_parse_evaluate(struct compile_process *compiler, struct vector *token_vec);
+
 // Drop the rest of a directive line.
 static void preprocessor_skip_line(struct compile_process *compiler)
 {

@@ -50,6 +50,8 @@ void validate_destruct(struct compile_process* process)
 
 // ch255: assert that no symbol with `name` is already registered. The
 // caller passes a human-readable kind so the diagnostic is useful.
+static bool validate_after_forward_declaration(const char* name);
+
 void validate_symbol_unique(const char* name, const char* type_of_symbol, struct node* node)
 {
     struct symbol* sym = symresolver_get_symbol(validator_current_compile_process, name);
@@ -226,11 +228,20 @@ void validate_function_node(struct node* node)
 // before stamping the struct as SYMBOL_TYPE_NODE.
 void validate_structure_node(struct node* node)
 {
-    if (!(node->flags & NODE_FLAG_IS_FORWARD_DECLARATION))
+    if (!(node->flags & NODE_FLAG_IS_FORWARD_DECLARATION) && !validate_after_forward_declaration(node->_struct.name))
     {
         validate_symbol_unique(node->_struct.name, "struct", node);
     }
     symresolver_register_symbol(validator_current_compile_process, node->_struct.name, SYMBOL_TYPE_NODE, node);
+}
+
+// `struct x;` (shell.h) then `struct x { ... };` (samos.h)
+// defines x once.
+static bool validate_after_forward_declaration(const char* name)
+{
+    struct symbol* sym = symresolver_get_symbol(validator_current_compile_process, name);
+    return sym && sym->type == SYMBOL_TYPE_NODE
+        && (((struct node*)sym->data)->flags & NODE_FLAG_IS_FORWARD_DECLARATION);
 }
 
 void validate_union_node(struct node* node)

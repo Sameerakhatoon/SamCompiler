@@ -15,7 +15,8 @@ struct node* variable_struct_or_union_body_node(struct node* node){
         return 0;
     }
     if(node->var.type.type == DATA_TYPE_STRUCT){
-        return node->var.type.struct_node->_struct.body_n;
+        // none yet for a struct only declared (`struct x;`).
+        return node->var.type.struct_node ? node->var.type.struct_node->_struct.body_n : 0;
     }
     return node->var.type.union_node->_union.body_n;
 }
@@ -46,7 +47,8 @@ int padding(int val, int to){
 
 // Round `val` up to the nearest multiple of `to`.
 int align_value(int val, int to){
-    if(val % to){
+    // a void* local is "aligned" to its pointee's size, 0.
+    if(to > 0 && val % to){
         val += padding(val, to);
     }
     return val;
