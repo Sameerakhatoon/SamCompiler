@@ -250,6 +250,21 @@ static bool parser_left_op_has_priority(const char* op_left, const char* op_righ
 //   after: ((50 * 20) + 120)
 // Used by parser_reorder_expression when the parent op out-ranks the
 // child op.
+// ch101: hoist `node->exp.right->exp.left` up to become the new left
+// child, with the original op. The remaining right-grandchild becomes
+// the new right child, and the parent op is replaced by the child's
+// op. Used by the extra reorder pass to flatten subscripts /
+// assignments / `(...)`-then-comma sequences.
+static void parser_node_move_right_left_to_left(struct node* node){
+    make_exp_node(node->exp.left, node->exp.right->exp.left, node->exp.op);
+    struct node* completed_node = node_pop();
+
+    const char* new_op = node->exp.right->exp.op;
+    node->exp.left  = completed_node;
+    node->exp.right = node->exp.right->exp.right;
+    node->exp.op    = new_op;
+}
+
 static void parser_node_shift_children_left(struct node* node){
     assert(node->type == NODE_TYPE_EXPRESSION);
     assert(node->exp.right->type == NODE_TYPE_EXPRESSION);
@@ -292,6 +307,15 @@ static void parser_reorder_expression(struct node** node_out){
             parser_reorder_expression(&node->exp.left);
             parser_reorder_expression(&node->exp.right);
         }
+    }
+
+    // ch101: extra reordering for `a[i] op b`, `x = a op b`, and
+    // `(...)` followed by `,`. In each case the right-grandchild has
+    // to flow up so codegen sees the operands in the order it expects.
+    if((is_array_node(node->exp.left) || is_node_assignment(node->exp.right))
+       || (node_is_expression(node->exp.left, "()")
+           && node_is_expression(node->exp.right, ","))){
+        parser_node_move_right_left_to_left(node);
     }
 }
 
