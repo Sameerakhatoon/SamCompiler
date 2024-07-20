@@ -28,7 +28,9 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>&1 | head -5
 [ -x "$bin" ] || fail "ch104 probe failed to compile"
 got_stdout="$("$bin")"
 got_outfile="$(cat "$outfile" 2>/dev/null || echo)"
-assert_contains "$got_stdout"  "jmp label_name" "stdout has the placeholder asm"
-assert_contains "$got_stdout"  "res=0"          "compile_file returns OK"
-assert_contains "$got_outfile" "jmp label_name" "outfile has the placeholder asm"
+# ch105 superseded the ch104 placeholder `jmp label_name` with the
+# real section walk, so we only check that codegen ran end-to-end and
+# wrote something to the outfile.
+assert_contains "$got_stdout"  "res=0"     "compile_file returns OK"
+[ -s "$outfile" ] || fail "outfile is empty after codegen"
 pass
