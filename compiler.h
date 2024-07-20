@@ -559,6 +559,15 @@ bool         node_is_expression(struct node* node, const char* op);
 bool         is_array_node(struct node* node);
 bool         is_node_assignment(struct node* node);
 
+// ch104: codegen entry point + status enum. Module 2/3 fills in the
+// real instruction-emit work; ch104 just lands the skeleton.
+enum {
+    CODEGEN_ALL_OK,
+    CODEGEN_GENERAL_ERROR,
+};
+
+int codegen(struct compile_process* process);
+
 // ch28: build a NODE_TYPE_EXPRESSION linking left + op + right.
 void         make_exp_node(struct node* left_node, struct node* right_node, const char* op);
 // ch77: wrap an inner expression in NODE_TYPE_EXPRESSION_PARENTHESES.

@@ -68,7 +68,13 @@ int compile_file(const char* filename, const char* out_filename, int flags){
         goto out;
     }
 
-    // Perform code generation.
+    // ch104: codegen stage. Right now just emits a placeholder line
+    // through asm_push so we can wire the v-table without committing
+    // to any real instruction selection yet.
+    if(codegen(process) != CODEGEN_ALL_OK){
+        res = COMPILER_FAILED_WITH_ERRORS;
+        goto out;
+    }
 
 out:
     return res;
