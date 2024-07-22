@@ -22,9 +22,10 @@ int try_compile(const char* src){
 }
 
 int main(void){
-    // long int, double int are valid abbreviations.
+    // long int is a valid abbreviation. (ch106 made `double` a hard
+    // codegen error at global scope, so we can't smoke-test
+    // `double int x;` through compile_file anymore.)
     printf("long_int=%d\n",   try_compile("long int x;"));
-    printf("double_int=%d\n", try_compile("double int x;"));
     return 0;
 }
 EOF
@@ -33,5 +34,4 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>&1 | head -5
 [ -x "$bin" ] || fail "ch41 probe failed to compile"
 got="$("$bin")"
 assert_contains "$got" "long_int=0"   "long int parses OK"
-assert_contains "$got" "double_int=0" "double int parses OK"
 pass
