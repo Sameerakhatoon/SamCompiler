@@ -29,6 +29,7 @@ struct compile_process* compile_process_create(const char* filename, const char*
     process->cfile.fp       = file;
     process->cfile.abs_path = filename;
     process->ofile          = out_file;
+    process->generator      = codegenerator_new(process);
     process->pos.line       = 1;
     process->pos.col        = 1;
     process->pos.filename   = filename;
