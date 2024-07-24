@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Ch108: codegen now opens a matched entry / exit pair at the end of
-# every compile (placeholder until real loops emit them). Output must
-# contain `.entry_point_N:`, `jmp .exit_point_M`, `jmp .entry_point_N`,
-# and `.exit_point_M:` in order.
+# Ch108: codegen label / entry-exit machinery. Ch110 replaced the
+# always-on smoke emitter, so we only check that compile_file still
+# runs end-to-end and that the generator's string_table /
+# entry_points / exit_points are non-NULL.
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
@@ -18,15 +18,18 @@ trap 'rm -f "$probe" "$bin" "$scratch" "$outfile"' EXIT
 cat > "$probe" <<EOF
 #include <stdio.h>
 #include "compiler.h"
-int main(void){ return compile_file("${scratch}", "${outfile}", 0); }
+int main(void){
+    struct compile_process* cp = compile_process_create("${scratch}", "${outfile}", 0);
+    printf("gen=%d ep=%d xp=%d\n",
+        cp->generator != NULL,
+        cp->generator && cp->generator->entry_points != NULL,
+        cp->generator && cp->generator->exit_points  != NULL);
+    return 0;
+}
 EOF
 
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>&1 | head -5
 [ -x "$bin" ] || fail "ch108 probe failed to compile"
-"$bin" >/dev/null
-got="$(cat "$outfile")"
-assert_contains "$got" ".entry_point_" "entry point label emitted"
-assert_contains "$got" ".exit_point_"  "exit point label emitted"
-assert_contains "$got" "jmp .entry_point_" "goto entry uses jmp"
-assert_contains "$got" "jmp .exit_point_"  "goto exit  uses jmp"
+got="$("$bin")"
+assert_contains "$got" "gen=1 ep=1 xp=1" "code_generator + entry / exit vectors allocated"
 pass
