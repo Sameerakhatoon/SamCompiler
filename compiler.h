@@ -792,9 +792,37 @@ struct resolver_process {
         struct resolver_scope* current;
     } scope;
 
-    struct compile_process*   process;
+    // ch118: renamed from `process` to `compiler` so it doesn't shadow
+    // the resolver-process-local in helpers.
+    struct compile_process*   compiler;
     struct resolver_callbacks callbacks;
 };
+
+// ch118: resolver C API declarations.
+bool                     resolver_result_failed(struct resolver_result* result);
+bool                     resolver_result_ok(struct resolver_result* result);
+bool                     resolver_result_finished(struct resolver_result* result);
+struct resolver_entity*  resolver_result_entity_root(struct resolver_result* result);
+struct resolver_entity*  resolver_result_entity_next(struct resolver_entity* entity);
+struct resolver_entity*  resolver_entity_clone(struct resolver_entity* entity);
+struct resolver_entity*  resolver_result_entity(struct resolver_result* result);
+struct resolver_result*  resolver_new_result(struct resolver_process* process);
+void                     resolver_result_free(struct resolver_result* result);
+struct resolver_scope*   resolver_process_scope_current(struct resolver_process* process);
+void                     resolver_runtime_needed(struct resolver_result* result, struct resolver_entity* last_entity);
+void                     resolver_result_entity_push(struct resolver_result* result, struct resolver_entity* entity);
+struct resolver_entity*  resolver_result_peek(struct resolver_result* result);
+struct resolver_entity*  resolver_result_peek_ignore_rule_entity(struct resolver_result* result);
+struct resolver_entity*  resolver_result_pop(struct resolver_result* result);
+struct vector*           resolver_array_data_vec(struct resolver_result* result);
+struct compile_process*  resolver_compiler(struct resolver_process* process);
+struct resolver_scope*   resolver_scope_current(struct resolver_process* process);
+struct resolver_scope*   resolver_scope_root(struct resolver_process* process);
+struct resolver_scope*   resolver_new_scope_create(void);
+struct resolver_scope*   resolver_new_scope(struct resolver_process* resolver, void* private, int flags);
+void                     resolver_finish_scope(struct resolver_process* resolver);
+struct resolver_process* resolver_new_process(struct compile_process* compiler, struct resolver_callbacks* callbacks);
+struct resolver_entity*  resolver_create_new_entity(struct resolver_result* result, int type, void* private);
 
 struct resolver_array_data {
     // Vector of struct resolver_entity*.
