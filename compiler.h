@@ -832,6 +832,15 @@ struct resolver_process* resolver_new_process(struct compile_process* compiler, 
 struct resolver_entity*  resolver_create_new_entity(struct resolver_result* result, int type, void* private);
 struct resolver_entity*  resolver_create_new_entity_for_unsupported_node(struct resolver_result* result, struct node* node);
 struct resolver_entity*  resolver_create_new_entity_for_array_bracket(struct resolver_result* result, struct resolver_process* process, struct node* node, struct node* array_index_node, int index, struct datatype* dtype, void* private, struct resolver_scope* scope);
+struct resolver_entity*  resolver_create_new_entity_for_merged_array_bracket(struct resolver_result* result, struct resolver_process* process, struct node* node, struct node* array_index_node, int index, struct datatype* dtype, void* private, struct resolver_scope* scope);
+struct resolver_entity*  resolver_create_new_unknown_entity(struct resolver_process* process, struct resolver_result* result, struct datatype* dtype, struct node* node, struct resolver_scope* scope, int offset);
+struct resolver_entity*  resolver_create_new_unary_indirection_entity(struct resolver_process* process, struct resolver_result* result, struct node* node, int indirection_depth);
+struct resolver_entity*  resolver_create_new_unary_get_address_entity(struct resolver_process* process, struct resolver_result* result, struct datatype* dtype, struct node* node, struct resolver_scope* scope, int offset);
+struct resolver_entity*  resolver_create_new_cast_entity(struct resolver_process* process, struct resolver_scope* scope, struct datatype* cast_dtype);
+struct resolver_entity*  resolver_create_new_entity_for_var_node_custom_scope(struct resolver_process* process, struct node* var_node, void* private, struct resolver_scope* scope, int offset);
+struct resolver_entity*  resolver_create_new_entity_for_var_node(struct resolver_process* process, struct node* var_node, void* private, int offset);
+struct resolver_entity*  resolver_new_entity_for_var_node_no_push(struct resolver_process* process, struct node* var_node, void* private, int offset, struct resolver_scope* scope);
+struct resolver_entity*  resolver_new_entity_for_var_node(struct resolver_process* process, struct node* var_node, void* private, int offset);
 
 struct resolver_array_data {
     // Vector of struct resolver_entity*.
