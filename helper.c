@@ -97,6 +97,14 @@ int array_multiplier(struct datatype* dtype, int index, int index_value){
     return size_sum;
 }
 
+// ch122: ch124 ships the real `struct_offset`; this stub is here so
+// ch122's resolver linker symbol resolves. Returns 0. ch124 will
+// replace the body.
+int struct_offset(struct compile_process* compiler, const char* struct_name, const char* var_name, struct node** out_node_out, int last_pos, int flags){
+    (void)compiler; (void)struct_name; (void)var_name; (void)out_node_out; (void)last_pos; (void)flags;
+    return 0;
+}
+
 // ch119: byte offset for the index-th access into dtype.
 int array_offset(struct datatype* dtype, int index, int index_value){
     if(!(dtype->flags & DATATYPE_FLAG_IS_ARRAY)
