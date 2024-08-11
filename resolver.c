@@ -308,13 +308,13 @@ struct resolver_entity* resolver_create_new_cast_entity(struct resolver_process*
 // to a specific scope (custom-scope variant for closures over a
 // non-current scope; the wrapper below uses the resolver's current
 // scope).
-// G-note: book passes NODE_TYPE_VARIABLE as the entity type, which
-// happens to collide numerically with one of the RESOLVER_ENTITY_TYPE
-// constants. We replicate verbatim.
+// G05: book stamps NODE_TYPE_VARIABLE here, breaking
+// resolver_get_variable (it filters by RESOLVER_ENTITY_TYPE_VARIABLE).
+// Use the right resolver type.
 struct resolver_entity* resolver_create_new_entity_for_var_node_custom_scope(struct resolver_process* process, struct node* var_node, void* private, struct resolver_scope* scope, int offset){
     (void)process;
     assert(var_node->type == NODE_TYPE_VARIABLE);
-    struct resolver_entity* entity = resolver_create_new_entity(0, NODE_TYPE_VARIABLE, private);
+    struct resolver_entity* entity = resolver_create_new_entity(0, RESOLVER_ENTITY_TYPE_VARIABLE, private);
     if(!entity){
         return 0;
     }
