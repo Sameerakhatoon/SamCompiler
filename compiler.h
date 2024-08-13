@@ -967,6 +967,16 @@ struct resolver_entity* resolver_get_variable(struct resolver_result* result, st
 struct resolver_entity* resolver_get_function_in_scope(struct resolver_result* result, struct resolver_process* resolver, const char* func_name, struct resolver_scope* scope);
 struct resolver_entity* resolver_get_function(struct resolver_result* result, struct resolver_process* resolver, const char* func_name);
 
+// ch126: follow / walk helpers + public entry.
+struct resolver_entity*  resolver_follow_for_name(struct resolver_process* resolver, const char* name, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_identifier(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_part_return_entity(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+void                     resolver_follow_part(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+void                     resolver_execute_rules(struct resolver_process* resolver, struct resolver_result* result);
+void                     resolver_merge_compile_times(struct resolver_process* resolver, struct resolver_result* result);
+void                     resolver_finalize_result(struct resolver_process* resolver, struct resolver_result* result);
+struct resolver_result*  resolver_follow(struct resolver_process* resolver, struct node* node);
+
 // ============================================================================
 // Datatypes (ch33+)
 // ============================================================================
