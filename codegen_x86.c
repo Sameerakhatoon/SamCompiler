@@ -768,6 +768,13 @@ static void codegen_generate_plain_assignment(struct node* node, struct resolver
     } else {
         codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
         asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        if(is_struct){
+            // `*p = s`, `o.inner = s`: the struct's dwords are under the
+            // address on the stack. This emitted a scalar mov with no
+            // valid size (`ddword`, `null`).
+            codegen_generate_move_struct(dtype, "edx", 0);
+            return;
+        }
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
         asm_push("mov %s [edx], %s", mov_type, reg_to_use);
     }
@@ -970,7 +977,14 @@ static void codegen_gen_mem_access(struct node* node, int flags, struct resolver
         codegen_gen_mem_access_get_address(node, flags, entity);
         return;
     }
-    if(entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY){
+    if(entity->type == RESOLVER_ENTITY_TYPE_FUNCTION){
+        // A function name used as a value is its address, a function
+        // pointer; this loaded the function's first instruction bytes.
+        asm_push("lea ebx, [%s]", codegen_entity_private(entity)->address);
+        asm_push_ins_push_with_data("ebx",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = entity->dtype});
+    } else if(entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY){
         // An array used as a value is the address of its first element
         // (loading here used to read a[0]).
         asm_push("lea ebx, [%s]", codegen_entity_private(entity)->address);
@@ -1329,6 +1343,11 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
     int function_call_label_id = codegen_label_count();
     codegen_data_section_add("function_call_%i: dd 0", function_call_label_id);
     asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    // A call through a function pointer: the chain left the pointer's
+    // address, so load the pointer itself.
+    if(entity->func_call_data.through_pointer){
+        asm_push("mov ebx, [ebx]");
+    }
     asm_push("mov dword [function_call_%i], ebx", function_call_label_id);
     size_t slot_elements = 0;
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
@@ -1394,7 +1413,8 @@ static bool codegen_resolve_node_return_result(struct node* node, struct history
 static bool codegen_result_is_array_address(struct resolver_result* result, struct datatype* dtype){
     return (dtype->flags & DATATYPE_FLAG_IS_ARRAY)
         && !(result->flags & RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE)
-        && !(result->flags & RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE);
+        && !(result->flags & RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE)
+        && !resolver_entity_is_struct_element(result->last_entity);
 }
 
 // The chain ends at the address of a pointer (an element of `int* v[2]`,
@@ -1436,7 +1456,13 @@ static bool codegen_resolve_node_for_value(struct node* node, struct history* hi
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
             &(struct stack_frame_data){.dtype = element});
     } else if(datatype_is_struct_or_union_non_pointer(&dtype)){
-        codegen_generate_structure_push(result->last_entity, history, 0);
+        // The chain left the struct's address (`t[1]`, `o.inner`); a
+        // call already pushed the pieces. Pushing from ebx without
+        // popping read whatever it held and left the address behind.
+        if(result->last_entity->type != RESOLVER_ENTITY_TYPE_FUNCTION_CALL){
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            codegen_generate_structure_push(result->last_entity, history, 0);
+        }
     } else if(!(dtype.flags & DATATYPE_FLAG_IS_POINTER) && dtype.type != DATA_TYPE_VOID){
         // a void result (va_start, va_end, a void call) has no
         // value to widen;

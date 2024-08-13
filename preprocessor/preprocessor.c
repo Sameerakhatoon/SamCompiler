@@ -1429,21 +1429,57 @@ void preprocessor_handle_typedef_token(struct compile_process *compiler, struct 
     struct typedef_type td;
     preprocessor_handle_typedef_body(compiler, token_vec, &td, src_vec, overflow_use_token_vec);
 
-    struct token *name_token = vector_back_or_null(token_vec);
-    if (!name_token)
+    // `typedef int (*fn)(int);`: the name is the identifier after the
+    // `*`s in the first parentheses. It comes out, and fn stands for
+    // the rest, `int (*)(int)`; the parser takes a name after that
+    // abstract declarator (parse_function_pointer_declarator).
+    const char *function_pointer_name = NULL;
+    if (td.type == TYPEDEF_TYPE_STANDARD)
     {
-        compiler_error(compiler, "We expected a name token for your typedef");
+        int count = vector_count(token_vec);
+        for (int i = 0; i < count; i++)
+        {
+            if (!token_is_operator(vector_at(token_vec, i), "("))
+            {
+                continue;
+            }
+            int j = i + 1;
+            while (j < count && token_is_operator(vector_at(token_vec, j), "*"))
+            {
+                j++;
+            }
+            struct token *candidate = j < count ? vector_at(token_vec, j) : NULL;
+            if (j > i + 1 && candidate && candidate->type == TOKEN_TYPE_IDENTIFIER)
+            {
+                function_pointer_name = candidate->sval;
+                vector_pop_at(token_vec, j);
+            }
+            break;
+        }
     }
 
-    if (name_token->type != TOKEN_TYPE_IDENTIFIER)
+    if (function_pointer_name)
     {
-        compiler_error(compiler, "The typedef name has to be a valid identifier");
+        td.definiton_name = function_pointer_name;
     }
+    else
+    {
+        struct token *name_token = vector_back_or_null(token_vec);
+        if (!name_token)
+        {
+            compiler_error(compiler, "We expected a name token for your typedef");
+        }
 
-    td.definiton_name = name_token->sval;
+        if (name_token->type != TOKEN_TYPE_IDENTIFIER)
+        {
+            compiler_error(compiler, "The typedef name has to be a valid identifier");
+        }
 
-    // Pop off the name token
-    vector_pop(token_vec);
+        td.definiton_name = name_token->sval;
+
+        // Pop off the name token
+        vector_pop(token_vec);
+    }
 
     // THis is a typedef structure we need to push the structure body
     // to the output so it can be found. The name then stands for

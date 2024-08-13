@@ -640,6 +640,9 @@ struct datatype {
         struct array_brackets* brackets;
         size_t                 size;
     } array;
+
+    // With DATATYPE_FLAG_IS_FUNCTION_POINTER: what the function returns.
+    struct datatype* function_return;
 };
 
 // ch44: array-bracket list. A vector of NODE_TYPE_BRACKET nodes, one
@@ -1398,6 +1401,7 @@ bool                     resolver_result_finished(struct resolver_result* result
 struct resolver_entity*  resolver_result_entity_root(struct resolver_result* result);
 struct resolver_entity*  resolver_result_entity_next(struct resolver_entity* entity);
 bool                     resolver_entity_is_pointer_array_element(struct resolver_entity* entity);
+bool                     resolver_entity_is_struct_element(struct resolver_entity* entity);
 struct resolver_entity*  resolver_entity_clone(struct resolver_entity* entity);
 struct resolver_entity*  resolver_result_entity(struct resolver_result* result);
 struct resolver_result*  resolver_new_result(struct resolver_process* process);
@@ -1614,6 +1618,10 @@ struct resolver_entity {
         struct resolver_entity_function_call_data {
             struct vector* arguments;   // vector of struct node*
             size_t         stack_size;
+            // The callee is a function pointer object (a variable, array
+            // element or member): the access chain leaves its address,
+            // and the call loads the pointer stored there.
+            bool           through_pointer;
         } func_call_data;
 
         struct resolver_entity_rule {

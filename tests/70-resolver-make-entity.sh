@@ -40,8 +40,9 @@ int main(void){
         (e->flags & RESOLVER_ENTITY_FLAG_IS_STACK) != 0,
         e->private, priv_calls);
 
-    // Function-call entity: dtype copied from the left operand.
-    struct resolver_entity left = { .dtype = dt };
+    // Function-call entity: dtype copied from the left operand, which
+    // must be a function (a call through an int is an error).
+    struct resolver_entity left = { .type = RESOLVER_ENTITY_TYPE_FUNCTION, .dtype = dt };
     struct resolver_entity* fc = resolver_create_new_entity_for_function_call(NULL, rp, &left, NULL);
     printf("fc_type=%d fc_args=%d\n", fc->type, fc->func_call_data.arguments != NULL);
     return 0;

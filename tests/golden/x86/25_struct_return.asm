@@ -54,15 +54,11 @@ mov ebx, eax
 push dword [ebx+4]
 push dword [ebx+0]
 ; END STRUCTURE PUSH
-; STRUCTURE PUSH
-push dword [ebx+4]
-push dword [ebx+0]
-; END STRUCTURE PUSH
 pop eax
 mov [ebp-8+0], eax
 pop eax
 mov [ebp-8+4], eax
-add esp, 16
+add esp, 8
 push dword [ebp-8]
 pop eax
 push eax

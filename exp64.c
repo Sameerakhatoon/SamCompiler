@@ -612,10 +612,11 @@ static struct datatype exp64_call(struct node* node){
     } else {
         struct datatype t = exp64_typeof(callee);
         return_type = t;
-        if(t.flags & DATATYPE_FLAG_IS_FUNCTION_POINTER){
-            return_type = *datatype_pointer_reduce(&t, 1);
-            return_type.flags &= ~DATATYPE_FLAG_IS_FUNCTION_POINTER;
+        if(!(t.flags & DATATYPE_FLAG_IS_FUNCTION_POINTER)){
+            compiler_error(current_process, "Called object is not a function or function pointer\n");
         }
+        return_type = *datatype_pointer_reduce(&t, 1);
+        return_type.flags &= ~DATATYPE_FLAG_IS_FUNCTION_POINTER;
     }
 
     int struct_size = 0;

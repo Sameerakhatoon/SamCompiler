@@ -389,7 +389,6 @@ struct resolver_entity* resolver_make_entity(struct resolver_process* process, s
 }
 
 struct resolver_entity* resolver_create_new_entity_for_function_call(struct resolver_result* result, struct resolver_process* process, struct resolver_entity* left_operand_entity, void* private){
-    (void)process;
     struct resolver_entity* entity = resolver_create_new_entity(result, RESOLVER_ENTITY_TYPE_FUNCTION_CALL, private);
     if(!entity){
         return 0;
@@ -405,6 +404,16 @@ struct resolver_entity* resolver_create_new_entity_for_function_call(struct reso
     // entries back to their registered callbacks.
     entity->name  = left_operand_entity->name;
     entity->func_call_data.arguments = vector_create(sizeof(struct node*));
+    // A call through a function pointer: the result has the pointed-to
+    // function's return type.
+    if(left_operand_entity->type != RESOLVER_ENTITY_TYPE_FUNCTION
+       && left_operand_entity->type != RESOLVER_ENTITY_TYPE_NATIVE_FUNCTION){
+        if(!(left_operand_entity->dtype.flags & DATATYPE_FLAG_IS_FUNCTION_POINTER)){
+            compiler_error(process->compiler, "Called object is not a function or function pointer\n");
+        }
+        entity->func_call_data.through_pointer = true;
+        entity->dtype = *left_operand_entity->dtype.function_return;
+    }
     return entity;
 }
 
@@ -673,11 +682,10 @@ struct resolver_entity* resolver_follow_function_call(struct resolver_process* r
 // is an identifier, this is a function call; otherwise it's just a
 // grouped expression.
 struct resolver_entity* resolver_follow_parentheses(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
-    // also a call through a function pointer member or element,
-    // `builtins[i].run(argc, argv)`.
-    struct node* left = node->exp.left;
-    if(left->type == NODE_TYPE_IDENTIFIER
-        || (left->type == NODE_TYPE_EXPRESSION && (is_access_node(left) || is_array_node(left)))){
+    // A call through a function pointer element or member, `t[0](x)`
+    // or `s.fn(x)`, has an array or access expression as its callee.
+    if(node->exp.left->type == NODE_TYPE_IDENTIFIER
+       || is_array_node(node->exp.left) || is_access_node(node->exp.left)){
         return resolver_follow_function_call(resolver, result, node);
     }
     return resolver_follow_exp(resolver, node->parenthesis.exp, result);
@@ -705,6 +713,17 @@ bool resolver_entity_is_pointer_array_element(struct resolver_entity* entity){
         && (entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)
         && (entity->dtype.flags & DATATYPE_FLAG_IS_POINTER)
         && !(entity->flags & RESOLVER_ENTITY_FLAG_IS_POINTER_ARRAY_ENTITY);
+}
+
+// The entity is one struct element of an array of structs (`t[1]`),
+// whose type still carries the array flag. Its address is the struct,
+// not an array to decay.
+bool resolver_entity_is_struct_element(struct resolver_entity* entity){
+    return entity
+        && (entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)
+        && datatype_is_struct_or_union_non_pointer(&entity->dtype)
+        && (entity->flags & RESOLVER_ENTITY_FLAG_USES_ARRAY_BRACKETS)
+        && entity->array.index + 1 >= (int)array_brackets_count(&entity->dtype);
 }
 
 // ch129: decide merge flags for an array-bracket entity. Out-of-bounds
@@ -997,6 +1016,19 @@ static void resolver_finalize_result_flags(struct resolver_process* resolver, st
     struct resolver_entity* last_entity = result->last_entity;
     bool does_get_address = false;
 
+    if(entity == last_entity && last_entity->type == RESOLVER_ENTITY_TYPE_FUNCTION){
+        // A function name used as a value (`op = add;`, `apply(sq, 5)`)
+        // is the function's address, a function pointer. It loaded from
+        // the function's code instead.
+        struct datatype* rtype = calloc(1, sizeof(struct datatype));
+        *rtype = last_entity->dtype;
+        last_entity->dtype.flags |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_FUNCTION_POINTER;
+        last_entity->dtype.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+        last_entity->dtype.pointer_depth   = rtype->pointer_depth + 1;
+        last_entity->dtype.function_return = rtype;
+        result->flags = RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
+        return;
+    }
     if(entity == last_entity){
         // A whole array used as a value is its address (it decays to a
         // pointer); pushing its "value" loaded a[0] instead.
@@ -1033,7 +1065,11 @@ static void resolver_finalize_result_flags(struct resolver_process* resolver, st
         }
         if(entity->type == RESOLVER_ENTITY_TYPE_FUNCTION_CALL){
             flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
-            flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
+            // The call's result is a value: a `->` or a pointer element
+            // before it (`q->f(x)`, `t[0].f(x)`) must not load through
+            // the result once more.
+            flags &= ~(RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE
+                     | RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE);
         }
         if(entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET){
             // Subscripting a pointer loads the pointer's value first. An

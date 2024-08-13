@@ -102,6 +102,7 @@ static const char*     parser_label_name(const char* label);
 static void            parser_add_leaf(struct vector* leaves, size_t offset, struct datatype* type, struct node* value);
 static struct node*    parser_global_initializer_node(struct token* name_token, struct vector* leaves);
 static void            parse_compound_literal(struct datatype* dtype);
+static bool            parse_function_pointer_declarator(struct datatype* dtype, struct token** name_out);
 static struct array_brackets* parse_array_brackets(struct history* history);
 static bool            parser_name_in(struct vector* names, const char* name);
 
@@ -714,6 +715,22 @@ static void parse_for_parentheses(struct history* history){
     if(tmp_node && node_is_value_type(tmp_node)){
         left_node = tmp_node;
         node_pop();
+        // `(*fp)(x)` and `(fp)(x)` call through fp: dereferencing a
+        // function pointer gives the function back (C11 6.5.3.2p4).
+        while(left_node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            struct node* inner = left_node->parenthesis.exp;
+            if(inner->type == NODE_TYPE_UNARY && op_is_indirection(inner->unary.op)
+               && inner->unary.indirection.depth == 1){
+                inner = inner->unary.operand;
+            }
+            // The callee may also be an element or a member,
+            // `(*t[0].f)(x)` and `(*q->f)(x)`, as the resolver allows.
+            if(inner->type != NODE_TYPE_IDENTIFIER && inner->type != NODE_TYPE_EXPRESSION_PARENTHESES
+               && !is_array_node(inner) && !is_access_node(inner)){
+                break;
+            }
+            left_node = inner;
+        }
     }
 
     struct node* exp_node = parser_blank_node;
@@ -751,16 +768,13 @@ static void parse_for_tenary(struct history* history){
 }
 
 // ch93: `(T) operand`. Opening `(` already consumed by caller.
-static bool          parser_next_is_function_pointer(void);
-static struct token* parser_function_pointer_declarator(struct datatype* dtype);
 
 static void parse_for_cast(void){
     struct datatype dtype = {0};
     parse_datatype(&dtype);
-    // a function pointer type, `(void (*)(void))addr`.
-    if(parser_next_is_function_pointer()){
-        parser_function_pointer_declarator(&dtype);
-    }
+    // `(int (*)(int))p`
+    struct token* no_name = 0;
+    parse_function_pointer_declarator(&dtype, &no_name);
     // `(int[]){ 1, 2 }`: the abstract declarator's brackets.
     if(token_next_is_operator("[")){
         struct array_brackets* brackets = parse_array_brackets(history_begin(0));
@@ -1195,6 +1209,67 @@ static void parser_datatype_init(struct token* datatype_token,
         }
         datatype_out->size = current_process->target->long_size;
     }
+}
+
+// A function pointer declarator after the base type (C11 6.7.6.3):
+// `(*name)(params)`, `(*name[N])(params)` for an array of them, or the
+// abstract `(*)(params)` of a cast or parameter. The parameter types are
+// read and not kept: every argument is passed the same way. A name may
+// also follow the abstract form, which is what typedef substitution
+// makes of `typedef int (*fn)(int); fn f;`. The type becomes a pointer
+// whose function_return is the base type.
+static bool parse_function_pointer_declarator(struct datatype* dtype, struct token** name_out){
+    if(!token_next_is_operator("(")){
+        return false;
+    }
+    vector_save(current_process->token_vec);
+    token_next();
+    bool is_function_pointer = token_next_is_operator("*");
+    vector_restore(current_process->token_vec);
+    if(!is_function_pointer){
+        return false;
+    }
+
+    expect_op("(");
+    int depth = parser_get_pointer_depth();
+    struct token* name = 0;
+    if(token_is_identifier(token_peek_next())){
+        name = token_next();
+    }
+    struct array_brackets* brackets = 0;
+    if(token_next_is_operator("[")){
+        brackets = parse_array_brackets(history_begin(0));
+    }
+    expect_sym(')');
+    expect_op("(");
+    int level = 1;
+    while(level){
+        struct token* token = token_next();
+        if(!token){
+            compiler_error(current_process, "Missing ) after the parameters of a function pointer\n");
+        }
+        if(token_is_operator(token, "(")){
+            level++;
+        } else if(token_is_symbol(token, ')')){
+            level--;
+        }
+    }
+
+    struct datatype* function_return = calloc(1, sizeof(struct datatype));
+    *function_return = *dtype;
+    dtype->flags |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_FUNCTION_POINTER;
+    dtype->pointer_depth   = function_return->pointer_depth + depth;
+    dtype->function_return = function_return;
+    if(brackets){
+        dtype->array.brackets = brackets;
+        dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
+        dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
+    }
+    if(!name && token_is_identifier(token_peek_next())){
+        name = token_next();
+    }
+    *name_out = name;
+    return true;
 }
 
 // Set by parse_datatype_type when the type was `enum ...`, so a
@@ -1681,47 +1756,6 @@ static struct array_brackets* parse_array_brackets(struct history* history){
         array_brackets_add(brackets, bracket_node);
     }
     return brackets;
-}
-
-// `ret (*name)(params)`, a pointer to a function, as a struct
-// member, a parameter or a variable. The type is a pointer to ret
-// marked DATATYPE_FLAG_IS_FUNCTION_POINTER; a call through it returns
-// ret. The parameter list is skipped: a call passes what it is given.
-static bool parser_next_is_function_pointer(void){
-    if(!token_next_is_operator("(")){
-        return false;
-    }
-    vector_save(current_process->token_vec);
-    token_next();
-    bool star = token_is_operator(token_peek_next(), "*");
-    vector_restore(current_process->token_vec);
-    return star;
-}
-
-static struct token* parser_function_pointer_declarator(struct datatype* dtype){
-    expect_op("(");
-    expect_op("*");
-    struct token* name_token = 0;
-    if(token_is_identifier(token_peek_next())){
-        name_token = token_next();
-    }
-    expect_sym(')');
-    expect_op("(");
-    int depth = 1;
-    while(depth > 0){
-        struct token* token = token_next();
-        if(!token){
-            compiler_error(current_process, "Unterminated function pointer parameter list\n");
-        }
-        if(token_is_operator(token, "(")){
-            depth++;
-        } else if(token->type == TOKEN_TYPE_SYMBOL && token->cval == ')'){
-            depth--;
-        }
-    }
-    dtype->flags |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_FUNCTION_POINTER;
-    dtype->pointer_depth++;
-    return name_token;
 }
 
 // ---- Brace initializers (C11 6.7.9) ----
@@ -2336,9 +2370,7 @@ static void parse_variable_full(struct history* history){
     parse_datatype(&dtype);
 
     struct token* name_token = 0;
-    if(parser_next_is_function_pointer()){
-        name_token = parser_function_pointer_declarator(&dtype);
-    } else if(token_is_identifier(token_peek_next())){
+    if(!parse_function_pointer_declarator(&dtype, &name_token) && token_is_identifier(token_peek_next())){
         name_token = token_next();
     }
     parse_variable(&dtype, name_token, history);
@@ -2960,19 +2992,13 @@ static void parse_variable_function_or_struct_union(struct history* history){
     // and silently drops the int.
     parser_ignore_int(&dtype);
 
-    if(parser_next_is_function_pointer()){
-        struct token* name_token = parser_function_pointer_declarator(&dtype);
-        if(!name_token){
-            compiler_error(current_process, "Expecting a name for the function pointer\n");
-        }
-        parse_variable(&dtype, name_token, history);
-        expect_sym(';');
-        return;
+    // ch42: `int abc;` - the next token must be the variable name, or
+    // a function pointer declarator `(*name)(...)` holds it.
+    struct token* name_token = 0;
+    if(!parse_function_pointer_declarator(&dtype, &name_token)){
+        name_token = token_next();
     }
-
-    // ch42: `int abc;` - the next token must be the variable name.
-    struct token* name_token = token_next();
-    if(name_token->type != TOKEN_TYPE_IDENTIFIER){
+    if(!name_token || name_token->type != TOKEN_TYPE_IDENTIFIER){
         compiler_error(current_process,
             "Expecting a valid name for the given variable declaration\n");
     }
