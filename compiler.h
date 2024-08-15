@@ -611,6 +611,12 @@ struct node* union_node_for_name(struct compile_process* process, const char* na
 void         make_union_node(const char* name, struct node* body_node);
 bool         node_is_expression(struct node* node, const char* op);
 bool         is_array_node(struct node* node);
+bool         is_access_operator(const char* op);
+bool         is_access_node(struct node* node);
+bool         is_access_node_with_op(struct node* node, const char* op);
+bool         is_array_operator(const char* op);
+bool         is_parentheses_operator(const char* op);
+bool         is_parentheses_node(struct node* node);
 bool         is_node_assignment(struct node* node);
 
 // ch104: codegen entry point + status enum. Module 2/3 fills in the
@@ -970,6 +976,9 @@ struct resolver_entity* resolver_get_function(struct resolver_result* result, st
 // ch126: follow / walk helpers + public entry.
 struct resolver_entity*  resolver_follow_for_name(struct resolver_process* resolver, const char* name, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_identifier(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_variable(struct resolver_process* resolver, struct node* var_node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_struct_exp(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_exp(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_part_return_entity(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_follow_part(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_execute_rules(struct resolver_process* resolver, struct resolver_result* result);
