@@ -183,6 +183,15 @@ bool is_parentheses_node(struct node* node){
     return node->type == NODE_TYPE_EXPRESSION && is_parentheses_operator(node->exp.op);
 }
 
+// ch128: argument (comma) predicates.
+bool is_argument_operator(const char* op){
+    return S_EQ(op, ",");
+}
+
+bool is_argument_node(struct node* node){
+    return node->type == NODE_TYPE_EXPRESSION && is_argument_operator(node->exp.op);
+}
+
 // ch119: byte offset for the index-th access into dtype.
 int array_offset(struct datatype* dtype, int index, int index_value){
     if(!(dtype->flags & DATATYPE_FLAG_IS_ARRAY)

@@ -617,6 +617,9 @@ bool         is_access_node_with_op(struct node* node, const char* op);
 bool         is_array_operator(const char* op);
 bool         is_parentheses_operator(const char* op);
 bool         is_parentheses_node(struct node* node);
+bool         is_argument_operator(const char* op);
+bool         is_argument_node(struct node* node);
+bool         node_valid(struct node* node);
 bool         is_node_assignment(struct node* node);
 
 // ch104: codegen entry point + status enum. Module 2/3 fills in the
@@ -979,6 +982,11 @@ struct resolver_entity*  resolver_follow_identifier(struct resolver_process* res
 struct resolver_entity*  resolver_follow_variable(struct resolver_process* resolver, struct node* var_node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_struct_exp(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_exp(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_array(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct datatype*         resolver_get_datatype(struct resolver_process* resolver, struct node* node);
+void                     resolver_build_function_call_arguments(struct resolver_process* resolver, struct node* argument_node, struct resolver_entity* root_func_call_entity, size_t* total_size_out);
+struct resolver_entity*  resolver_follow_function_call(struct resolver_process* resolver, struct resolver_result* result, struct node* node);
+struct resolver_entity*  resolver_follow_parentheses(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_part_return_entity(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_follow_part(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_execute_rules(struct resolver_process* resolver, struct resolver_result* result);
