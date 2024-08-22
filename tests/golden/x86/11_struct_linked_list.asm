@@ -8,6 +8,7 @@ sum_from:
 push ebp
 mov ebp, esp
 sub esp, 16
+push ebx
 push dword 0
 pop eax
 mov dword [ebp-4], eax
@@ -69,9 +70,11 @@ jmp .while_start_3
 .exit_point_2:
 push dword [ebp-4]
 pop eax
-add esp, 16
+mov ebx, [ebp-20]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 add esp, 16
 pop ebp
 ret
@@ -80,6 +83,7 @@ global main
 main:
 push ebp
 mov ebp, esp
+push ebx
 push dword 10
 lea ebx, [nodes]
 push ebx
@@ -190,8 +194,11 @@ push eax
 pop eax
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 section .data

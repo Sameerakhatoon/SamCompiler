@@ -5,6 +5,7 @@ global pick
 pick:
 push ebp
 mov ebp, esp
+push ebx
 push dword [ebp+8]
 push dword 1
 pop ecx
@@ -18,6 +19,8 @@ cmp eax, 0
 je .if_2
 push dword 10
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
 jmp .if_end_1
@@ -35,19 +38,26 @@ cmp eax, 0
 je .if_3
 push dword 2
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
 jmp .if_end_1
 .if_3:
 push dword 30
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
 .if_end_1:
 push dword 0
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 global main
@@ -55,6 +65,7 @@ global main
 main:
 push ebp
 mov ebp, esp
+push ebx
 lea ebx, [pick]
 push ebx
 pop ebx
@@ -66,8 +77,11 @@ push eax
 pop eax
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 section .data

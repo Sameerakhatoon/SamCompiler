@@ -5,6 +5,7 @@ global main
 main:
 push ebp
 mov ebp, esp
+push ebx
 push dword 4
 push dword 3
 pop ecx
@@ -12,8 +13,11 @@ pop eax
 add eax, ecx
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 section .data

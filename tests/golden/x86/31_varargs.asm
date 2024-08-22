@@ -6,6 +6,7 @@ sum2:
 push ebp
 mov ebp, esp
 sub esp, 16
+push ebx
 ; NATIVE FUNCTION va_start
 ; va_start on variable num
 lea ebx, [ebp+8]
@@ -43,9 +44,11 @@ pop eax
 add eax, ecx
 push eax
 pop eax
-add esp, 16
+mov ebx, [ebp-20]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 add esp, 16
 pop ebp
 ret
@@ -54,21 +57,27 @@ global main
 main:
 push ebp
 mov ebp, esp
+push ebx
 lea ebx, [sum2]
 push ebx
 pop ebx
 mov dword [function_call_1], ebx
+sub esp, 8
 push dword 20
 push dword 10
 push dword 2
 call [function_call_1]
 add esp, 12
+add esp, 8
 push eax
 pop eax
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 section .data

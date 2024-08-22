@@ -6,6 +6,7 @@ main:
 push ebp
 mov ebp, esp
 sub esp, 32
+push ebx
 push dword 1
 pop eax
 mov dword [ebp-12], eax
@@ -42,9 +43,11 @@ pop eax
 add eax, ecx
 push eax
 pop eax
-add esp, 32
+mov ebx, [ebp-36]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 add esp, 32
 pop ebp
 ret

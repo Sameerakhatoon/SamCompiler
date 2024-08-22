@@ -7,6 +7,7 @@ global is_space
 is_space:
 push ebp
 mov ebp, esp
+push ebx
 push dword [ebp+8]
 push dword 32
 pop ecx
@@ -16,8 +17,11 @@ sete al
 movzx eax, al
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 global scan_step
@@ -26,6 +30,7 @@ scan_step:
 push ebp
 mov ebp, esp
 sub esp, 16
+push ebx
 mov ebx, [sc]
 push ebx
 pop ebx
@@ -54,7 +59,8 @@ cmp eax, 0
 je .if_2
 push dword 0
 pop eax
-add esp, 16
+mov ebx, [ebp-20]
+mov esp, ebp
 pop ebp
 ret
 jmp .if_end_1
@@ -130,9 +136,11 @@ pop eax
 mov dword [sc+4], eax
 push dword 0
 pop eax
-add esp, 16
+mov ebx, [ebp-20]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 add esp, 16
 pop ebp
 ret
@@ -141,6 +149,7 @@ global main
 main:
 push ebp
 mov ebp, esp
+push ebx
 mov eax, str_9
 push eax
 pop eax
@@ -183,7 +192,9 @@ lea ebx, [scan_step]
 push ebx
 pop ebx
 mov dword [function_call_14], ebx
+sub esp, 4
 call [function_call_14]
+add esp, 4
 push eax
 pop eax
 push eax
@@ -195,8 +206,11 @@ push dword [sc+8]
 pop eax
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 section .data

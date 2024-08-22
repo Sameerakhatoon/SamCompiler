@@ -6,6 +6,7 @@ make:
 push ebp
 mov ebp, esp
 sub esp, 16
+push ebx
 push dword [ebp+12]
 pop eax
 mov dword [ebp-8], eax
@@ -25,18 +26,21 @@ mov [edx+0], eax
 pop eax
 mov [edx+4], eax
 mov eax, [ebp+8]
+mov ebx, [ebp-20]
+mov esp, ebp
+pop ebp
+ret 4
+pop ebx
 add esp, 16
 pop ebp
-ret
-add esp, 16
-pop ebp
-ret
+ret 4
 global main
 ; main function
 main:
 push ebp
 mov ebp, esp
 sub esp, 16
+push ebx
 lea ebx, [make]
 push ebx
 pop ebx
@@ -48,7 +52,7 @@ push dword 2
 lea ebx, [esp+8]
 push ebx
 call [function_call_1]
-add esp, 12
+add esp, 8
 mov ebx, eax
 ; STRUCTURE PUSH
 push dword [ebx+4]
@@ -70,9 +74,11 @@ pop eax
 add eax, ecx
 push eax
 pop eax
-add esp, 16
+mov ebx, [ebp-20]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 add esp, 16
 pop ebp
 ret

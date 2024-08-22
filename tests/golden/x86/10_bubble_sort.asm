@@ -8,6 +8,7 @@ bubble_sort:
 push ebp
 mov ebp, esp
 sub esp, 32
+push ebx
 push dword 0
 pop eax
 mov dword [ebp-4], eax
@@ -228,9 +229,11 @@ jmp .for_loop1
 .exit_point_4:
 push dword 0
 pop eax
-add esp, 32
+mov ebx, [ebp-36]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 add esp, 32
 pop ebp
 ret
@@ -239,6 +242,7 @@ global main
 main:
 push ebp
 mov ebp, esp
+push ebx
 push dword 5
 lea ebx, [values]
 push ebx
@@ -313,8 +317,11 @@ pop eax
 mov eax, [eax]
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 section .data

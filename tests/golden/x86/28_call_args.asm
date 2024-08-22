@@ -5,6 +5,7 @@ global f
 f:
 push ebp
 mov ebp, esp
+push ebx
 push dword [ebp+8]
 push dword 100
 pop ecx
@@ -34,8 +35,11 @@ pop eax
 sub eax, ecx
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 global main
@@ -43,21 +47,27 @@ global main
 main:
 push ebp
 mov ebp, esp
+push ebx
 lea ebx, [f]
 push ebx
 pop ebx
 mov dword [function_call_1], ebx
+sub esp, 8
 push dword 6
 push dword 2
 push dword 3
 call [function_call_1]
 add esp, 12
+add esp, 8
 push eax
 pop eax
 push eax
 pop eax
+mov ebx, [ebp-4]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 pop ebp
 ret
 section .data

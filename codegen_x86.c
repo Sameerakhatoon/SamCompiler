@@ -1357,9 +1357,23 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
         codegen_stack_sub_with_name(align_value(datatype_size(&entity->dtype), DATA_SIZE_DWORD), "result_value");
         slot_elements = vector_count(current_function->func.frame.elements);
     }
+    // The i386 psABI wants esp 16-byte aligned at the call.
+    // ebp is 8 below a multiple of 16 (return address and saved ebp),
+    // so the bytes below ebp at the call must be 8 mod 16. The pad goes
+    // under the arguments.
+    size_t returns_struct = datatype_is_struct_or_union_non_pointer(&entity->dtype);
+    size_t call_bytes = entity->func_call_data.stack_size + (returns_struct ? DATA_SIZE_DWORD : 0);
+    size_t below_ebp = (vector_count(current_function->func.frame.elements) - 1) * DATA_SIZE_DWORD + call_bytes;
+    size_t pad = (C_STACK_ALIGNMENT + 8 - below_ebp % C_STACK_ALIGNMENT) % C_STACK_ALIGNMENT;
+    codegen_stack_sub_with_name(pad, "call_alignment_pad");
+    size_t elements_before_arguments = vector_count(current_function->func.frame.elements);
     while(node){
         codegen_generate_expressionable(node, codegen_history_begin(EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS));
         node = vector_peek_ptr(entity->func_call_data.arguments);
+    }
+    if((vector_count(current_function->func.frame.elements) - elements_before_arguments) * DATA_SIZE_DWORD
+       != entity->func_call_data.stack_size){
+        compiler_error(current_process, "COMPILER BUG: x86 call arguments do not match their stack size\n");
     }
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
         // the hidden pointer is the first argument, so it has
@@ -1372,11 +1386,12 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
         asm_push_ins_push("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
     asm_push("call [function_call_%i]", function_call_label_id);
-    size_t stack_size = entity->func_call_data.stack_size;
-    if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
-        stack_size += DATA_SIZE_DWORD;
+    if(returns_struct){
+        // The callee removed the hidden pointer with `ret 4`.
+        stackframe_pop_expecting(current_function, STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
-    codegen_stack_add(stack_size);
+    codegen_stack_add(entity->func_call_data.stack_size);
+    codegen_stack_add_with_name(pad, "call_alignment_pad");
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
         // ch150: copy the struct return value into a real push chain.
         asm_push("mov ebx, eax");
@@ -2043,6 +2058,16 @@ static void codegen_generate_do_while_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
+// A function that returns a struct or union removes the hidden result
+// pointer itself, `ret 4`, as gcc does on i386.
+static void codegen_generate_ret(struct node* function){
+    if(datatype_is_struct_or_union_non_pointer(&function->func.rtype)){
+        asm_push("ret 4");
+    } else {
+        asm_push("ret");
+    }
+}
+
 // ch156: real `return [expr];` emit. Drops the frame WITHOUT touching
 // the compile-time ledger (the ledger only finalises at the function
 // epilogue assertion), then `pop ebp; ret`.
@@ -2050,10 +2075,14 @@ static void codegen_generate_statement_return(struct node* node){
     if(node->stmt.return_stmt.exp){
         codegen_generate_statement_return_exp(node);
     }
-    codegen_stack_add_no_compile_time_stack_frame_restore(
-        C_ALIGN(function_node_stack_size(node->binded.function)));
+    // ebx was saved just below the locals. esp may be lower
+    // than the locals here (a return inside a call's arguments or a
+    // switch), so the frame is dropped from ebp.
+    size_t locals_size = C_ALIGN(function_node_stack_size(node->binded.function));
+    asm_push("mov ebx, [ebp-%i]", (int)locals_size + DATA_SIZE_DWORD);
+    asm_push("mov esp, ebp");
     asm_pop_ebp_no_stack_frame_restore();
-    asm_push("ret");
+    codegen_generate_ret(node->binded.function);
 }
 
 static void codegen_generate_statement(struct node* node, struct history* history){
@@ -2167,15 +2196,19 @@ static void codegen_generate_function_with_body(struct node* node){
     asm_push_ebp();
     asm_push("mov ebp, esp");
     codegen_stack_sub(C_ALIGN(function_node_stack_size(node)));
+    // cdecl makes ebx callee-saved, and every expression here uses it.
+    // It goes in the slot below the locals.
+    asm_push_ins_push("ebx", STACK_FRAME_ELEMENT_TYPE_UNKNOWN, "function_entry_saved_ebx");
     codegen_new_scope(RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
     codegen_generate_function_arguments(function_node_argument_vec(node));
 
     codegen_generate_body(node->func.body_n, codegen_history_begin(IS_ALONE_STATEMENT));
     codegen_finish_scope();
+    asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_UNKNOWN, "function_entry_saved_ebx");
     codegen_stack_add(C_ALIGN(function_node_stack_size(node)));
     asm_pop_ebp();
     stackframe_assert_empty(current_function);
-    asm_push("ret");
+    codegen_generate_ret(node);
 }
 
 static void codegen_generate_function(struct node* node){

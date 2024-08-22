@@ -6,6 +6,7 @@ main:
 push ebp
 mov ebp, esp
 sub esp, 16
+push ebx
 mov eax, str_1
 push eax
 pop eax
@@ -57,9 +58,11 @@ jmp .while_start_4
 .exit_point_3:
 push dword [ebp-12]
 pop eax
-add esp, 16
+mov ebx, [ebp-20]
+mov esp, ebp
 pop ebp
 ret
+pop ebx
 add esp, 16
 pop ebp
 ret
