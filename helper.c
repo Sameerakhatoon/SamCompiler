@@ -192,6 +192,15 @@ bool is_argument_node(struct node* node){
     return node->type == NODE_TYPE_EXPRESSION && is_argument_operator(node->exp.op);
 }
 
+// ch129: drop one level of pointer-depth; clear IS_POINTER once we
+// fall to 0 or below.
+void datatype_decrement_pointer(struct datatype* dtype){
+    dtype->pointer_depth--;
+    if(dtype->pointer_depth <= 0){
+        dtype->flags &= ~DATATYPE_FLAG_IS_POINTER;
+    }
+}
+
 // ch119: byte offset for the index-th access into dtype.
 int array_offset(struct datatype* dtype, int index, int index_value){
     if(!(dtype->flags & DATATYPE_FLAG_IS_ARRAY)
