@@ -21,7 +21,11 @@ enum {
     HISTORY_FLAG_IS_GLOBAL_SCOPE      = 0b00000100,
     HISTORY_FLAG_INSIDE_STRUCTURE     = 0b00001000,
     HISTORY_FLAG_INSIDE_FUNCTION_BODY = 0b00010000,
-    HISTORY_FLAG_IN_SWITCH_STATEMENT   = 0b00100000,
+    HISTORY_FLAG_IN_SWITCH_STATEMENT                  = 0b00100000,
+    // ch130: tell parse_for_parentheses we're already past the
+    // operator that opened these parens, so they're a grouping not
+    // a function call.
+    HISTORY_FLAG_PARENTHESES_IS_NOT_A_FUNCTION_CALL   = 0b01000000,
 };
 
 // ch94: switch-case registration. Each `case <expr>:` inside a switch
@@ -102,6 +106,9 @@ static void          parse_single_token_to_node(void);
 static void          parse_expressionable_for_op(struct history* history, const char* op);
 static void          parse_exp_normal(struct history* history);
 static int           parse_exp(struct history* history);
+static int           parser_get_pointer_depth(void);
+static void          parser_deal_with_additional_expression(void);
+static void          parse_for_parentheses(struct history* history);
 static void          parse_identifier(struct history* history);
 static bool          is_keyword_variable_modifier(const char* val);
 static void          parse_datatype_modifiers(struct datatype* dtype);
@@ -322,11 +329,51 @@ static void parser_reorder_expression(struct node** node_out){
 // Binary expression: pop the left operand off the node stack, consume
 // the operator, parse the right operand, then assemble a NODE_TYPE_EXPRESSION.
 // ch29 will fold precedence-aware reordering into the trailing comment.
+// ch130: `*X` chain - read all consecutive `*` operators and parse
+// the operand that follows, building a single NODE_TYPE_UNARY whose
+// indirection.depth carries the chain length.
+static void parse_for_indirection_unary(void){
+    int depth = parser_get_pointer_depth();
+    parse_expressionable(history_begin(0));
+    struct node* operand = node_pop();
+    make_unary_node("*", operand);
+    struct node* unary = node_pop();
+    unary->unary.indirection.depth = depth;
+    node_push(unary);
+}
+
+// ch130: any other unary (-, !, ~, &).
+static void parse_for_normal_unary(void){
+    const char* op = token_next()->sval;
+    parse_expressionable(history_begin(0));
+    struct node* operand = node_pop();
+    make_unary_node(op, operand);
+}
+
+static void parse_for_unary(void){
+    const char* op = token_peek_next()->sval;
+    if(op_is_indirection(op)){
+        parse_for_indirection_unary();
+        return;
+    }
+    parse_for_normal_unary();
+    parser_deal_with_additional_expression();
+}
+
+static bool parser_is_unary_operator(const char* op){
+    return is_unary_operator(op);
+}
+
 static void parse_exp_normal(struct history* history){
     struct token* op_token = token_peek_next();
     const char*   op       = op_token->sval;
     struct node*  node_left = node_peek_expressionable_or_null();
     if(!node_left){
+        // ch130: no left operand - must be a unary, else hard error.
+        if(!parser_is_unary_operator(op)){
+            compiler_error(current_process, "The given expression has no left operand");
+        }
+        parse_for_unary();
         return;
     }
 
@@ -334,7 +381,22 @@ static void parse_exp_normal(struct history* history){
 
     node_pop();            // detach the left operand
     node_left->flags |= NODE_FLAG_INSIDE_EXPRESSION;
-    parse_expressionable_for_op(history_down(history, history->flags), op);
+
+    // ch130: choose right-operand parser by what's next.
+    if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_OPERATOR){
+        if(S_EQ(token_peek_next()->sval, "(")){
+            parse_for_parentheses(history_down(history, history->flags | HISTORY_FLAG_PARENTHESES_IS_NOT_A_FUNCTION_CALL));
+        } else if(parser_is_unary_operator(token_peek_next()->sval)){
+            parse_for_unary();
+        } else {
+            compiler_error(current_process,
+                "Two operators are expected for a given expression for operator %s\n",
+                token_peek_next()->sval);
+        }
+    } else {
+        parse_expressionable_for_op(history_down(history, history->flags), op);
+    }
+
     struct node* node_right = node_pop();
     node_right->flags |= NODE_FLAG_INSIDE_EXPRESSION;
 
