@@ -641,6 +641,46 @@ void resolver_array_bracket_set_flags(struct resolver_entity* bracket_entity, st
     }
 }
 
+// ch131: parenthesised expression - just step into the inner exp.
+struct resolver_entity* resolver_follow_exp_parenthesis(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    return resolver_follow_part_return_entity(resolver, node->parenthesis.exp, result);
+}
+
+// ch131: unary nodes the resolver hasn't taught yet (most unaries).
+// Walk into the operand then emit an UNSUPPORTED marker entity.
+struct resolver_entity* resolver_follow_unsupported_unary_node(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    return resolver_follow_part_return_entity(resolver, node->unary.operand, result);
+}
+
+struct resolver_entity* resolver_follow_unsupported_node(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    bool followed = false;
+    switch(node->type){
+        case NODE_TYPE_UNARY:
+            resolver_follow_unsupported_unary_node(resolver, node, result);
+            followed = true;
+            break;
+        default:
+            followed = false;
+    }
+    (void)followed;
+    struct resolver_entity* unsupported_entity = resolver_create_new_entity_for_unsupported_node(result, node);
+    assert(unsupported_entity);
+    resolver_result_entity_push(result, unsupported_entity);
+    return unsupported_entity;
+}
+
+// ch131: `(T) operand`. Walk the operand as unsupported, mark
+// WAS_CASTED, push a CAST entity carrying the target dtype.
+struct resolver_entity* resolver_follow_cast(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    struct resolver_entity* operand_entity = 0;
+    resolver_follow_unsupported_node(resolver, node->cast.operand, result);
+    operand_entity = resolver_result_peek(result);
+    operand_entity->flags |= RESOLVER_ENTITY_FLAG_WAS_CASTED;
+    struct resolver_entity* cast_entity = resolver_create_new_cast_entity(resolver, operand_entity->scope, &node->cast.dtype);
+    resolver_result_entity_push(result, cast_entity);
+    return cast_entity;
+}
+
 // ch129: NODE_TYPE_BRACKET follow path. Inherits scope + dtype from
 // the most recent non-rule entity; bumps the bracket index when
 // already inside an ARRAY_BRACKET chain. Shrinks the recorded array
@@ -689,6 +729,13 @@ struct resolver_entity* resolver_follow_part_return_entity(struct resolver_proce
         // ch129: BRACKET case.
         case NODE_TYPE_BRACKET:
             entity = resolver_follow_array_bracket(resolver, node, result);
+            break;
+        // ch131: parenthesised + cast.
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            entity = resolver_follow_exp_parenthesis(resolver, node, result);
+            break;
+        case NODE_TYPE_CAST:
+            entity = resolver_follow_cast(resolver, node, result);
             break;
     }
     (void)entity;
