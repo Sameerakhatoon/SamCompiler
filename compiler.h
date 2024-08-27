@@ -636,6 +636,7 @@ void         datatype_decrement_pointer(struct datatype* dtype);
 size_t       array_brackets_count(struct datatype* dtype);
 bool         is_unary_operator(const char* op);
 bool         op_is_indirection(const char* op);
+bool         op_is_address(const char* op);
 void         make_unary_node(const char* op, struct node* operand_node);
 bool         is_node_assignment(struct node* node);
 
@@ -976,7 +977,9 @@ struct resolver_entity {
     struct datatype          dtype;
     struct resolver_scope*   scope;
     struct resolver_result*  result;
-    struct resolver_process* process;
+    // ch132: renamed from `process` so it doesn't shadow the local
+    // resolver-process parameter in helpers.
+    struct resolver_process* resolver;
     void*                    private;
     struct resolver_entity*  next;
     struct resolver_entity*  prev;
@@ -1010,6 +1013,9 @@ struct resolver_entity*  resolver_follow_exp_parenthesis(struct resolver_process
 struct resolver_entity*  resolver_follow_unsupported_unary_node(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_unsupported_node(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_cast(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_indirection(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_unary_address(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
+struct resolver_entity*  resolver_follow_unary(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 struct resolver_entity*  resolver_follow_part_return_entity(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_follow_part(struct resolver_process* resolver, struct node* node, struct resolver_result* result);
 void                     resolver_execute_rules(struct resolver_process* resolver, struct resolver_result* result);
