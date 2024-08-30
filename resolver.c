@@ -896,8 +896,123 @@ void resolver_merge_compile_times(struct resolver_process* resolver, struct reso
     } while(total != 1 && total != result->count);
 }
 
-void resolver_finalize_result(struct resolver_process* resolver, struct resolver_result* result){
+// ch135: classify the entity chain into emit-flags for codegen.
+// Sets one of FIRST_ENTITY_PUSH_VALUE / FIRST_ENTITY_LOAD_TO_EBX and
+// FINAL_INDIRECTION_REQUIRED_FOR_VALUE / DOES_GET_ADDRESS based on
+// what's in the chain.
+static void resolver_finalize_result_flags(struct resolver_process* resolver, struct resolver_result* result){
+    (void)resolver;
+    int flags = RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
+    struct resolver_entity* entity      = result->entity;
+    struct resolver_entity* last_entity = result->last_entity;
+    bool does_get_address = false;
+
+    if(entity == last_entity){
+        if(last_entity->type == RESOLVER_ENTITY_TYPE_VARIABLE
+           && datatype_is_struct_or_union_non_pointer(&last_entity->dtype)){
+            flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
+            flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
+        }
+        result->flags = flags;
+        return;
+    }
+
+    while(entity){
+        if(entity->flags & RESOLVER_ENTITY_FLAG_DO_INDIRECTION){
+            flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX
+                  |  RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+            flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
+        }
+        if(entity->type == RESOLVER_ENTITY_TYPE_UNARY_GET_ADDRESS){
+            flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX
+                  |  RESOLVER_RESULT_FLAG_DOES_GET_ADDRESS;
+            // Book ships this as `& ~A | B`, which because of `|`
+            // having lower precedence than `&` parses as
+            // `& ~(A | B)`. Replicated verbatim.
+            flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE | RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+            does_get_address = true;
+        }
+        if(entity->type == RESOLVER_ENTITY_TYPE_FUNCTION_CALL){
+            flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
+            flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
+        }
+        if(entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET){
+            if(entity->dtype.flags & DATATYPE_FLAG_IS_POINTER){
+                flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
+                flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
+            } else {
+                flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
+                flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
+            }
+            if(entity->flags & RESOLVER_ENTITY_FLAG_IS_POINTER_ARRAY_ENTITY){
+                flags |= RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+            }
+        }
+        if(entity->type == RESOLVER_ENTITY_TYPE_GENERAL){
+            flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX
+                  |  RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+            flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
+        }
+        entity = entity->next;
+    }
+
+    if((last_entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)
+       && !does_get_address
+       && last_entity->type == RESOLVER_ENTITY_TYPE_VARIABLE
+       && !(last_entity->flags & RESOLVER_ENTITY_FLAG_USES_ARRAY_BRACKETS)){
+        // `char abc[50]; char* p = abc;` -> no final indirection.
+        flags &= ~RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+    } else if(last_entity->type == RESOLVER_ENTITY_TYPE_VARIABLE){
+        flags |= RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+    }
+
+    if(does_get_address){
+        flags &= ~RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
+    }
+    result->flags |= flags;
+}
+
+// ch135: inherit scope/dtype/offset from the previous entity, then
+// adjust the dtype for the specific unary op.
+static void resolver_finalize_unary(struct resolver_process* resolver, struct resolver_result* result, struct resolver_entity* entity){
     (void)resolver; (void)result;
+    struct resolver_entity* prev = entity->prev;
+    if(!prev){
+        return;
+    }
+    entity->scope  = prev->scope;
+    entity->dtype  = prev->dtype;
+    entity->offset = prev->offset;
+    if(entity->type == RESOLVER_ENTITY_TYPE_UNARY_INDIRECTION){
+        int depth = entity->indirection.depth;
+        entity->dtype.pointer_depth -= depth;
+        if(entity->dtype.pointer_depth <= 0){
+            entity->dtype.flags &= ~DATATYPE_FLAG_IS_POINTER;
+        }
+    } else if(entity->type == RESOLVER_ENTITY_TYPE_UNARY_GET_ADDRESS){
+        entity->dtype.flags |= DATATYPE_FLAG_IS_POINTER;
+        entity->dtype.pointer_depth++;
+    }
+}
+
+static void resolver_finalize_last_entity(struct resolver_process* resolver, struct resolver_result* result){
+    struct resolver_entity* last = resolver_result_peek(result);
+    switch(last->type){
+        case RESOLVER_ENTITY_TYPE_UNARY_INDIRECTION:
+        case RESOLVER_ENTITY_TYPE_UNARY_GET_ADDRESS:
+            resolver_finalize_unary(resolver, result, last);
+            break;
+    }
+}
+
+void resolver_finalize_result(struct resolver_process* resolver, struct resolver_result* result){
+    struct resolver_entity* first_entity = resolver_result_entity_root(result);
+    if(!first_entity){
+        return;
+    }
+    resolver->callbacks.set_result_base(result, first_entity);
+    resolver_finalize_result_flags(resolver, result);
+    resolver_finalize_last_entity(resolver, result);
 }
 
 // ch126: public entry. Allocate a result, walk the node, mark FAILED

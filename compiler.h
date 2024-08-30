@@ -598,6 +598,7 @@ size_t datatype_element_size(struct datatype* dtype);
 size_t datatype_size_no_ptr(struct datatype* dtype);
 size_t datatype_size(struct datatype* dtype);
 bool   datatype_is_primitive(struct datatype* dtype);
+bool   datatype_is_struct_or_union_non_pointer(struct datatype* dtype);
 
 // ch52: size helpers that look at variable nodes (not datatypes).
 size_t       variable_size(struct node* var_node);

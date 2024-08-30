@@ -22,12 +22,13 @@ static void del_ent(struct resolver_entity* e){ (void)e; }
 static void* mk_priv(struct resolver_entity* e, struct node* n, int o, struct resolver_scope* s){
     (void)e; (void)n; (void)o; (void)s; return NULL;
 }
+static void set_base(struct resolver_result* r, struct resolver_entity* e){ (void)r; (void)e; }
 int main(void){
     struct compile_process* cp = compile_process_create("${scratch}", 0, 0);
     struct lex_process* lp = lex_process_create(cp, &compiler_lex_functions, 0);
     lex(lp); cp->token_vec = lex_process_tokens(lp); parse(cp);
 
-    struct resolver_callbacks cb = {.delete_scope=del_scope,.delete_entity=del_ent,.make_private=mk_priv};
+    struct resolver_callbacks cb = {.delete_scope=del_scope,.delete_entity=del_ent,.make_private=mk_priv,.set_result_base=set_base};
     struct resolver_process* rp = resolver_new_process(cp, &cb);
 
     struct node** pp = vector_at(cp->node_tree_vec, 0);
