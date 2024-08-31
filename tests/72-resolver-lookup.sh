@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ch125: resolver_get_entity walks the scope chain looking up names.
-# Register a function via resolver_regster_function (root scope) and
+# Register a function via resolver_register_function (root scope) and
 # a variable via resolver_new_entity_for_var_node (current scope),
 # then look both up.
 . "$(dirname "$0")/lib.sh"
@@ -36,7 +36,7 @@ int main(void){
     struct node fn = { .type = NODE_TYPE_FUNCTION };
     fn.func.name = "foo";
     fn.func.rtype = rdt;
-    resolver_regster_function(rp, &fn, NULL);
+    resolver_register_function(rp, &fn, NULL);
 
     // Register the parsed variable in the current scope.
     struct node** pp = vector_at(cp->node_tree_vec, 0);
@@ -46,7 +46,7 @@ int main(void){
     // ch125 ships var lookup broken (see G05) because the var-node
     // factory stamps NODE_TYPE_VARIABLE instead of
     // RESOLVER_ENTITY_TYPE_VARIABLE. fn lookup works because
-    // resolver_regster_function uses the right constant. Test only
+    // resolver_register_function uses the right constant. Test only
     // what's working at this chapter; G05 adds the var test.
     struct resolver_entity* got_fn   = resolver_get_function(NULL, rp, "foo");
     struct resolver_entity* missing  = resolver_get_entity(NULL, rp, "nope");

@@ -396,8 +396,8 @@ struct resolver_entity* resolver_create_new_entity_for_function_call(struct reso
     return entity;
 }
 
-// ch122: preserve book typo "regster" verbatim.
-struct resolver_entity* resolver_regster_function(struct resolver_process* process, struct node* func_node, void* private){
+// ch122: ch136 fixed the book typo - was `resolver_regster_function`.
+struct resolver_entity* resolver_register_function(struct resolver_process* process, struct node* func_node, void* private){
     struct resolver_entity* entity = resolver_create_new_entity(0, RESOLVER_ENTITY_TYPE_FUNCTION, private);
     if(!entity){
         return 0;

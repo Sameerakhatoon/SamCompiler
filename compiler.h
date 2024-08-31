@@ -875,7 +875,27 @@ struct resolver_entity*  resolver_new_entity_for_var_node(struct resolver_proces
 // enclosing definition is parsed.
 struct resolver_entity*  resolver_make_entity(struct resolver_process* process, struct resolver_result* result, struct datatype* custom_dtype, struct node* node, struct resolver_entity* guided_entity, struct resolver_scope* scope);
 struct resolver_entity*  resolver_create_new_entity_for_function_call(struct resolver_result* result, struct resolver_process* process, struct resolver_entity* left_operand_entity, void* private);
-struct resolver_entity*  resolver_regster_function(struct resolver_process* process, struct node* func_node, void* private);
+struct resolver_entity*  resolver_register_function(struct resolver_process* process, struct node* func_node, void* private);
+
+// ch136: default resolver implementation public surface.
+struct resolver_default_entity_data* resolver_default_entity_private(struct resolver_entity* entity);
+struct resolver_default_scope_data*  resolver_default_scope_private(struct resolver_scope* scope);
+char*                                resolver_default_stack_asm_address(int stack_offset, char* out);
+void                                 resolver_default_global_asm_address(const char* name, int offset, char* address_out);
+void*                                resolver_default_make_private(struct resolver_entity* entity, struct node* node, int offset, struct resolver_scope* scope);
+void                                 resolver_default_set_result_base(struct resolver_result* result, struct resolver_entity* base_entity);
+struct resolver_default_entity_data* resolver_default_new_entity_data_for_var_node(struct node* var_node, int offset, int flags);
+struct resolver_default_entity_data* resolver_default_new_entity_data_for_array_bracket(struct node* breacket_node);
+struct resolver_default_entity_data* resolver_default_new_entity_data_for_function(struct node* func_node, int flags);
+struct resolver_entity*              resolver_default_new_scope_entity(struct resolver_process* resolver, struct node* var_node, int offset, int flags);
+struct resolver_entity*              resolver_default_register_function(struct resolver_process* resolver, struct node* func_node, int flags);
+void                                 resolver_default_new_scope(struct resolver_process* resolver, int flags);
+void                                 resolver_default_finish_scope(struct resolver_process* resolver);
+void*                                resolver_default_new_array_entity(struct resolver_result* result, struct node* array_entity_node);
+void                                 resolver_default_delete_entity(struct resolver_entity* entity);
+void                                 resolver_default_delete_scope(struct resolver_scope* scope);
+struct resolver_entity*              resolver_default_merge_entities(struct resolver_process* process, struct resolver_result* result, struct resolver_entity* left_entity, struct resolver_entity* right_entity);
+struct resolver_process*             resolver_default_new_process(struct compile_process* compiler);
 struct resolver_entity*  resolver_get_entity_in_scope_with_entity_type(struct resolver_result* result, struct resolver_process* resolver, struct resolver_scope* scope, const char* entity_name, int entity_type);
 
 // ch124: struct_offset + helpers (declared earlier so ch122 compiled).
@@ -893,6 +913,34 @@ enum {
 struct resolver_array_data {
     // Vector of struct resolver_entity*.
     struct vector* array_entities;
+};
+
+// ch136: default resolver impl - private data shapes + flags.
+enum {
+    RESOLVER_DEFAULT_ENTITY_TYPE_STACK,
+    RESOLVER_DEFAULT_ENTITY_TYPE_SYMBOL,
+};
+
+enum {
+    RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK = 0b00000001,
+};
+
+enum {
+    RESOLVER_DEFAULT_ENTITY_DATA_TYPE_VARIABLE,
+    RESOLVER_DEFAULT_ENTITY_DATA_TYPE_FUNCTION,
+    RESOLVER_DEFAULT_ENTITY_DATA_TYPE_ARRAY_BRACKET,
+};
+
+struct resolver_default_entity_data {
+    int  type;
+    char address[60];        // "[ebp-4]" / "[var_name+4]"
+    char base_address[60];   // "ebp" / "var_name"
+    int  offset;
+    int  flags;
+};
+
+struct resolver_default_scope_data {
+    int flags;
 };
 
 enum {
