@@ -42,11 +42,31 @@ assert_contains "$out" "mov byte [rcx], al" "char store"
 out=$(asm_for tests/golden/inputs/27_string.c)
 assert_contains "$out" "lea rax, [str_" "string address with lea"
 
+# B1: an 8-byte struct comes back in rax: no hidden pointer, the
+# arguments start at rdi.
 out=$(asm_for tests/golden/inputs/25_struct_return.c)
+assert_contains "$out" $'pop rdi\npop rsi\nsub rsp, 8\nlea r11, [$make]' "small struct result: arguments from rdi"
+assert_contains "$out" $'call r11\nadd rsp, 8\nmov [rsp], rax\nmov rax, rsp' "caller stores rax into the room"
+assert_contains "$out" $'lea rax, [rbp-8]\nmov r11, rax\nmov rax, qword [r11+0]\nmov rsp, rbp' "callee returns the struct in rax"
+assert_contains "$out" $'lea rax, [rbp+24]\nmovsxd rax, dword [rax]' "second parameter in the second slot"
+
+# B1: a struct result of more than 16 bytes still goes through the
+# hidden pointer; a 24-byte struct argument next to an 8-byte one.
+cat > "$tmp/big.c" <<'EOF'
+struct big { long a, b, c; };
+struct pt { int x, y; };
+struct big make(long x, long y){ struct big r; r.a = x; r.b = y; r.c = x + y; return r; }
+long take(struct big b, struct pt p){ return b.c + p.x; }
+int main(void){ struct big b = make(2, 7); struct pt p = { 1, 2 }; return take(b, p); }
+EOF
+out=$(asm_for "$tmp/big.c")
 assert_contains "$out" $'pop rsi\npop rdx' "visible arguments from rsi on"
-assert_contains "$out" "lea rdi, [rsp+" "hidden struct pointer in rdi"
+assert_contains "$out" "lea rdi, [rsp+8]" "hidden struct pointer in rdi"
 assert_contains "$out" "mov rax, [rbp+16]" "callee reads the hidden pointer"
-assert_contains "$out" $'lea rax, [rbp+24]\nmovsxd rax, dword [rax]' "visible arguments shift one slot"
+assert_contains "$out" $'lea rax, [rbp+24]\nmov rax, qword [rax]' "visible arguments shift one slot"
+assert_contains "$out" $'mov r11, [rsp+32]\nmov [rsp+0], r11' "MEMORY struct copied to the outgoing area"
+assert_contains "$out" "mov rdi, [rsp+56]" "small struct argument in rdi"
+assert_contains "$out" $'lea rax, [rbp+64]\nadd rax, 16' "callee finds the stack struct above the home area"
 
 out=$(asm_for tests/golden/inputs/31_varargs.c)
 assert_contains "$out" $'lea rax, [rbp+16]\npush rax\nlea rax, [rbp-8]\nmov rcx, rax\npop rax\nmov qword [rcx], rax' "va_start stores an 8-byte pointer"

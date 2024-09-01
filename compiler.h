@@ -1183,8 +1183,52 @@ enum {
     EXP64_BRANCH_ALWAYS,
 };
 
+// B1: how one argument travels, from exp64_arg_layout, which the
+// caller and the callee both use. A value is a run of 8-byte words: a
+// scalar one, a struct its size rounded up to 8.
+enum {
+    EXP64_ARG_WORDS,    // the words themselves, in registers and/or on the stack
+    EXP64_ARG_REF,      // one word: the address of a copy the caller makes
+};
+
+struct exp64_arg {
+    int kind;
+    int size;           // bytes of the value
+    int words;          // 8-byte words of the value
+    int reg;            // first argument register, or -1
+    int reg_words;      // words in registers from reg on
+    int stack;          // outgoing stack word of the first word not in a register, or -1
+    int copy;           // REF: byte offset of the copy in the outgoing area
+    int slot;           // caller: expression-stack slot of word 0, counted from the top
+};
+
+// A call as exp64 hands it to the backend. The arguments' words are on
+// the expression stack, each value's first word on top of its others,
+// the first argument nearest the top; temporaries an argument left
+// behind (the room of a struct a nested call returned) may sit between
+// them, which `slot` accounts for.
+struct exp64_call {
+    const char*       symbol;           // the callee, or NULL: its address is under the arguments
+    int               count;
+    struct exp64_arg* args;
+    int               slots;            // expression-stack slots above the callee's address (or the room)
+    int               stack_words;      // outgoing stack words
+    int               area;             // bytes of the outgoing area: the stack words, then the REF copies
+    // simple: the slots, top down, are the arguments' words in order;
+    // the first reg_words go to consecutive registers from first_reg
+    // and the rest are the stack words, in order. Plain scalar calls.
+    bool              simple;
+    int               reg_words;
+    int               first_reg;
+    int               struct_size;      // room for a returned struct under everything (8-aligned), or 0
+    bool              struct_in_regs;   // it comes back in the two return registers, not through memory
+};
+
 struct exp64_ops {
     void (*push)(struct datatype* dtype);                       // push R0
+    // Push the struct of `size` bytes at R0 as 8-byte words, the last
+    // first, reading no byte past it.
+    void (*push_struct)(int size);
     void (*pop)(int reg);                                       // pop into R0 or R1
     void (*mov_r1)(void);                                       // R1 = R0
     void (*swap)(void);                                         // R0 <-> R1
@@ -1208,13 +1252,18 @@ struct exp64_ops {
     void (*label)(int label);
     // Room for a struct a call returns, on the expression stack.
     void (*reserve)(int size);
-    // The arguments are pushed, the first on top; the callee is
-    // `symbol`, or (when NULL) pushed under the arguments. With
-    // struct_size the hidden result pointer is the reserved room
-    // under them, and R0 is its address after the call.
-    void (*call)(int arguments, const char* symbol, int struct_size);
+    // Release the top `slots` slots of the expression stack.
+    void (*drop)(int slots);
+    // The call (struct exp64_call). With struct_size, the result goes
+    // to the reserved room under everything, through the hidden
+    // pointer or from the return registers, and R0 is its address
+    // after the call.
+    void (*call)(const struct exp64_call* call);
     void (*asm_text)(const char* text);                         // inline asm
 };
+
+void            exp64_parameters(struct node* function, int register_home, int stack_home);
+bool            exp64_returns_in_memory(struct datatype* dtype);
 
 void            exp64_begin(const struct exp64_ops* ops, struct compile_process* process);
 void            exp64_set_function(struct node* function);
@@ -1528,6 +1577,9 @@ enum {
 
 enum {
     RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK = 0b00000001,
+    // B1: a struct parameter passed by reference: the slot holds its
+    // address (exp64_parameters).
+    RESOLVER_DEFAULT_ENTITY_FLAG_IS_REFERENCE   = 0b00000010,
 };
 
 enum {

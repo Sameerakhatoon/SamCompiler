@@ -207,15 +207,6 @@ static void codegen_generate_function_prototype(struct node* node){
     asm_push("# extern %s", node->func.name);
 }
 
-static void codegen_generate_function_arguments(struct vector* argument_vector){
-    vector_set_peek_pointer(argument_vector, 0);
-    struct node* current = vector_peek_ptr(argument_vector);
-    while(current){
-        codegen_new_scope_entity(current, current->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
-        current = vector_peek_ptr(argument_vector);
-    }
-}
-
 // ---------------------------------------------------------------
 // the instructions exp64.c generates expressions with.
 // ---------------------------------------------------------------
@@ -307,6 +298,39 @@ static void riscv64_copy(int size){
         asm_push("addi t2, t2, %i", piece);
         asm_push("addi t3, t3, %i", piece);
         off += piece;
+    }
+}
+
+// B1: the `size` (1 to 8) bytes at off(base) into dst, zero extended,
+// reading no byte past them: 3, 5, 6 and 7 bytes are put together from
+// 4, 2 and 1 byte pieces through t5.
+static void riscv64_load_bytes(const char* dst, const char* base, int off, int size){
+    for(int done = 0; done < size; ){
+        int piece = riscv64_piece(done, size);
+        const char* r = done ? "t5" : dst;
+        asm_push("%s %s, %i(%s)", piece == 1 ? "lbu" : piece == 2 ? "lhu" : piece == 4 ? "lwu" : "ld", r, off + done, base);
+        if(done){
+            asm_push("slli t5, t5, %i", 8 * done);
+            asm_push("or %s, %s, t5", dst, dst);
+        }
+        done += piece;
+    }
+}
+
+static void riscv64_push_struct(int size){
+    struct datatype word = { .type = DATA_TYPE_LONG, .type_str = "long", .size = DATA_SIZE_DDWORD };
+    asm_push("mv t4, a0");
+    for(int w = align_value(size, DATA_SIZE_DDWORD) / DATA_SIZE_DDWORD - 1; w >= 0; w--){
+        int bytes = size - DATA_SIZE_DDWORD * w;
+        const char* base = "t4";
+        int off = DATA_SIZE_DDWORD * w;
+        if(off + DATA_SIZE_DDWORD > 2048){
+            codegen_add_imm("t6", "t4", off);
+            base = "t6";
+            off = 0;
+        }
+        riscv64_load_bytes("a0", base, off, bytes > DATA_SIZE_DDWORD ? DATA_SIZE_DDWORD : bytes);
+        riscv64_push(&word);
     }
 }
 
@@ -427,45 +451,115 @@ static void riscv64_reserve(int size){
     codegen_stack_sub_with_name(align_value(size, CODEGEN_SLOT), "result_value");
 }
 
-// A call. The arguments are on the expression stack, the first on top,
-// over the callee's address (when it is not a named function) and the
-// room for a returned struct. They are popped into a0-a7 (a1-a7 when
-// a0 carries the struct result pointer); the rest stay where they are
-// as the stack arguments, packed from 16-byte slots down to the 8-byte
-// ones the psABI wants (sp stays 16-byte aligned: the area keeps its
-// size).
-static void riscv64_call(int arguments, const char* symbol, int struct_size){
-    int first_reg  = struct_size ? 1 : 0;
-    int reg_args   = arguments;
-    if(first_reg + reg_args > current_process->target->max_reg_args){
-        reg_args = current_process->target->max_reg_args - first_reg;
+// B1: drop the top `slots` expression-stack slots: what a nested call
+// left behind under a scalar value.
+static void riscv64_drop(int slots){
+    codegen_stack_add_with_name(CODEGEN_SLOT * slots, "result_value");
+}
+
+// B1: `ins reg, off(sp)` for an 8-byte ld or sd, through t6 when off
+// is past the 12-bit offset.
+static void codegen_sp_word(const char* ins, const char* reg, int off){
+    if(off <= 2047){
+        asm_push("%s %s, %i(sp)", ins, reg, off);
+        return;
     }
-    int stack_args = arguments - reg_args;
-    for(int i = 0; i < reg_args; i++){
-        asm_push_ins_pop(codegen_arg_registers[first_reg + i], STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    codegen_add_imm("t6", "sp", off);
+    asm_push("%s %s, 0(t6)", ins, reg);
+}
+
+// The arguments of a simple call (exp64_call_is_simple): the register
+// words are popped into a0-a7 (a1-a7 when a0 carries the struct result
+// pointer); the rest stay where they are as the stack arguments,
+// packed from 16-byte slots down to the 8-byte ones the psABI wants
+// (sp stays 16-byte aligned: the area keeps its size). A struct split
+// between a7 and the stack is simple too. Returns the bytes left above
+// sp.
+static int riscv64_call_simple(const struct exp64_call* call){
+    int stack_args = call->slots - call->reg_words;
+    for(int i = 0; i < call->reg_words; i++){
+        asm_push_ins_pop(codegen_arg_registers[call->first_reg + i], STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
     for(int i = 1; i < stack_args; i++){
         asm_push("ld t1, %i(sp)", CODEGEN_SLOT * i);
         asm_push("sd t1, %i(sp)", 8 * i);
     }
-    int above = CODEGEN_SLOT * stack_args;
-    if(symbol){
-        codegen_symbol_into("t0", symbol);
-    } else {
-        asm_push("ld t0, %i(sp)", above);
-    }
-    if(struct_size){
-        codegen_add_imm("a0", "sp", above + (symbol ? 0 : CODEGEN_SLOT));
-    }
-    asm_push("jalr t0");
-    codegen_stack_sp_change(above);
     for(int i = 0; i < stack_args; i++){
         stackframe_pop_expecting(current_function, STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
-    if(!symbol){
+    return CODEGEN_SLOT * stack_args;
+}
+
+// B1: the arguments of any other call. An outgoing area goes below
+// the expression stack: the stack words are copied to it in order,
+// a struct passed by reference gets its copy there too, then the
+// register words are loaded from their slots. Returns the bytes above
+// sp: the area and the slots.
+static int riscv64_call_general(const struct exp64_call* call){
+    int area = align_value(call->area, CODEGEN_SLOT);
+    codegen_stack_sp_change(-area);
+    for(int pass = 0; pass < 2; pass++){
+        for(int i = 0; i < call->count; i++){
+            const struct exp64_arg* a = &call->args[i];
+            int from = area + CODEGEN_SLOT * a->slot;
+            if(a->kind == EXP64_ARG_REF){
+                if(pass == 0){
+                    for(int w = 0; w < a->words; w++){
+                        codegen_sp_word("ld", "t1", from + CODEGEN_SLOT * w);
+                        codegen_sp_word("sd", "t1", a->copy + 8 * w);
+                    }
+                    if(a->stack >= 0){
+                        codegen_add_imm("t1", "sp", a->copy);
+                        codegen_sp_word("sd", "t1", 8 * a->stack);
+                    }
+                } else if(a->reg >= 0){
+                    codegen_add_imm(codegen_arg_registers[a->reg], "sp", a->copy);
+                }
+                continue;
+            }
+            for(int w = 0; w < a->words; w++){
+                if(w >= a->reg_words && pass == 0){
+                    codegen_sp_word("ld", "t1", from + CODEGEN_SLOT * w);
+                    codegen_sp_word("sd", "t1", 8 * (a->stack + w - a->reg_words));
+                } else if(w < a->reg_words && pass == 1){
+                    codegen_sp_word("ld", codegen_arg_registers[a->reg + w], from + CODEGEN_SLOT * w);
+                }
+            }
+        }
+    }
+    for(int i = 0; i < call->slots; i++){
+        stackframe_pop(current_function);
+    }
+    return area + CODEGEN_SLOT * call->slots;
+}
+
+// A call. The arguments are on the expression stack over the callee's
+// address (when it is not a named function) and the room for a
+// returned struct. A struct of up to 16 bytes comes back in a0:a1 and
+// is stored into the room; a bigger one is written there through the
+// pointer in a0.
+static void riscv64_call(const struct exp64_call* call){
+    int above = call->simple ? riscv64_call_simple(call) : riscv64_call_general(call);
+    if(call->symbol){
+        codegen_symbol_into("t0", call->symbol);
+    } else {
+        codegen_sp_word("ld", "t0", above);
+    }
+    if(call->struct_size && !call->struct_in_regs){
+        codegen_add_imm("a0", "sp", above + (call->symbol ? 0 : CODEGEN_SLOT));
+    }
+    asm_push("jalr t0");
+    codegen_stack_sp_change(above);
+    if(!call->symbol){
         asm_push_ins_pop("t0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
-    if(struct_size){
+    if(call->struct_size){
+        if(call->struct_in_regs){
+            asm_push("sd a0, 0(sp)");
+            if(call->struct_size > 8){
+                asm_push("sd a1, 8(sp)");
+            }
+        }
         asm_push("mv a0, sp");
     }
 }
@@ -476,6 +570,7 @@ static void riscv64_asm_text(const char* text){
 
 static const struct exp64_ops riscv64_ops = {
     .push           = riscv64_push,
+    .push_struct    = riscv64_push_struct,
     .pop            = riscv64_pop,
     .mov_r1         = riscv64_mov_r1,
     .swap           = riscv64_swap,
@@ -497,6 +592,7 @@ static const struct exp64_ops riscv64_ops = {
     .branch         = riscv64_branch,
     .label          = riscv64_label,
     .reserve        = riscv64_reserve,
+    .drop           = riscv64_drop,
     .call           = riscv64_call,
     .asm_text       = riscv64_asm_text,
 };
@@ -554,15 +650,26 @@ static void codegen_discard_unused_stack(void){
     codegen_stack_add(stack_adjustment);
 }
 
-// The struct-return pointer arrived in a0, so it is in the first
-// home-area slot; it is also the return value.
+// A struct result of more than 16 bytes is copied through the pointer
+// that arrived in a0, so it is in the first home-area slot; it is also
+// the return value. B1: a smaller one goes back in a0:a1.
 static void codegen_generate_statement_return_exp(struct node* node){
     struct datatype dtype = exp64_generate(node->stmt.return_stmt.exp);
-    if(datatype_is_struct_or_union_non_pointer(&dtype)){
+    if(!datatype_is_struct_or_union_non_pointer(&dtype)){
+        return;
+    }
+    int size = datatype_size(&dtype);
+    if(exp64_returns_in_memory(&dtype)){
         asm_push("mv a1, a0");
         asm_push("ld a0, 16(s0)");
-        riscv64_copy(datatype_size(&dtype));
+        riscv64_copy(size);
+        return;
     }
+    asm_push("mv t4, a0");
+    if(size > DATA_SIZE_DDWORD){
+        riscv64_load_bytes("a1", "t4", DATA_SIZE_DDWORD, size - DATA_SIZE_DDWORD);
+    }
+    riscv64_load_bytes("a0", "t4", 0, size > DATA_SIZE_DDWORD ? DATA_SIZE_DDWORD : size);
 }
 
 static void _codegen_generate_if_stmt(struct node* node, int end_label_id);
@@ -837,10 +944,13 @@ static void codegen_generate_body(struct node* node, struct history* history){
 //   8(s0)  ra
 //   0(s0)  s0 of the caller
 //
-// so parameter i is at 16+8*i(s0). s0 points at the frame record,
-// like x29 on aarch64. A struct return pointer arrives in a0 and so
-// lands in the first slot without special handling. Stack arguments
-// (the ninth on) sit right above the home area, so they continue it.
+// so argument register k is at 16+8*k(s0), and with scalars only
+// parameter i is at 16+8*i(s0) (B1: exp64_parameters places every
+// parameter by the psABI rules). s0 points at the frame record, like
+// x29 on aarch64. A struct return pointer arrives in a0 and so lands
+// in the first slot without special handling. Stack arguments sit
+// right above the home area, so they continue it: a struct split
+// between a7 and the stack is whole in memory.
 static void codegen_generate_function_with_body(struct node* node){
     codegen_register_function(node, 0);
     if(!(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC)){
@@ -858,7 +968,7 @@ static void codegen_generate_function_with_body(struct node* node){
     }
     codegen_stack_sub(C_ALIGN(function_node_stack_size(node)));
     codegen_new_scope(RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
-    codegen_generate_function_arguments(function_node_argument_vec(node));
+    exp64_parameters(node, 16, 16 + codegen_home_area_size());
 
     codegen_generate_body(node->func.body_n, codegen_history_begin(IS_ALONE_STATEMENT));
     codegen_finish_scope();

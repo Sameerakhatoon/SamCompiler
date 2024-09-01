@@ -248,15 +248,6 @@ static void codegen_generate_function_prototype(struct node* node){
     }
 }
 
-static void codegen_generate_function_arguments(struct vector* argument_vector){
-    vector_set_peek_pointer(argument_vector, 0);
-    struct node* current = vector_peek_ptr(argument_vector);
-    while(current){
-        codegen_new_scope_entity(current, current->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
-        current = vector_peek_ptr(argument_vector);
-    }
-}
-
 // Byte / word / dword / qword names of the registers the stack
 // machine uses.
 static const char* codegen_sub_register(const char* original_register, size_t size){
@@ -326,6 +317,33 @@ static const char* x86_64_reg(int reg){
 static void x86_64_push(struct datatype* dtype){
     asm_push_ins_push_with_data("rax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
         &(struct stack_frame_data){.dtype = *dtype});
+}
+
+// B1: the `size` (1 to 8) bytes at [base+off] into the 64-bit register
+// dst, zero extended, reading no byte past them: 3, 5, 6 and 7 bytes
+// are put together from 4, 2 and 1 byte pieces through rcx.
+static void x86_64_load_bytes(const char* dst, const char* base, int off, int size){
+    char address[64];
+    for(int done = 0; done < size; ){
+        int piece = size - done >= 8 ? 8 : size - done >= 4 ? 4 : size - done >= 2 ? 2 : 1;
+        snprintf(address, sizeof(address), "%s+%i", base, off + done);
+        codegen_load_register(done ? "rcx" : dst, address, piece, false);
+        if(done){
+            asm_push("shl rcx, %i", 8 * done);
+            asm_push("or %s, rcx", dst);
+        }
+        done += piece;
+    }
+}
+
+static void x86_64_push_struct(int size){
+    struct datatype word = { .type = DATA_TYPE_LONG, .type_str = "long", .size = DATA_SIZE_DDWORD };
+    asm_push("mov r11, rax");
+    for(int w = align_value(size, DATA_SIZE_DDWORD) / DATA_SIZE_DDWORD - 1; w >= 0; w--){
+        int bytes = size - DATA_SIZE_DDWORD * w;
+        x86_64_load_bytes("rax", "r11", DATA_SIZE_DDWORD * w, bytes > DATA_SIZE_DDWORD ? DATA_SIZE_DDWORD : bytes);
+        x86_64_push(&word);
+    }
 }
 
 static void x86_64_pop(int reg){
@@ -523,28 +541,28 @@ static void x86_64_reserve(int size){
     codegen_stack_sub_with_name(size, "result_value");
 }
 
+// B1: drop the top `slots` expression-stack slots: what a nested call
+// left behind under a scalar value.
+static void x86_64_drop(int slots){
+    codegen_stack_add_with_name(8 * slots, "result_value");
+}
+
 // Bytes pushed below rbp right now, from the ledger. The saved rbp
 // itself sits at [rbp] and does not count.
 static size_t codegen_bytes_below_rbp(void){
     return (vector_count(current_function->func.frame.elements) - 1) * DATA_SIZE_DDWORD;
 }
 
-// A call. The arguments are on the expression stack, the first on top,
-// over the callee's address (when it is not a named function) and the
-// room for a returned struct. The first six (five after a struct
-// return pointer, which goes in rdi) are popped into rdi, rsi, rdx,
-// rcx, r8, r9; the rest stay where they are as the stack arguments,
-// the seventh at [rsp], moved down one slot when rsp needs the 16-byte
-// alignment SysV wants at the call.
-static void x86_64_call(int arguments, const char* symbol, int struct_size){
-    int first_reg  = struct_size ? 1 : 0;
-    int reg_args   = arguments;
-    if(first_reg + reg_args > current_process->target->max_reg_args){
-        reg_args = current_process->target->max_reg_args - first_reg;
-    }
-    int stack_args = arguments - reg_args;
-    for(int i = 0; i < reg_args; i++){
-        asm_push_ins_pop(codegen_arg_registers[first_reg + i], STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+// The arguments of a simple call (exp64_call_is_simple): the register
+// words are popped into rdi, rsi, rdx, rcx, r8, r9 (from rsi when rdi
+// carries the struct result pointer); the rest stay where they are as
+// the stack arguments, the first at [rsp], moved down one slot when
+// rsp needs the 16-byte alignment SysV wants at the call. Returns the
+// bytes left above rsp.
+static int x86_64_call_simple(const struct exp64_call* call){
+    int stack_args = call->slots - call->reg_words;
+    for(int i = 0; i < call->reg_words; i++){
+        asm_push_ins_pop(codegen_arg_registers[call->first_reg + i], STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
     bool pad = (codegen_bytes_below_rbp() % C_STACK_ALIGNMENT) != 0;
     if(pad){
@@ -554,14 +572,73 @@ static void x86_64_call(int arguments, const char* symbol, int struct_size){
             asm_push("mov [rsp+%i], r11", 8 * i);
         }
     }
-    int above = 8 * stack_args + (pad ? 8 : 0);
-    if(symbol){
-        asm_push("lea r11, [%s]", codegen_symbol(symbol));
+    for(int i = 0; i < stack_args; i++){
+        stackframe_pop_expecting(current_function, STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    }
+    return 8 * stack_args + (pad ? 8 : 0);
+}
+
+// B1: the arguments of any other call. An outgoing area goes below
+// the expression stack (rsp 16-byte aligned again): the stack words
+// are copied to it in order, then the register words are loaded from
+// their slots. Returns the bytes above rsp: the area and the slots.
+static int x86_64_call_general(const struct exp64_call* call){
+    int area = align_value(call->area, 8);
+    if((codegen_bytes_below_rbp() + area) % C_STACK_ALIGNMENT){
+        area += 8;
+    }
+    if(area){
+        asm_push("sub rsp, %i", area);
+    }
+    for(int pass = 0; pass < 2; pass++){
+        for(int i = 0; i < call->count; i++){
+            const struct exp64_arg* a = &call->args[i];
+            int from = area + 8 * a->slot;
+            if(a->kind == EXP64_ARG_REF){
+                if(pass == 0){
+                    for(int w = 0; w < a->words; w++){
+                        asm_push("mov r11, [rsp+%i]", from + 8 * w);
+                        asm_push("mov [rsp+%i], r11", a->copy + 8 * w);
+                    }
+                    if(a->stack >= 0){
+                        asm_push("lea r11, [rsp+%i]", a->copy);
+                        asm_push("mov [rsp+%i], r11", 8 * a->stack);
+                    }
+                } else if(a->reg >= 0){
+                    asm_push("lea %s, [rsp+%i]", codegen_arg_registers[a->reg], a->copy);
+                }
+                continue;
+            }
+            for(int w = 0; w < a->words; w++){
+                if(w >= a->reg_words && pass == 0){
+                    asm_push("mov r11, [rsp+%i]", from + 8 * w);
+                    asm_push("mov [rsp+%i], r11", 8 * (a->stack + w - a->reg_words));
+                } else if(w < a->reg_words && pass == 1){
+                    asm_push("mov %s, [rsp+%i]", codegen_arg_registers[a->reg + w], from + 8 * w);
+                }
+            }
+        }
+    }
+    for(int i = 0; i < call->slots; i++){
+        stackframe_pop(current_function);
+    }
+    return area + 8 * call->slots;
+}
+
+// A call. The arguments are on the expression stack over the callee's
+// address (when it is not a named function) and the room for a
+// returned struct. A struct of up to 16 bytes comes back in rax:rdx
+// and is stored into the room; a bigger one is written there through
+// the pointer in rdi.
+static void x86_64_call(const struct exp64_call* call){
+    int above = call->simple ? x86_64_call_simple(call) : x86_64_call_general(call);
+    if(call->symbol){
+        asm_push("lea r11, [%s]", codegen_symbol(call->symbol));
     } else {
         asm_push("mov r11, [rsp+%i]", above);
     }
-    if(struct_size){
-        asm_push("lea rdi, [rsp+%i]", above + (symbol ? 0 : 8));
+    if(call->struct_size && !call->struct_in_regs){
+        asm_push("lea rdi, [rsp+%i]", above + (call->symbol ? 0 : 8));
     }
     // al = number of vector registers used, for variadic callees
     // such as printf.
@@ -570,13 +647,16 @@ static void x86_64_call(int arguments, const char* symbol, int struct_size){
     if(above){
         asm_push("add rsp, %i", above);
     }
-    for(int i = 0; i < stack_args; i++){
-        stackframe_pop_expecting(current_function, STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-    }
-    if(!symbol){
+    if(!call->symbol){
         asm_push_ins_pop("rcx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
-    if(struct_size){
+    if(call->struct_size){
+        if(call->struct_in_regs){
+            asm_push("mov [rsp], rax");
+            if(call->struct_size > 8){
+                asm_push("mov [rsp+8], rdx");
+            }
+        }
         asm_push("mov rax, rsp");
     }
 }
@@ -587,6 +667,7 @@ static void x86_64_asm_text(const char* text){
 
 static const struct exp64_ops x86_64_ops = {
     .push           = x86_64_push,
+    .push_struct    = x86_64_push_struct,
     .pop            = x86_64_pop,
     .mov_r1         = x86_64_mov_r1,
     .swap           = x86_64_swap,
@@ -608,6 +689,7 @@ static const struct exp64_ops x86_64_ops = {
     .branch         = x86_64_branch,
     .label          = x86_64_label,
     .reserve        = x86_64_reserve,
+    .drop           = x86_64_drop,
     .call           = x86_64_call,
     .asm_text       = x86_64_asm_text,
 };
@@ -666,15 +748,26 @@ static void codegen_discard_unused_stack(void){
     codegen_stack_add(stack_adjustment);
 }
 
-// The hidden struct-return pointer arrived in rdi, so it is in the
-// first home-area slot.
+// A struct result of more than 16 bytes is copied through the hidden
+// pointer, which arrived in rdi and so is in the first home-area slot;
+// rax returns it. B1: a smaller one goes back in rax:rdx.
 static void codegen_generate_statement_return_exp(struct node* node){
     struct datatype dtype = exp64_generate(node->stmt.return_stmt.exp);
-    if(datatype_is_struct_or_union_non_pointer(&dtype)){
+    if(!datatype_is_struct_or_union_non_pointer(&dtype)){
+        return;
+    }
+    int size = datatype_size(&dtype);
+    if(exp64_returns_in_memory(&dtype)){
         asm_push("mov rcx, rax");
         asm_push("mov rax, [rbp+16]");
-        x86_64_copy(datatype_size(&dtype));
+        x86_64_copy(size);
+        return;
     }
+    asm_push("mov r11, rax");
+    if(size > DATA_SIZE_DDWORD){
+        x86_64_load_bytes("rdx", "r11", DATA_SIZE_DDWORD, size - DATA_SIZE_DDWORD);
+    }
+    x86_64_load_bytes("rax", "r11", 0, size > DATA_SIZE_DDWORD ? DATA_SIZE_DDWORD : size);
 }
 
 static void _codegen_generate_if_stmt(struct node* node, int end_label_id);
@@ -954,7 +1047,9 @@ static void codegen_generate_body(struct node* node, struct history* history){
 //   [rbp+8]  return address
 //   [rbp]    saved rbp
 //
-// so parameter i is at [rbp+16+8*i]. The return address is popped
+// so argument register k is at [rbp+16+8*k], and with scalars only
+// parameter i is at [rbp+16+8*i] (B1: exp64_parameters places every
+// parameter by the psABI rules). The return address is popped
 // first and pushed back below the home area, which keeps the layout
 // inside this function: callers (including gcc compiled ones such as
 // libc calling main) reserve nothing. `ret 48` removes it again. The
@@ -977,7 +1072,7 @@ static void codegen_generate_function_with_body(struct node* node){
     asm_push("mov rbp, rsp");
     codegen_stack_sub(C_ALIGN(function_node_stack_size(node)));
     codegen_new_scope(RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
-    codegen_generate_function_arguments(function_node_argument_vec(node));
+    exp64_parameters(node, 16, 16 + codegen_home_area_size());
 
     codegen_generate_body(node->func.body_n, codegen_history_begin(IS_ALONE_STATEMENT));
     codegen_finish_scope();

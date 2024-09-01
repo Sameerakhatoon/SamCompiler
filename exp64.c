@@ -221,6 +221,11 @@ static struct datatype exp64_identifier_address(struct node* node){
         struct resolver_default_entity_data* data = resolver_default_entity_private(entity);
         if(data && (data->flags & RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK)){
             ops->frame_address(data->offset);
+            if(data->flags & RESOLVER_DEFAULT_ENTITY_FLAG_IS_REFERENCE){
+                // B1: a big struct parameter: the slot holds the
+                // address of the caller's copy.
+                ops->load(DATA_SIZE_DDWORD, false);
+            }
         } else {
             // The symbol: the name, or a static local's own label.
             ops->symbol_address(data ? data->base_address : entity->name);
@@ -589,6 +594,137 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
     return long_type;
 }
 
+// B1: a struct result of more than 16 bytes goes through memory (the
+// hidden pointer in rdi, x8 or a0); a smaller one comes back in the
+// two return registers (rax:rdx, x0:x1, a0:a1).
+bool exp64_returns_in_memory(struct datatype* dtype){
+    return exp64_is_struct(dtype) && exp64_size(dtype) > 2 * DATA_SIZE_DDWORD;
+}
+
+// B1: where each argument of a call goes, for the caller (exp64_call)
+// and the callee (exp64_parameters) alike. Every value is integer
+// class (there is no floating point here). The psABIs' rules:
+//   x86_64 SysV: up to 16 bytes in 1 or 2 of rdi..r9 when all of them
+//     are free, else the whole value on the stack, and later scalars
+//     still take the registers left; a bigger struct (class MEMORY) is
+//     copied onto the stack.
+//   AAPCS64: up to 16 bytes in 1 or 2 of x0-x7 when all of them are
+//     free, else on the stack, and no register is used after it (NGRN
+//     = 8); a bigger struct is passed as the address of a copy the
+//     caller makes.
+//   RISC-V LP64: up to 16 bytes in 1 or 2 of a0-a7, split between a7
+//     and the stack when only a7 is left; bigger by reference too.
+// `hidden` is a struct result through memory: its pointer takes the
+// first register on x86_64 (rdi) and riscv64 (a0); aarch64 passes it
+// in x8. Returns the outgoing stack words.
+static int exp64_arg_layout(struct datatype* types, int count, bool hidden, struct exp64_arg* out){
+    const char* abi = current_process->target->backend->name;
+    bool x86_64  = S_EQ(abi, "x86_64");
+    bool aarch64 = S_EQ(abi, "aarch64");
+    int max = current_process->target->max_reg_args;
+    int next = hidden && !aarch64 ? 1 : 0;
+    int stack = 0;
+    for(int i = 0; i < count; i++){
+        struct exp64_arg* a = &out[i];
+        bool is_struct = exp64_is_struct(&types[i]);
+        a->kind      = EXP64_ARG_WORDS;
+        a->size      = is_struct ? (int)exp64_size(&types[i]) : DATA_SIZE_DDWORD;
+        a->words     = align_value(a->size, DATA_SIZE_DDWORD) / DATA_SIZE_DDWORD;
+        a->reg       = -1;
+        a->reg_words = 0;
+        a->stack     = -1;
+        a->copy      = -1;
+        int words = a->words;
+        if(a->size > 2 * DATA_SIZE_DDWORD){
+            if(x86_64){
+                a->stack = stack;
+                stack += words;
+                continue;
+            }
+            a->kind = EXP64_ARG_REF;
+            words = 1;
+        }
+        if(next + words <= max){
+            a->reg = next;
+            a->reg_words = words;
+            next += words;
+            continue;
+        }
+        if(aarch64){
+            next = max;
+        } else if(!x86_64 && next < max){
+            a->reg = next;
+            a->reg_words = max - next;
+            next = max;
+        }
+        a->stack = stack;
+        stack += words - a->reg_words;
+    }
+    return stack;
+}
+
+// The register of the first argument word: one later when the hidden
+// result pointer takes the first (x86_64, riscv64).
+static int exp64_first_reg(bool hidden){
+    return hidden && !S_EQ(current_process->target->backend->name, "aarch64") ? 1 : 0;
+}
+
+// Whether the backend may pop the words straight into the registers
+// and leave the rest in place as the stack arguments: no copies, no
+// temporaries between the words, the register words a prefix in
+// register order and the stack words the rest in order.
+static bool exp64_call_is_simple(struct exp64_call* call){
+    int word = 0;
+    int regs = 0;
+    for(int i = 0; i < call->count; i++){
+        struct exp64_arg* a = &call->args[i];
+        if(a->kind == EXP64_ARG_REF || a->slot != word){
+            return false;
+        }
+        for(int w = 0; w < a->words; w++, word++){
+            if(w < a->reg_words){
+                if(regs != word || a->reg + w != call->first_reg + word){
+                    return false;
+                }
+                regs++;
+            } else if(a->stack + w - a->reg_words != word - regs){
+                return false;
+            }
+        }
+    }
+    call->reg_words = regs;
+    return word == call->slots;
+}
+
+// The callee's side of exp64_arg_layout: every parameter of `function`
+// gets its frame offset and its entity. The prologue spilled argument
+// register k to register_home + 8*k; the caller's outgoing stack word j
+// is at stack_home + 8*j. A struct passed by reference keeps the
+// address of the caller's copy in its slot.
+void exp64_parameters(struct node* function, int register_home, int stack_home){
+    struct vector* params = function_node_argument_vec(function);
+    int count = vector_count(params);
+    struct datatype* types = calloc(count + 1, sizeof(struct datatype));
+    struct exp64_arg* layout = calloc(count + 1, sizeof(struct exp64_arg));
+    for(int i = 0; i < count; i++){
+        types[i] = (*(struct node**)vector_at(params, i))->var.type;
+    }
+    exp64_arg_layout(types, count, exp64_returns_in_memory(&function->func.rtype), layout);
+    for(int i = 0; i < count; i++){
+        struct node* param = *(struct node**)vector_at(params, i);
+        struct exp64_arg* a = &layout[i];
+        int flags = RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK;
+        if(a->kind == EXP64_ARG_REF){
+            flags |= RESOLVER_DEFAULT_ENTITY_FLAG_IS_REFERENCE;
+        }
+        param->var.aoffset = a->reg >= 0 ? register_home + DATA_SIZE_DDWORD * a->reg
+                                         : stack_home + DATA_SIZE_DDWORD * a->stack;
+        resolver_default_new_scope_entity(current_process->resolver, param, param->var.aoffset, flags);
+    }
+    free(types);
+    free(layout);
+}
+
 static struct datatype exp64_call(struct node* node){
     struct node* callee = node->exp.left;
     while(callee->type == NODE_TYPE_EXPRESSION_PARENTHESES){
@@ -619,30 +755,58 @@ static struct datatype exp64_call(struct node* node){
         return_type.flags &= ~DATATYPE_FLAG_IS_FUNCTION_POINTER;
     }
 
-    int struct_size = 0;
+    struct exp64_call call = { .symbol = symbol };
     if(exp64_is_struct(&return_type)){
-        struct_size = align_value(exp64_size(&return_type), DATA_SIZE_DDWORD);
-        ops->reserve(struct_size);
+        call.struct_size = align_value(exp64_size(&return_type), DATA_SIZE_DDWORD);
+        call.struct_in_regs = !exp64_returns_in_memory(&return_type);
+        ops->reserve(call.struct_size);
     }
     if(!symbol){
         struct datatype t = exp64_value(callee);
         ops->push(&t);
     }
+    // B1: every argument is pushed as its words, a struct by value too,
+    // last argument first. The ledger says where each one landed.
+    struct vector* ledger = current_function->func.frame.elements;
+    int base = vector_count(ledger);
     int count = vector_count(args);
+    struct datatype* types = calloc(count + 1, sizeof(struct datatype));
+    int* pushed = calloc(count + 1, sizeof(int));
     for(int i = count - 1; i >= 0; i--){
         struct node* arg = *(struct node**)vector_at(args, i);
         struct datatype t = exp64_value(arg);
         if(exp64_is_struct(&t)){
-            compiler_error(current_process, "A struct argument by value is not supported, in %s\n", current_function->func.name);
+            ops->push_struct(exp64_size(&t));
+        } else {
+            if(params && i < vector_count(params)){
+                struct node* param = *(struct node**)vector_at(params, i);
+                exp64_convert(0, &t, &param->var.type);
+            }
+            ops->push(&t);
         }
-        if(params && i < vector_count(params)){
-            struct node* param = *(struct node**)vector_at(params, i);
-            exp64_convert(0, &t, &param->var.type);
-        }
-        ops->push(&t);
+        types[i] = t;
+        pushed[i] = vector_count(ledger);
     }
-    ops->call(count, symbol, struct_size);
-    if(!struct_size && !exp64_is_void(&return_type) && !exp64_is_pointer(&return_type)
+    call.count = count;
+    call.args = calloc(count + 1, sizeof(struct exp64_arg));
+    call.first_reg = exp64_first_reg(call.struct_size && !call.struct_in_regs);
+    call.stack_words = exp64_arg_layout(types, count, call.struct_size && !call.struct_in_regs, call.args);
+    call.slots = vector_count(ledger) - base;
+    call.area = DATA_SIZE_DDWORD * call.stack_words;
+    for(int i = 0; i < count; i++){
+        struct exp64_arg* a = &call.args[i];
+        a->slot = vector_count(ledger) - pushed[i];
+        if(a->kind == EXP64_ARG_REF){
+            a->copy = call.area;
+            call.area += DATA_SIZE_DDWORD * a->words;
+        }
+    }
+    call.simple = exp64_call_is_simple(&call);
+    ops->call(&call);
+    free(types);
+    free(pushed);
+    free(call.args);
+    if(!call.struct_size && !exp64_is_void(&return_type) && !exp64_is_pointer(&return_type)
        && exp64_scalar_size(&return_type) < DATA_SIZE_DDWORD){
         // The ABIs leave the bits above a narrow return value undefined.
         ops->extend(0, exp64_scalar_size(&return_type), exp64_is_signed(&return_type));
@@ -747,7 +911,23 @@ static struct datatype exp64_expression(struct node* node, bool decay){
     return exp64_binary(node);
 }
 
+static struct datatype exp64_rvalue_of(struct node* node, bool decay);
+
+// B1: a scalar worked out of a struct a call returned (`f().x`,
+// `g(h())`) leaves the call's room on the expression stack; with the
+// value in R0 the room is dropped, so whatever was pushed before is
+// on top again.
 static struct datatype exp64_rvalue(struct node* node, bool decay){
+    struct vector* ledger = current_function->func.frame.elements;
+    int mark = vector_count(ledger);
+    struct datatype t = exp64_rvalue_of(node, decay);
+    if(vector_count(ledger) > mark && !exp64_is_struct(&t)){
+        ops->drop(vector_count(ledger) - mark);
+    }
+    return t;
+}
+
+static struct datatype exp64_rvalue_of(struct node* node, bool decay){
     switch(node->type){
         case NODE_TYPE_NUMBER:
             return exp64_number(node);

@@ -65,10 +65,26 @@ assert_contains "$out" "sub x0, x0, x1" "long arithmetic on x registers"
 out=$(asm_for tests/golden/inputs/27_string.c)
 assert_contains "$out" '.asciz "hi"' "string literal"
 
+# B1: an 8-byte struct comes back in x0.
 out=$(asm_for tests/golden/inputs/25_struct_return.c)
+assert_contains "$out" $'blr x9\nstr x0, [sp]\nmov x0, sp' "caller stores x0 into the room"
+assert_contains "$out" $'sub x0, x29, #8\nmov x11, x0\nldr x0, [x11, #0]\nmov sp, x29' "callee returns the struct in x0"
+
+# B1: a struct result of more than 16 bytes still goes through the
+# hidden pointer; a 24-byte struct argument next to an 8-byte one.
+cat > "$tmp/big.c" <<'EOF'
+struct big { long a, b, c; };
+struct pt { int x, y; };
+struct big make(long x, long y){ struct big r; r.a = x; r.b = y; r.c = x + y; return r; }
+long take(struct big b, struct pt p){ return b.c + p.x; }
+int main(void){ struct big b = make(2, 7); struct pt p = { 1, 2 }; return take(b, p); }
+EOF
+out=$(asm_for "$tmp/big.c")
 assert_contains "$out" $'add x8, sp, #0\nblr x9' "struct return pointer in x8"
-assert_contains "$out" "str x8, [x29, #16]" "callee spills x8 first"
+assert_contains "$out" $'str x8, [x29, #16]\nstp x0, x1, [x29, #32]' "callee spills x8, then x0-x7 from x29+32"
 assert_contains "$out" "ldr x0, [x29, #16]" "callee reads the result pointer"
+assert_contains "$out" $'add x0, sp, #0\nldr x1, [sp, #80]' "big struct by reference to a copy, small one in x1"
+assert_contains "$out" $'add x0, x29, #16\nldr x0, [x0]\nadd x0, x0, #16' "callee reaches the big struct through its pointer"
 
 out=$(asm_for tests/golden/inputs/31_varargs.c)
 assert_contains "$out" $'add x0, x29, #16\nstr x0, [sp, #-16]!\nsub x0, x29, #8\nmov x1, x0\nldr x0, [sp], #16\nstr x0, [x1]' "va_start stores an 8-byte pointer"
