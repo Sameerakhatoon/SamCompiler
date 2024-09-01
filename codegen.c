@@ -129,6 +129,23 @@ static int asm_push_ins_pop(const char* fmt, int expecting_stack_entity_type, co
     return flags;
 }
 
+// ch138: push variant that also carries a stack_frame_data payload
+// (e.g. the datatype of the value being pushed). Sets HAS_DATATYPE.
+static void asm_push_ins_push_with_data(const char* fmt, int stack_entity_type, const char* stack_entity_name, int flags, struct stack_frame_data* data, ...){
+    char tmp_buf[200];
+    sprintf(tmp_buf, "push %s", fmt);
+    va_list args;
+    va_start(args, data);
+    asm_push_args(tmp_buf, args);
+    va_end(args);
+    flags |= STACK_FRAME_ELEMENT_FLAG_HAS_DATATYPE;
+    assert(current_function);
+    stackframe_push(current_function, &(struct stack_frame_element){
+        .type = stack_entity_type, .name = stack_entity_name,
+        .flags = flags, .data = *data,
+    });
+}
+
 static void asm_push_ebp(void){
     asm_push_ins_push("ebp", STACK_FRAME_ELEMENT_TYPE_SAVED_BP, "function_entry_saved_ebp");
 }
@@ -184,9 +201,137 @@ static void codegen_generate_function_arguments(struct vector* argument_vector){
     }
 }
 
-// ch137: body emit lands later; for now keep the call site.
+// ch138: NUMBER -> push dword <literal>. The stack-frame ledger
+// gets a PUSHED_VALUE / "result_value" element with a numeric flag
+// and an int dtype attached.
+static void codegen_generate_number_node(struct node* node, struct history* history){
+    (void)history;
+    asm_push_ins_push_with_data("dword %i",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
+        STACK_FRAME_ELEMENT_FLAG_IS_NUMERICAL,
+        &(struct stack_frame_data){.dtype = datatype_for_numeric()},
+        (int)node->llnum);
+}
+
+static bool codegen_is_exp_root_for_flags(int flags){
+    return !(flags & EXPRESSION_IS_NOT_ROOT_NODE);
+}
+
+static bool codegen_is_exp_root(struct history* history){
+    return codegen_is_exp_root_for_flags(history->flags);
+}
+
+// ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
+// nested calls so the recursive walk knows it's deeper than the top.
+static void codegen_generate_expressionable(struct node* node, struct history* history){
+    if(codegen_is_exp_root(history)){
+        history->flags |= EXPRESSION_IS_NOT_ROOT_NODE;
+    }
+    switch(node->type){
+        case NODE_TYPE_NUMBER:
+            codegen_generate_number_node(node, history);
+            break;
+    }
+}
+
+// ch138: low-byte / word / full-register aliases for eax/ebx/ecx/edx.
+static const char* codegen_sub_register(const char* original_register, size_t size){
+    const char* reg = 0;
+    if(S_EQ(original_register, "eax")){
+        if(size == DATA_SIZE_BYTE)       reg = "al";
+        else if(size == DATA_SIZE_WORD)  reg = "ax";
+        else if(size == DATA_SIZE_DWORD) reg = "eax";
+    } else if(S_EQ(original_register, "ebx")){
+        if(size == DATA_SIZE_BYTE)       reg = "bl";
+        else if(size == DATA_SIZE_WORD)  reg = "bx";
+        else if(size == DATA_SIZE_DWORD) reg = "ebx";
+    } else if(S_EQ(original_register, "ecx")){
+        if(size == DATA_SIZE_BYTE)       reg = "cl";
+        else if(size == DATA_SIZE_WORD)  reg = "cx";
+        else if(size == DATA_SIZE_DWORD) reg = "ecx";
+    } else if(S_EQ(original_register, "edx")){
+        if(size == DATA_SIZE_BYTE)       reg = "dl";
+        else if(size == DATA_SIZE_WORD)  reg = "dx";
+        else if(size == DATA_SIZE_DWORD) reg = "edx";
+    }
+    return reg;
+}
+
+static const char* codegen_byte_word_or_dword_or_ddword(size_t size, const char** reg_to_use){
+    const char* type = 0;
+    const char* new_register = *reg_to_use;
+    if(size == DATA_SIZE_BYTE){
+        type = "byte";   new_register = codegen_sub_register(*reg_to_use, DATA_SIZE_BYTE);
+    } else if(size == DATA_SIZE_WORD){
+        type = "word";   new_register = codegen_sub_register(*reg_to_use, DATA_SIZE_WORD);
+    } else if(size == DATA_SIZE_DWORD){
+        type = "dword";  new_register = codegen_sub_register(*reg_to_use, DATA_SIZE_DWORD);
+    } else if(size == DATA_SIZE_DDWORD){
+        type = "ddword"; new_register = codegen_sub_register(*reg_to_use, DATA_SIZE_DDWORD);
+    }
+    *reg_to_use = new_register;
+    return type;
+}
+
+// ch138: emit the assignment store instruction. Currently `=` and
+// `+=`; later chapters fill in the rest of the compound ops.
+static void codegen_generate_assignment_instruction_for_operator(const char* mov_type_keyword, const char* address, const char* reg_to_use, const char* op, bool is_signed){
+    (void)is_signed;
+    if(S_EQ(op, "=")){
+        asm_push("mov %s [%s], %s", mov_type_keyword, address, reg_to_use);
+    } else if(S_EQ(op, "+=")){
+        asm_push("add %s [%s], %s", mov_type_keyword, address, reg_to_use);
+    }
+}
+
+static struct resolver_default_entity_data* codegen_entity_private(struct resolver_entity* entity){
+    return resolver_default_entity_private(entity);
+}
+
+// ch138: a local variable declaration. Register it as a scope entity
+// (stack-resident) and, if it has an initializer, evaluate the RHS
+// onto the stack and store it at the variable's address.
+static void codegen_generate_scope_variable(struct node* node){
+    struct resolver_entity* entity = codegen_new_scope_entity(node, node->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
+    if(node->var.val){
+        codegen_generate_expressionable(node->var.val,
+            codegen_history_begin(EXPRESSION_IS_ASSIGNMENT | IS_RIGHT_OPERAND_OF_ASSIGNMENT));
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        const char* reg_to_use = "eax";
+        const char* mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(&entity->dtype), &reg_to_use);
+        codegen_generate_assignment_instruction_for_operator(mov_type, codegen_entity_private(entity)->address, reg_to_use, "=",
+            entity->dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+    }
+}
+
+static void codegen_generate_statement(struct node* node, struct history* history){
+    (void)history;
+    switch(node->type){
+        case NODE_TYPE_VARIABLE:
+            codegen_generate_scope_variable(node);
+            break;
+    }
+}
+
+static void codegen_generate_scope_no_new_scope(struct vector* statements, struct history* history){
+    vector_set_peek_pointer(statements, 0);
+    struct node* stmt = vector_peek_ptr(statements);
+    while(stmt){
+        codegen_generate_statement(stmt, history);
+        stmt = vector_peek_ptr(statements);
+    }
+}
+
+static void codegen_generate_stack_scope(struct vector* statements, size_t scope_size, struct history* history){
+    (void)scope_size;
+    codegen_new_scope(RESOLVER_SCOPE_FLAG_IS_STACK);
+    codegen_generate_scope_no_new_scope(statements, history);
+    codegen_finish_scope();
+}
+
+// ch137 stub -> ch138 real impl.
 static void codegen_generate_body(struct node* node, struct history* history){
-    (void)node; (void)history;
+    codegen_generate_stack_scope(node->body.statements, node->body.size, history);
 }
 
 static void codegen_generate_function_with_body(struct node* node){
