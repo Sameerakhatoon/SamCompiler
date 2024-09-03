@@ -960,7 +960,17 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
                 padding(upward_stack ? offset : -offset, node->var.type.size);
         }
     }
-    variable_node(node)->var.aoffset = offset;
+
+    // ch139: struct/union members in a stack frame respect the
+    // body's padded flag. Tail expression also folds the per-variable
+    // padding into the recorded aoffset so codegen gets the address
+    // directly.
+    if(node_is_struct_or_union_variable(node) && variable_struct_or_union_body_node(node)->body.padded){
+        variable_node(node)->var.padding = padding(upward_stack ? offset : -offset, DATA_SIZE_DWORD);
+    }
+    variable_node(node)->var.aoffset = offset + (upward_stack
+        ?  variable_node(node)->var.padding
+        : -variable_node(node)->var.padding);
 }
 
 // Global vars don't live on the stack; they get offset 0 and the
