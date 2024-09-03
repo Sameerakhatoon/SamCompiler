@@ -53,16 +53,10 @@ lea ebx, [esp+8]
 push ebx
 call [function_call_1]
 add esp, 8
-mov ebx, eax
-; STRUCTURE PUSH
-push dword [ebx+4]
-push dword [ebx+0]
-; END STRUCTURE PUSH
 pop eax
 mov [ebp-8+0], eax
 pop eax
 mov [ebp-8+4], eax
-add esp, 8
 push dword [ebp-8]
 pop eax
 push eax

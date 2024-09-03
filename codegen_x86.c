@@ -1393,9 +1393,40 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
     codegen_stack_add(entity->func_call_data.stack_size);
     codegen_stack_add_with_name(pad, "call_alignment_pad");
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
-        // ch150: copy the struct return value into a real push chain.
-        asm_push("mov ebx, eax");
-        codegen_generate_structure_push(entity, codegen_history_begin(0), 0);
+        // The callee wrote the struct into the room reserved before the
+        // arguments, which is now on top of the stack and laid out as
+        // pushed pieces are (first piece lowest). It is the value as it
+        // stands. Pushing a second copy left the room behind, under the
+        // copy: as a call argument it shifted every later argument
+        // (`f(g(), k, h())`).
+        struct vector* elements = current_function->func.frame.elements;
+        int pieces = align_value(datatype_size(&entity->dtype), DATA_SIZE_DWORD) / DATA_SIZE_DWORD;
+        for(int i = 0; i < pieces; i++){
+            struct stack_frame_element* el = vector_at(elements, vector_count(elements) - 1 - i);
+            el->type       = STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE;
+            el->flags     |= STACK_FRAME_ELEMENT_FLAG_HAS_DATATYPE;
+            el->data.dtype = entity->dtype;
+        }
+        if(entity != result->last_entity){
+            // `f().m`: the member access after the call takes the
+            // struct's address, not its first piece. The struct moves to
+            // this call's own .data copy, so the room does not stay on
+            // the stack under the rest of the expression (`1 + f().m`).
+            // The member is read straight away, before anything else
+            // can call here again.
+            codegen_data_section_add("struct_result_%i: times %i db 0", function_call_label_id, pieces * DATA_SIZE_DWORD);
+            for(int i = 0; i < pieces; i++){
+                asm_push("mov eax, [esp+%i]", i * DATA_SIZE_DWORD);
+                asm_push("mov [struct_result_%i+%i], eax", function_call_label_id, i * DATA_SIZE_DWORD);
+            }
+            codegen_stack_add(pieces * DATA_SIZE_DWORD);
+            asm_push("mov ebx, struct_result_%i", function_call_label_id);
+            asm_push_ins_push_with_data("ebx",
+                STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+                &(struct stack_frame_data){.dtype = entity->dtype});
+            return;
+        }
+        codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_PUSHED_STRUCTURE});
     } else {
         asm_push_ins_push_with_data("eax",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
