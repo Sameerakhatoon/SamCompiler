@@ -2269,6 +2269,10 @@ static void parse_static_local(struct datatype* dtype, struct token* name_token,
     make_variable_node(dtype, global_name, value_node);
     struct node* var_node = node_pop();
     vector_push(current_process->node_tree_vec, &var_node);
+    // The resolver gives sizeof its operand's type (`sizeof(text)`,
+    // `sizeof(arg.argument)`); register the renamed global here, not as
+    // a stack variable.
+    resolver_default_new_scope_entity(current_process->resolver, var_node, 0, 0);
 
     struct parser_enumerator e = { .name = name_token->sval, .depth = parser_scope_depth(), .rename = name };
     vector_push(parser_enumerators, &e);
