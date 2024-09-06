@@ -676,7 +676,56 @@ struct code_generator {
     struct vector* string_table;     // vector of struct string_table_element*
     struct vector* entry_points;     // vector of struct codegen_entry_point*
     struct vector* exit_points;      // vector of struct codegen_exit_point*
+    // ch142: response stack used by codegen to communicate result
+    // info up through recursive expression emit.
+    struct vector* responses;
 };
+
+// ch142: codegen response system. Each call may push a response onto
+// the stack via codegen_response_expect; callees pull/acknowledge
+// to communicate "I produced this entity" up the call chain.
+enum {
+    RESPONSE_FLAG_ACKNOWLEDGED      = 0b00000001,
+    RESPONSE_FLAG_PUSHED_STRUCTURE  = 0b00000010,
+    RESPONSE_FLAG_RESOLVED_ENTITY   = 0b00000100,
+    RESPONSE_FLAG_UNARY_GET_ADDRESS = 0b00001000,
+};
+
+// ch142: composite flag masks used by the expression generator.
+#define EXPRESSION_GEN_MATHABLE (         \
+    EXPRESSION_IS_ADDITION |              \
+    EXPRESSION_IS_SUBTRACTION |           \
+    EXPRESSION_IS_MULTIPLICATION |        \
+    EXPRESSION_IS_DIVISION |              \
+    EXPRESSION_IS_MODULAS |               \
+    EXPRESSION_IS_FUNCTION_CALL |         \
+    EXPRESSION_INDIRECTION |              \
+    EXPRESSION_GET_ADDRESS |              \
+    EXPRESSION_IS_ABOVE |                 \
+    EXPRESSION_IS_ABOVE_OR_EQUAL |        \
+    EXPRESSION_IS_BELOW |                 \
+    EXPRESSION_IS_BELOW_OR_EQUAL |        \
+    EXPRESSION_IS_EQUAL |                 \
+    EXPRESSION_IS_NOT_EQUAL |             \
+    EXPRESSION_LOGICAL_AND |              \
+    EXPRESSION_LOGICAL_OR |               \
+    EXPRESSION_IN_LOGICAL_EXPRESSION |    \
+    EXPRESSION_IS_BITSHIFT_LEFT |         \
+    EXPRESSION_IS_BITSHIFT_RIGHT |        \
+    EXPRESSION_IS_BITWISE_OR |            \
+    EXPRESSION_IS_BITWISE_AND |           \
+    EXPRESSION_IS_BITWISE_XOR)
+
+#define EXPRESSION_UNINHERITABLE_FLAGS (                                                 \
+    EXPRESSION_FLAG_RIGHT_NODE | EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS |                 \
+    EXPRESSION_IS_ADDITION | EXPRESSION_IS_MODULAS | EXPRESSION_IS_SUBTRACTION |         \
+    EXPRESSION_IS_MULTIPLICATION | EXPRESSION_IS_DIVISION |                              \
+    EXPRESSION_IS_ABOVE | EXPRESSION_IS_ABOVE_OR_EQUAL |                                 \
+    EXPRESSION_IS_BELOW | EXPRESSION_IS_BELOW_OR_EQUAL | EXPRESSION_IS_EQUAL |           \
+    EXPRESSION_IS_NOT_EQUAL | EXPRESSION_LOGICAL_AND |                                   \
+    EXPRESSION_IS_BITSHIFT_LEFT | EXPRESSION_IS_BITSHIFT_RIGHT |                         \
+    EXPRESSION_IS_BITWISE_OR | EXPRESSION_IS_BITWISE_AND | EXPRESSION_IS_BITWISE_XOR |   \
+    EXPRESSION_IS_ASSIGNMENT | IS_ALONE_STATEMENT)
 
 int                    codegen(struct compile_process* process);
 struct code_generator* codegenerator_new(struct compile_process* process);

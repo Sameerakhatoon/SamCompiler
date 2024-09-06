@@ -221,6 +221,9 @@ static bool codegen_is_exp_root(struct history* history){
     return codegen_is_exp_root_for_flags(history->flags);
 }
 
+// Forward decl - real impl lands further down (ch142).
+static void codegen_generate_exp_node(struct node* node, struct history* history);
+
 // ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
 // nested calls so the recursive walk knows it's deeper than the top.
 static void codegen_generate_expressionable(struct node* node, struct history* history){
@@ -230,6 +233,12 @@ static void codegen_generate_expressionable(struct node* node, struct history* h
     switch(node->type){
         case NODE_TYPE_NUMBER:
             codegen_generate_number_node(node, history);
+            break;
+        // ch142: identifiers and (sub)expressions are routed back
+        // through the expression dispatcher.
+        case NODE_TYPE_IDENTIFIER:
+        case NODE_TYPE_EXPRESSION:
+            codegen_generate_exp_node(node, history);
             break;
     }
 }
@@ -419,11 +428,209 @@ static void codegen_generate_assignment_expression(struct node* node, struct his
     codegen_generate_assignment_part(node->exp.left, node->exp.op, history);
 }
 
+// ch142: real `codegen_generate_exp_node` body lives below; this
+// chapter's ch140 stub is gone.
+
+// ch142: codegen response system. Recursive expression emit pushes a
+// response slot before recursing; deeper levels acknowledge it with
+// the resulting entity / pushed-struct info etc.
+struct response_data {
+    union {
+        struct resolver_entity* resolved_entity;
+    };
+};
+
+struct response {
+    int                  flags;
+    struct response_data data;
+};
+
+static void codegen_response_expect(void){
+    struct response* res = calloc(1, sizeof(struct response));
+    vector_push(current_process->generator->responses, &res);
+}
+
+static struct response* codegen_response_pull(void){
+    struct response* res = vector_back_ptr_or_null(current_process->generator->responses);
+    if(res){
+        vector_pop(current_process->generator->responses);
+    }
+    return res;
+}
+
+static void codegen_response_acknowledge(struct response* response_in){
+    struct response* res = vector_back_ptr_or_null(current_process->generator->responses);
+    if(res){
+        res->flags |= response_in->flags;
+        if(response_in->data.resolved_entity){
+            res->data.resolved_entity = response_in->data.resolved_entity;
+        }
+        res->flags |= RESPONSE_FLAG_ACKNOWLEDGED;
+    }
+}
+
+static bool codegen_response_acknowledged(struct response* res){
+    // Book ships `res->flags && FLAG_ACKNOWLEDGED` which checks both
+    // truthy without the `&`. Replicated verbatim.
+    return res && res->flags && RESPONSE_FLAG_ACKNOWLEDGED;
+}
+
+static bool codegen_response_has_entity(struct response* res){
+    return codegen_response_acknowledged(res)
+        && (res->flags & RESPONSE_FLAG_RESOLVED_ENTITY)
+        && res->data.resolved_entity;
+}
+
+// ch142: asm stackframe peek helpers (current_function back / peek).
+static struct stack_frame_element* asm_stack_back(void){
+    return stackframe_back(current_function);
+}
+
+static bool asm_datatype_back(struct datatype* dtype_out){
+    struct stack_frame_element* last = asm_stack_back();
+    if(!last){ return false; }
+    if(!(last->flags & STACK_FRAME_ELEMENT_FLAG_HAS_DATATYPE)){ return false; }
+    *dtype_out = last->data.dtype;
+    return true;
+}
+
+// ch142: read-side entity-access dispatch. Mirrors the assignment
+// LHS version. Used by codegen_resolve_node_return_result so a bare
+// `b` expression resolves through entity-access too.
+static void codegen_generate_entity_access_for_entity(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
+    (void)history;
+    switch(entity->type){
+        case RESOLVER_ENTITY_TYPE_VARIABLE:
+        case RESOLVER_ENTITY_TYPE_GENERAL:
+            codegen_generate_entity_access_for_variable_or_general(result, entity);
+            break;
+        default:
+            // todo: other entity kinds land in later chapters.
+            break;
+    }
+}
+
+static void codegen_generate_entity_access(struct resolver_result* result, struct resolver_entity* root_assignment_entity, struct node* top_most_node, struct history* history){
+    (void)top_most_node;
+    codegen_generate_entity_access_start(result, root_assignment_entity, history);
+    struct resolver_entity* current = resolver_result_entity_next(root_assignment_entity);
+    while(current){
+        codegen_generate_entity_access_for_entity(result, current, history);
+        current = resolver_result_entity_next(current);
+    }
+}
+
+// ch142: resolve `node` through the resolver, emit entity-access, and
+// acknowledge the top response with the resolved last_entity. Returns
+// false (without emitting) if the resolver fails.
+static bool codegen_resolve_node_return_result(struct node* node, struct history* history, struct resolver_result** result_out){
+    struct resolver_result* result = resolver_follow(current_process->resolver, node);
+    if(resolver_result_ok(result)){
+        struct resolver_entity* root = resolver_result_entity_root(result);
+        codegen_generate_entity_access(result, root, node, history);
+        if(result_out){ *result_out = result; }
+        codegen_response_acknowledge(&(struct response){
+            .flags = RESPONSE_FLAG_RESOLVED_ENTITY,
+            .data.resolved_entity = result->last_entity,
+        });
+        return true;
+    }
+    return false;
+}
+
+static bool codegen_resolve_node_for_value(struct node* node, struct history* history){
+    struct resolver_result* result = 0;
+    if(!codegen_resolve_node_return_result(node, history, &result)){
+        return false;
+    }
+    // Later chapters fill in dtype-driven post-processing here.
+    return true;
+}
+
+// ch142: map an expression op string to its EXPRESSION_IS_* flag.
+static int codegen_set_flag_for_operator(const char* op){
+    int flag = 0;
+    if(S_EQ(op, "+"))       flag |= EXPRESSION_IS_ADDITION;
+    else if(S_EQ(op, "-"))  flag |= EXPRESSION_IS_SUBTRACTION;
+    else if(S_EQ(op, "*"))  flag |= EXPRESSION_IS_MULTIPLICATION;
+    else if(S_EQ(op, "/"))  flag |= EXPRESSION_IS_DIVISION;
+    else if(S_EQ(op, "%"))  flag |= EXPRESSION_IS_MODULAS;
+    return flag;
+}
+
+static bool codegen_can_gen_math(int flags){
+    return flags & EXPRESSION_GEN_MATHABLE;
+}
+
+static int codegen_remove_uninheritable_flags(int flags){
+    return flags & ~EXPRESSION_UNINHERITABLE_FLAGS;
+}
+
+static int get_additional_flags(int current_flags, struct node* node){
+    if(node->type != NODE_TYPE_EXPRESSION){ return 0; }
+    int extra = 0;
+    bool keep_call_args = (current_flags & EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS) && S_EQ(node->exp.op, ",");
+    if(keep_call_args){
+        extra |= EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS;
+    }
+    return extra;
+}
+
+// ch142: emit the actual arithmetic instruction for `reg op= value`.
+// imul/idiv used for signed; mul/div for unsigned.
+static void codegen_gen_math_for_value(const char* reg, const char* value, int flags, bool is_signed){
+    if(flags & EXPRESSION_IS_ADDITION){
+        asm_push("add %s, %s", reg, value);
+    } else if(flags & EXPRESSION_IS_SUBTRACTION){
+        asm_push("sub %s, %s", reg, value);
+    } else if(flags & EXPRESSION_IS_MULTIPLICATION){
+        asm_push("mov ecx, %s", value);
+        asm_push(is_signed ? "imul ecx" : "mul ecx");
+    } else if(flags & EXPRESSION_IS_DIVISION){
+        asm_push("mov ecx, %s", value);
+        if(is_signed){ asm_push("cdq"); asm_push("idiv ecx"); }
+        else         { asm_push("xor edx, edx"); asm_push("div ecx"); }
+    }
+}
+
+// ch142: emit code for a binary arithmetic expression. Walk left,
+// walk right (both pushed), pop right into ecx, pop left into eax,
+// run the chosen op, push the result.
+static void codegen_generate_exp_node_for_arithmetic(struct node* node, struct history* history){
+    assert(node->type == NODE_TYPE_EXPRESSION);
+    int flags    = history->flags;
+    int op_flags = codegen_set_flag_for_operator(node->exp.op);
+    codegen_generate_expressionable(node->exp.left,  codegen_history_down(history, flags));
+    codegen_generate_expressionable(node->exp.right, codegen_history_down(history, flags));
+    struct datatype last_dtype = datatype_for_numeric();
+    asm_datatype_back(&last_dtype);
+    if(codegen_can_gen_math(op_flags)){
+        asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_gen_math_for_value("eax", "ecx", op_flags, last_dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+    }
+    asm_push_ins_push_with_data("eax",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = last_dtype});
+}
+
 static void codegen_generate_exp_node(struct node* node, struct history* history){
     if(is_node_assignment(node)){
         codegen_generate_assignment_expression(node, history);
+        return;
     }
+    // Try resolving the node to a single entity (e.g. a bare
+    // identifier) - if we do, the value's pushed and we're done.
+    if(codegen_resolve_node_for_value(node, history)){
+        return;
+    }
+    int extra = get_additional_flags(history->flags, node);
+    codegen_generate_exp_node_for_arithmetic(node,
+        codegen_history_down(history, codegen_remove_uninheritable_flags(history->flags) | extra));
 }
+
+// ch138 expressionable dispatch was NUMBER-only; ch142 adds the
+// EXPRESSION case routed through codegen_generate_exp_node.
 
 static void codegen_generate_statement(struct node* node, struct history* history){
     (void)history;
@@ -502,6 +709,8 @@ struct code_generator* codegenerator_new(struct compile_process* process){
     gen->string_table = vector_create(sizeof(struct string_table_element*));
     gen->entry_points = vector_create(sizeof(struct codegen_entry_point*));
     gen->exit_points  = vector_create(sizeof(struct codegen_exit_point*));
+    // ch142: codegen response stack.
+    gen->responses    = vector_create(sizeof(struct response*));
     return gen;
 }
 
