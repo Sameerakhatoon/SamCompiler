@@ -440,7 +440,6 @@ void preprocessor_make_expression_node(struct expressionable *expressionable, vo
 
 void preprocessor_make_parentheses_node(struct expressionable *expressionable, void *node_ptr)
 {
-    struct preprocessor_node *node = node_ptr;
     struct preprocessor_node parentheses_node;
     parentheses_node.type = PREPROCESSOR_PARENTHESES_NODE;
     parentheses_node.parenthesis.exp = node_ptr;
@@ -584,7 +583,7 @@ bool preprocessor_is_preprocessor_keyword(const char *value)
 }
 bool preprocessor_token_is_preprocessor_keyword(struct token *token)
 {
-    return token->type == TOKEN_TYPE_IDENTIFIER || token->type == TOKEN_TYPE_KEYWORD && preprocessor_is_preprocessor_keyword(token->sval);
+    return token->type == TOKEN_TYPE_IDENTIFIER || (token->type == TOKEN_TYPE_KEYWORD && preprocessor_is_preprocessor_keyword(token->sval));
 }
 bool preprocessor_token_is_define(struct token *token)
 {

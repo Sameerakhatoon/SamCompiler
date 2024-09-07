@@ -200,7 +200,7 @@ static int exp64_new_label(void){
 // pushes it records are dropped from the ledger again.
 struct datatype exp64_typeof(struct node* node){
     bool muted = exp64_muted;
-    size_t ledger = vector_count(current_function->func.frame.elements);
+    int ledger = vector_count(current_function->func.frame.elements);
     exp64_muted = true;
     struct datatype t = exp64_rvalue(node, false);
     exp64_muted = muted;

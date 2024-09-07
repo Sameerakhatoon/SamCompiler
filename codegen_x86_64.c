@@ -160,12 +160,6 @@ static void asm_pop_rbp(void){
     asm_push_ins_pop("rbp", STACK_FRAME_ELEMENT_TYPE_SAVED_BP, "function_entry_saved_ebp");
 }
 
-static void codegen_stack_add_no_compile_time_stack_frame_restore(size_t stack_size){
-    if(stack_size != 0){
-        asm_push("add rsp, %lu", (unsigned long)stack_size);
-    }
-}
-
 static void codegen_stack_sub_with_name(size_t stack_size, const char* name){
     if(stack_size != 0){
         stackframe_sub(current_function, STACK_FRAME_ELEMENT_TYPE_UNKNOWN, name, stack_size);

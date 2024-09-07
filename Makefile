@@ -5,8 +5,10 @@ OBJECTS  = ./build/compiler.o ./build/cprocess.o ./build/validator.o \
            ./build/static-include.o ./build/static-includes/stdarg.o ./build/static-includes/stddef.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o
 INCLUDES = -I./
-CFLAGS   = -g -Wall -Wno-unused-variable -Wno-unused-function \
-           -Wno-parentheses -Wno-return-type -Wno-sizeof-pointer-memaccess
+# -Wall -Wextra with nothing hidden except unused parameters: callbacks
+# such as the expressionable and static-include tables must take the
+# full signature even when they ignore an argument.
+CFLAGS   = -g -Wall -Wextra -Wno-unused-parameter
 # -MMD writes a .d file next to each object listing every header it read,
 # so a header edit rebuilds exactly the objects that include it.
 DEPFLAGS = -MMD -MP

@@ -17,7 +17,7 @@ void buffer_extend(struct buffer* buffer, size_t size){
 }
 
 void buffer_need(struct buffer* buffer, size_t size){
-    if(buffer->msize <= (buffer->len + size)){
+    if((size_t)buffer->msize <= buffer->len + size){
         size += BUFFER_REALLOC_AMOUNT;
         buffer_extend(buffer, size);
     }

@@ -22,7 +22,6 @@ static struct token*  token_create(struct token* _token);
 static struct token*  lexer_last_token(void);
 static struct token*  handle_whitespace(void);
 static const char*    read_number_str(void);
-static unsigned long long read_number(void);
 static int            lexer_number_type(char c);
 static struct token*  token_make_number_for_value(unsigned long long number);
 static struct token*  token_make_number(void);
@@ -138,11 +137,6 @@ static const char* read_number_str(void){
     LEX_GETC_IF(buffer, c, (c >= '0' && c <= '9'));
     buffer_write(buffer, 0x00);
     return buffer_ptr(buffer);
-}
-
-static unsigned long long read_number(void){
-    const char* s = read_number_str();
-    return strtoull(s, 0, 10);
 }
 
 // Peek for an L / f / d suffix. The caller decides whether to consume it.

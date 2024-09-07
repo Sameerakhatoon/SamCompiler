@@ -252,16 +252,9 @@ static int asm_push_ins_pop_or_ignore(const char* fmt, int expecting_stack_entit
     return flags;
 }
 
-// ch156: emit `add esp, N` and `pop ebp` WITHOUT touching the
-// stack-frame ledger. Used by `return` so the runtime stack pops
-// without making the compile-time ledger think we've left the
-// function.
-static void codegen_stack_add_no_compile_time_stack_frame_restore(size_t stack_size){
-    if(stack_size != 0){
-        asm_push("add esp, %lu", (unsigned long)stack_size);
-    }
-}
-
+// ch156: emit `pop ebp` WITHOUT touching the stack-frame ledger.
+// Used by `return` so the runtime stack pops without making the
+// compile-time ledger think we've left the function.
 static void asm_pop_ebp_no_stack_frame_restore(void){
     asm_push("pop ebp");
 }

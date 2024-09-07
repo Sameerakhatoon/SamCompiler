@@ -965,10 +965,6 @@ static void parser_scope_push(struct parser_scope_entity* entity, size_t size){
     scope_push(current_process, entity, size);
 }
 
-static struct parser_scope_entity* parser_scope_last_entity(void){
-    return scope_last_entity(current_process);
-}
-
 // Consume the next token and assert it's the given symbol character.
 // Fatal compiler_error if not.
 static void expect_sym(char c){
@@ -1035,7 +1031,7 @@ static struct token* parser_build_random_type_name(void){
     char tmp_name[25];
     snprintf(tmp_name, sizeof tmp_name, "customtypename_%i", parser_get_random_type_index());
     char* sval = malloc(sizeof tmp_name);
-    strncpy(sval, tmp_name, sizeof tmp_name);
+    memcpy(sval, tmp_name, sizeof tmp_name);
     struct token* token = calloc(1, sizeof(struct token));
     token->type = TOKEN_TYPE_IDENTIFIER;
     token->sval = sval;

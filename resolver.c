@@ -556,9 +556,8 @@ struct resolver_entity* resolver_follow_for_name(struct resolver_process* resolv
     if(!result->identifier){
         result->identifier = entity;
     }
-    // Book ships this with || mis-grouped against &&; we replicate
-    // verbatim.
-    if(entity->type == RESOLVER_ENTITY_TYPE_VARIABLE && datatype_is_struct_or_union(&entity->var_data.dtype)
+    // A struct or union variable, or a function returning one.
+    if((entity->type == RESOLVER_ENTITY_TYPE_VARIABLE && datatype_is_struct_or_union(&entity->var_data.dtype))
        || (entity->type == RESOLVER_ENTITY_TYPE_FUNCTION && datatype_is_struct_or_union(&entity->dtype))){
         result->last_struct_union_entity = entity;
     }

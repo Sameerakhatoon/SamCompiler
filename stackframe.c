@@ -16,12 +16,12 @@ struct stack_frame_element* stackframe_back(struct node* func_node){
     return vector_back_or_null(func_node->func.frame.elements);
 }
 
-// the book's parens make the type check trump the
-// short-circuit, so this returns the wrong thing for a NULL element.
-// We replicate verbatim and fix in g05.
+// The book wrote `element && type != x || !S_EQ(element->name, ...)`,
+// which reads element->name when the ledger is empty. Check for NULL
+// first so an empty ledger returns 0 like any other mismatch.
 struct stack_frame_element* stackframe_back_expect(struct node* func_node, int expecting_type, const char* expecting_name){
     struct stack_frame_element* element = stackframe_back(func_node);
-    if(element && element->type != expecting_type || !S_EQ(element->name, expecting_name)){
+    if(!element || element->type != expecting_type || !S_EQ(element->name, expecting_name)){
         return 0;
     }
     return element;

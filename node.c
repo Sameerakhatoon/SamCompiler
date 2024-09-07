@@ -397,7 +397,7 @@ bool is_node_assignment(struct node* node){
         return false;
     }
     return S_EQ(node->exp.op, "=")
-        || assignment_arithmetic_operator(node->exp.op) && !is_increment_operator(node->exp.op);
+        || (assignment_arithmetic_operator(node->exp.op) && !is_increment_operator(node->exp.op));
 }
 
 // ch128: skip BLANK sentinels used for empty parens.

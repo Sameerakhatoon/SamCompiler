@@ -310,11 +310,13 @@ int vector_pop_value(struct vector* vector, void* val)
     vector_set_peek_pointer(vector, 0);
     void* ptr = vector_peek_ptr(vector);
     int index = 0;
+    int found = -1;
     while(ptr)
     {
         if (ptr == val)
         {
             vector_pop_at(vector, index);
+            found = index;
             break;
         }
         ptr = vector_peek_ptr(vector);
@@ -322,6 +324,8 @@ int vector_pop_value(struct vector* vector, void* val)
     }
 
     vector_set_peek_pointer(vector, old_pp);
+    // The index the value was removed from, or -1 if it was not there.
+    return found;
 }
 
 int vector_pop_at_data_address(struct vector *vector, void *address)
