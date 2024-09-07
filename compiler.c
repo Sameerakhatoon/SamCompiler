@@ -76,6 +76,12 @@ int compile_file(const char* filename, const char* out_filename, int flags){
         goto out;
     }
 
+    // ch143: flush + close the asm output file so NASM can read it.
+    if(process->ofile){
+        fclose(process->ofile);
+        process->ofile = 0;
+    }
+
 out:
     return res;
 }

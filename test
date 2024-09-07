@@ -1,5 +1,0 @@
-section .data
-; int x
-x: dd 0
-section .text
-section .rodata
