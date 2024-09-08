@@ -223,6 +223,8 @@ static bool codegen_is_exp_root(struct history* history){
 
 // Forward decl - real impl lands further down (ch142).
 static void codegen_generate_exp_node(struct node* node, struct history* history);
+// ch145: forward decl for the identifier value-load path.
+static void codegen_generate_identifier(struct node* node, struct history* history);
 
 // ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
 // nested calls so the recursive walk knows it's deeper than the top.
@@ -234,9 +236,11 @@ static void codegen_generate_expressionable(struct node* node, struct history* h
         case NODE_TYPE_NUMBER:
             codegen_generate_number_node(node, history);
             break;
-        // ch142: identifiers and (sub)expressions are routed back
-        // through the expression dispatcher.
+        // ch145: identifiers take the value-load path; (sub)expressions
+        // route back through the expression dispatcher.
         case NODE_TYPE_IDENTIFIER:
+            codegen_generate_identifier(node, history);
+            break;
         case NODE_TYPE_EXPRESSION:
             codegen_generate_exp_node(node, history);
             break;
@@ -428,6 +432,11 @@ static void codegen_generate_assignment_expression(struct node* node, struct his
     codegen_generate_assignment_part(node->exp.left, node->exp.op, history);
 }
 
+// ch145 helpers (codegen_reduce_register, codegen_gen_mem_access,
+// codegen_generate_variable_access, codegen_generate_identifier)
+// live further down, after the codegen response system that they
+// depend on.
+
 // ch142: real `codegen_generate_exp_node` body lives below; this
 // chapter's ch140 stub is gone.
 
@@ -479,6 +488,57 @@ static bool codegen_response_has_entity(struct response* res){
     return codegen_response_acknowledged(res)
         && (res->flags & RESPONSE_FLAG_RESOLVED_ENTITY)
         && res->data.resolved_entity;
+}
+
+// ch145: load a sub-DWORD value through eax via movsx/movzx so the
+// stack push always carries a full dword.
+static void codegen_reduce_register(const char* reg, size_t size, bool is_signed){
+    (void)reg;
+    if(size != DATA_SIZE_DWORD){
+        const char* ins = is_signed ? "movsx" : "movzx";
+        asm_push("%s eax, %s", ins, codegen_sub_register("eax", size));
+    }
+}
+
+// ch145: emit the value-load for a variable / general entity. DWORD
+// can push straight from memory; smaller types load through eax via
+// `codegen_reduce_register`.
+static void codegen_gen_mem_access(struct node* node, int flags, struct resolver_entity* entity){
+    (void)node; (void)flags;
+    if(datatype_element_size(&entity->dtype) != DATA_SIZE_DWORD){
+        asm_push("mov eax, [%s]", codegen_entity_private(entity)->address);
+        codegen_reduce_register("eax", datatype_element_size(&entity->dtype),
+            entity->dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = entity->dtype});
+    } else {
+        asm_push_ins_push_with_data("dword [%s]",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = entity->dtype},
+            codegen_entity_private(entity)->address);
+    }
+}
+
+static void codegen_generate_variable_access_for_entity(struct node* node, struct resolver_entity* entity, struct history* history){
+    codegen_gen_mem_access(node, history->flags, entity);
+}
+
+static void codegen_generate_variable_access(struct node* node, struct resolver_entity* entity, struct history* history){
+    codegen_generate_variable_access_for_entity(node, entity, codegen_history_down(history, history->flags));
+}
+
+// ch145: NODE_TYPE_IDENTIFIER read path. Resolve the name, emit a
+// value-load, then acknowledge the response with the entity.
+static void codegen_generate_identifier(struct node* node, struct history* history){
+    struct resolver_result* result = resolver_follow(current_process->resolver, node);
+    assert(resolver_result_ok(result));
+    struct resolver_entity* entity = resolver_result_entity(result);
+    codegen_generate_variable_access(node, entity, history);
+    codegen_response_acknowledge(&(struct response){
+        .flags = RESPONSE_FLAG_RESOLVED_ENTITY,
+        .data.resolved_entity = entity,
+    });
 }
 
 // ch142: asm stackframe peek helpers (current_function back / peek).
