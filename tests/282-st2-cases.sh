@@ -12,8 +12,8 @@ tmp=$(mktemp -d /tmp/sam_st2.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
 targets="x86_64"
-command -v aarch64-linux-gnu-gcc >/dev/null && command -v qemu-aarch64 >/dev/null && targets="$targets aarch64"
-command -v riscv64-linux-gnu-gcc >/dev/null && command -v qemu-riscv64 >/dev/null && targets="$targets riscv64"
+have_tools aarch64-linux-gnu-gcc qemu-aarch64 && targets="$targets aarch64"
+have_tools riscv64-linux-gnu-gcc qemu-riscv64 && targets="$targets riscv64"
 
 failures=""
 count=0

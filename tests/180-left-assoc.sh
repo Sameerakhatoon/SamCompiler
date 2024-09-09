@@ -28,7 +28,7 @@ got=$(cat "$tmp/sub.asm")
 # (a - b) is computed first, then c is pushed and subtracted.
 assert_contains "$got" $'push dword [ebp-4]\npush dword [ebp-8]\npop ecx\npop eax\nsub eax, ecx\npush eax\npush dword [ebp-12]\npop ecx\npop eax\nsub eax, ecx' "a - b - c groups as (a - b) - c"
 
-command -v nasm >/dev/null || { echo "180-left-assoc ... skip (no nasm)"; exit 0; }
+need_tools nasm
 "$REPO_ROOT/main" tests/golden/inputs/41_left_assoc.c "$tmp/la" >/dev/null 2>&1 || true
 [ -x "$tmp/la" ] || fail "41_left_assoc did not build"
 "$tmp/la" && ec=0 || ec=$?

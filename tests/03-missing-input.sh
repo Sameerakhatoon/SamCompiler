@@ -4,10 +4,16 @@
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
-mv ./test.c ./test.c.bak
-trap 'mv ./test.c.bak ./test.c 2>/dev/null || true' EXIT
+# Run from an empty temporary directory, so there is no ./test.c and
+# the checkout is never touched (it used to rename ./test.c).
+tmp=$(mktemp -d /tmp/sam_missing_input.XXXXXX)
+trap 'rm -rf "$tmp"' EXIT
 
 # ch143: main now exits non-zero on compile failure; wrap with `|| true`.
-out="$(./main 2>&1 || true)"
-assert_contains "$out" "Compile failed" "main output"
+out="$(cd "$tmp" && "$REPO_ROOT/main" 2>&1 || true)"
+assert_contains "$out" "Compile failed" "main output with no ./test.c"
+# The same with the missing input named on the command line.
+out="$(cd "$tmp" && "$REPO_ROOT/main" "$tmp/missing.c" "$tmp/out" 2>&1 || true)"
+assert_contains "$out" "Compile failed" "main output with a missing input"
+[ ! -e "$tmp/out" ] || fail "a missing input left an output file"
 pass

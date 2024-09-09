@@ -3,14 +3,12 @@
 # -target=riscv64, assembled with riscv64-linux-gnu-as, linked
 # statically and run under qemu-riscv64. The exit code must match
 # `// EXPECTED EXIT lp64: N` if present, else `// EXPECTED EXIT: N`;
-# `// EXPECTED OUTPUT: text` checks stdout. Skips cleanly when the
-# cross toolchain or qemu is missing.
+# `// EXPECTED OUTPUT: text` checks stdout. A missing cross
+# toolchain or qemu fails the test (need_tools in lib.sh).
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
-for tool in riscv64-linux-gnu-as riscv64-linux-gnu-gcc qemu-riscv64; do
-    command -v "$tool" >/dev/null || { echo "221-riscv64-run ... skip (no $tool)"; exit 0; }
-done
+need_tools riscv64-linux-gnu-as riscv64-linux-gnu-gcc qemu-riscv64
 
 tmp=$(mktemp -d /tmp/sam_rv_run.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT

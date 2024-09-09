@@ -8,15 +8,8 @@
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
-command -v nasm >/dev/null || { echo "181-x86-run ... skip (no nasm)"; exit 0; }
-if ! command -v i686-linux-gnu-gcc >/dev/null; then
-    gcc -m32 -c -o /tmp/_x86_run_check.o -x c /dev/null 2>/dev/null || {
-        rm -f /tmp/_x86_run_check.o
-        echo "181-x86-run ... skip (no i686-linux-gnu-gcc or gcc -m32)"
-        exit 0
-    }
-    rm -f /tmp/_x86_run_check.o
-fi
+need_tools nasm
+need_x86_link
 
 tmp=$(mktemp -d /tmp/sam_x86_run.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT

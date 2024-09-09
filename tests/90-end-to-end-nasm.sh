@@ -8,16 +8,9 @@
 ./build.sh >/dev/null 2>&1
 
 # Need nasm plus a 32-bit linker: i686-linux-gnu-gcc (what main uses
-# when present) or gcc -m32. Skip cleanly if neither is there.
-command -v nasm >/dev/null || { echo "90-end-to-end-nasm ... skip (no nasm)"; exit 0; }
-if ! command -v i686-linux-gnu-gcc >/dev/null; then
-    gcc -m32 -c -o /tmp/_e2e_check.o -x c /dev/null 2>/dev/null || {
-        rm -f /tmp/_e2e_check.o
-        echo "90-end-to-end-nasm ... skip (no i686-linux-gnu-gcc or gcc -m32)"
-        exit 0
-    }
-    rm -f /tmp/_e2e_check.o
-fi
+# when present) or gcc -m32. A missing one fails (lib.sh).
+need_tools nasm
+need_x86_link
 
 scratch=$(mktemp /tmp/sam_ch143_input.XXXXXX.c)
 asm_out=$(mktemp /tmp/sam_ch143_asm.XXXXXX)

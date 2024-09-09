@@ -11,9 +11,9 @@ tmp=$(mktemp -d /tmp/sam_cmp.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
 targets="x86_64"
-command -v i686-linux-gnu-gcc >/dev/null && targets="$targets x86"
-command -v aarch64-linux-gnu-gcc >/dev/null && targets="$targets aarch64"
-command -v riscv64-linux-gnu-gcc >/dev/null && targets="$targets riscv64"
+have_tools i686-linux-gnu-gcc && targets="$targets x86"
+have_tools aarch64-linux-gnu-gcc && targets="$targets aarch64"
+have_tools riscv64-linux-gnu-gcc && targets="$targets riscv64"
 
 for t in $targets; do
     out=$(OUT="$tmp" bash tools/compare_gcc.sh ARCH="$t" 09_factorial_recursion 2>&1) || fail "compare_gcc failed on $t: $out"

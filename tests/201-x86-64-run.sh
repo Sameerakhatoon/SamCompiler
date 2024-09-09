@@ -7,7 +7,7 @@
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
-command -v nasm >/dev/null || { echo "201-x86-64-run ... skip (no nasm)"; exit 0; }
+need_tools nasm
 
 tmp=$(mktemp -d /tmp/sam_x64_run.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT

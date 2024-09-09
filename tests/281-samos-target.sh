@@ -61,7 +61,7 @@ for t in x86_64 aarch64 riscv64; do
         aarch64) cc=aarch64-linux-gnu-gcc; macro=__aarch64__; machine="AArch64" ;;
         riscv64) cc=riscv64-linux-gnu-gcc; macro=__riscv;     machine="RISC-V" ;;
     esac
-    command -v "$cc" >/dev/null || { echo "  ($t: no $cc, skipped)"; continue; }
+    have_tools "$cc" || continue
     sys="$tmp/sysroot-$t"
     mkdir -p "$sys/include" "$sys/lib"
     printf '#define SYSROOT_STDIO 1\nint printf(const char* fmt, ...);\n' > "$sys/include/stdio.h"
