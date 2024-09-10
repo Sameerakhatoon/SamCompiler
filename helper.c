@@ -207,6 +207,27 @@ bool op_is_address(const char* op){
     return S_EQ(op, "&");
 }
 
+// ch146: return whichever of the two dtypes is a pointer, or NULL
+// if neither is. Tie-breaker is d1.
+struct datatype* datatype_thats_a_pointer(struct datatype* d1, struct datatype* d2){
+    if(d1->flags & DATATYPE_FLAG_IS_POINTER){ return d1; }
+    if(d2->flags & DATATYPE_FLAG_IS_POINTER){ return d2; }
+    return 0;
+}
+
+// ch146: clone dtype, drop pointer_depth by `by`, and clear
+// IS_POINTER once we hit zero or below.
+struct datatype* datatype_pointer_reduce(struct datatype* datatype, int by){
+    struct datatype* new_dtype = calloc(1, sizeof(struct datatype));
+    memcpy(new_dtype, datatype, sizeof(struct datatype));
+    new_dtype->pointer_depth -= by;
+    if(new_dtype->pointer_depth <= 0){
+        new_dtype->flags &= ~DATATYPE_FLAG_IS_POINTER;
+        new_dtype->pointer_depth = 0;
+    }
+    return new_dtype;
+}
+
 // ch138: synthetic datatype for numeric literals (int, 4 bytes,
 // IS_LITERAL flag set).
 struct datatype datatype_for_numeric(void){
