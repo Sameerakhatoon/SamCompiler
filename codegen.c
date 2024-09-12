@@ -15,10 +15,21 @@ static struct compile_process* current_process  = 0;
 // frame elements against this.
 static struct node*            current_function = 0;
 
+// ch147: per-expression bookkeeping for logical && / || codegen.
+struct history_exp {
+    const char* logical_start_op;
+    char        logical_end_label[20];
+    char        logical_end_label_positive[20];
+};
+
 // ch137: codegen-side history. Separate from the parser history but
 // carries equivalent flags (IS_ALONE_STATEMENT etc.).
 struct history {
     int flags;
+    // ch147: union grows as new expression contexts need state.
+    union {
+        struct history_exp exp;
+    };
 };
 
 static struct history* codegen_history_begin(int flags){
@@ -225,6 +236,8 @@ static bool codegen_is_exp_root(struct history* history){
 static void codegen_generate_exp_node(struct node* node, struct history* history);
 // ch145: forward decl for the identifier value-load path.
 static void codegen_generate_identifier(struct node* node, struct history* history);
+// ch147: forward decl - real impl lives in the label-system block below.
+static int  codegen_label_count(void);
 
 // ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
 // nested calls so the recursive walk knows it's deeper than the top.
@@ -610,11 +623,24 @@ static bool codegen_resolve_node_for_value(struct node* node, struct history* hi
 // ch142: map an expression op string to its EXPRESSION_IS_* flag.
 static int codegen_set_flag_for_operator(const char* op){
     int flag = 0;
-    if(S_EQ(op, "+"))       flag |= EXPRESSION_IS_ADDITION;
-    else if(S_EQ(op, "-"))  flag |= EXPRESSION_IS_SUBTRACTION;
-    else if(S_EQ(op, "*"))  flag |= EXPRESSION_IS_MULTIPLICATION;
-    else if(S_EQ(op, "/"))  flag |= EXPRESSION_IS_DIVISION;
-    else if(S_EQ(op, "%"))  flag |= EXPRESSION_IS_MODULAS;
+    if(S_EQ(op, "+"))         flag |= EXPRESSION_IS_ADDITION;
+    else if(S_EQ(op, "-"))    flag |= EXPRESSION_IS_SUBTRACTION;
+    else if(S_EQ(op, "*"))    flag |= EXPRESSION_IS_MULTIPLICATION;
+    else if(S_EQ(op, "/"))    flag |= EXPRESSION_IS_DIVISION;
+    else if(S_EQ(op, "%"))    flag |= EXPRESSION_IS_MODULAS;
+    // ch147: comparison + logical + bitwise.
+    else if(S_EQ(op, ">"))    flag |= EXPRESSION_IS_ABOVE;
+    else if(S_EQ(op, "<"))    flag |= EXPRESSION_IS_BELOW;
+    else if(S_EQ(op, ">="))   flag |= EXPRESSION_IS_ABOVE_OR_EQUAL;
+    else if(S_EQ(op, "<="))   flag |= EXPRESSION_IS_BELOW_OR_EQUAL;
+    else if(S_EQ(op, "!="))   flag |= EXPRESSION_IS_NOT_EQUAL;
+    else if(S_EQ(op, "=="))   flag |= EXPRESSION_IS_EQUAL;
+    else if(S_EQ(op, "&&"))   flag |= EXPRESSION_LOGICAL_AND;
+    else if(S_EQ(op, "<<"))   flag |= EXPRESSION_IS_BITSHIFT_LEFT;
+    else if(S_EQ(op, ">>"))   flag |= EXPRESSION_IS_BITSHIFT_RIGHT;
+    else if(S_EQ(op, "&"))    flag |= EXPRESSION_IS_BITWISE_AND;
+    else if(S_EQ(op, "|"))    flag |= EXPRESSION_IS_BITWISE_OR;
+    else if(S_EQ(op, "^"))    flag |= EXPRESSION_IS_BITWISE_XOR;
     return flag;
 }
 
@@ -636,8 +662,16 @@ static int get_additional_flags(int current_flags, struct node* node){
     return extra;
 }
 
-// ch142: emit the actual arithmetic instruction for `reg op= value`.
-// imul/idiv used for signed; mul/div for unsigned.
+// ch147: emit a comparison: cmp eax, <value>; set<cc> al; movzx eax, al.
+static void codegen_gen_cmp(const char* value, const char* set_ins){
+    asm_push("cmp eax, %s", value);
+    asm_push("%s al", set_ins);
+    asm_push("movzx eax, al");
+}
+
+// ch142/147: emit the actual instruction for `reg op= value`.
+// imul/idiv used for signed; mul/div for unsigned. ch147 adds
+// comparison, bitshift, and bitwise paths.
 static void codegen_gen_math_for_value(const char* reg, const char* value, int flags, bool is_signed){
     if(flags & EXPRESSION_IS_ADDITION){
         asm_push("add %s, %s", reg, value);
@@ -650,6 +684,97 @@ static void codegen_gen_math_for_value(const char* reg, const char* value, int f
         asm_push("mov ecx, %s", value);
         if(is_signed){ asm_push("cdq"); asm_push("idiv ecx"); }
         else         { asm_push("xor edx, edx"); asm_push("div ecx"); }
+    } else if(flags & EXPRESSION_IS_MODULAS){
+        asm_push("mov ecx, %s", value);
+        asm_push("cdq");
+        asm_push(is_signed ? "idiv ecx" : "div ecx");
+        asm_push("mov eax, edx");
+    } else if(flags & EXPRESSION_IS_ABOVE){
+        codegen_gen_cmp(value, "setg");
+    } else if(flags & EXPRESSION_IS_BELOW){
+        codegen_gen_cmp(value, "setl");
+    } else if(flags & EXPRESSION_IS_EQUAL){
+        codegen_gen_cmp(value, "sete");
+    } else if(flags & EXPRESSION_IS_ABOVE_OR_EQUAL){
+        codegen_gen_cmp(value, "setge");
+    } else if(flags & EXPRESSION_IS_BELOW_OR_EQUAL){
+        codegen_gen_cmp(value, "setle");
+    } else if(flags & EXPRESSION_IS_NOT_EQUAL){
+        codegen_gen_cmp(value, "setne");
+    } else if(flags & EXPRESSION_IS_BITSHIFT_LEFT){
+        value = codegen_sub_register(value, DATA_SIZE_BYTE);
+        asm_push("sal %s, %s", reg, value);
+    } else if(flags & EXPRESSION_IS_BITSHIFT_RIGHT){
+        value = codegen_sub_register(value, DATA_SIZE_BYTE);
+        asm_push("sar %s, %s", reg, value);
+    } else if(flags & EXPRESSION_IS_BITWISE_AND){
+        asm_push("and %s, %s", reg, value);
+    } else if(flags & EXPRESSION_IS_BITWISE_OR){
+        asm_push("or %s, %s", reg, value);
+    } else if(flags & EXPRESSION_IS_BITWISE_XOR){
+        asm_push("xor %s, %s", reg, value);
+    }
+}
+
+// ch147: short-circuit && / || codegen. Each new logical expression
+// allocates an end label pair; nested logical ops share the same
+// labels via the EXPRESSION_IN_LOGICAL_EXPRESSION flag.
+static void codegen_setup_new_logical_expression(struct history* history, struct node* node){
+    int label_index = codegen_label_count();
+    sprintf(history->exp.logical_end_label,          ".endc_%i",          label_index);
+    sprintf(history->exp.logical_end_label_positive, ".endc_%i_positive", label_index);
+    history->exp.logical_start_op = node->exp.op;
+    history->flags |= EXPRESSION_IN_LOGICAL_EXPRESSION;
+}
+
+static void codegen_generate_logical_cmp_and(const char* reg, const char* fail_label){
+    asm_push("cmp %s, 0", reg);
+    asm_push("je %s", fail_label);
+}
+
+static void codegen_generate_logical_cmp_or(const char* reg, const char* equal_label){
+    asm_push("cmp %s, 0", reg);
+    asm_push("jg %s", equal_label);
+}
+
+static void codegen_generate_logical_cmp(const char* op, const char* fail_label, const char* equal_label){
+    if(S_EQ(op, "&&"))      codegen_generate_logical_cmp_and("eax", fail_label);
+    else if(S_EQ(op, "||")) codegen_generate_logical_cmp_or("eax", equal_label);
+}
+
+static void codegen_generate_end_labels_for_logical_expression(const char* op, const char* end_label, const char* end_label_positive){
+    if(S_EQ(op, "&&")){
+        asm_push("; && END CLAUSE");
+        asm_push("mov eax, 1");
+        asm_push("jmp %s", end_label_positive);
+        asm_push("%s:", end_label);
+        asm_push("xor eax, eax");
+        asm_push("%s:", end_label_positive);
+    } else if(S_EQ(op, "||")){
+        asm_push("; || END CLAUSE");
+        asm_push("jmp %s", end_label);
+        asm_push("%s:", end_label_positive);
+        asm_push("mov eax, 1");
+        asm_push("%s:", end_label);
+    }
+}
+
+static void codegen_generate_exp_node_for_logical_arithmetic(struct node* node, struct history* history){
+    bool start_of_logical = !(history->flags & EXPRESSION_IN_LOGICAL_EXPRESSION);
+    if(start_of_logical){
+        codegen_setup_new_logical_expression(history, node);
+    }
+    codegen_generate_expressionable(node->exp.left,
+        codegen_history_down(history, history->flags | EXPRESSION_IN_LOGICAL_EXPRESSION));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    codegen_generate_logical_cmp(node->exp.op, history->exp.logical_end_label, history->exp.logical_end_label_positive);
+    codegen_generate_expressionable(node->exp.right,
+        codegen_history_down(history, history->flags | EXPRESSION_IN_LOGICAL_EXPRESSION));
+    if(!is_logical_node(node->exp.right)){
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_generate_logical_cmp(node->exp.op, history->exp.logical_end_label, history->exp.logical_end_label_positive);
+        codegen_generate_end_labels_for_logical_expression(node->exp.op, history->exp.logical_end_label, history->exp.logical_end_label_positive);
+        asm_push_ins_push("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
 }
 
@@ -658,6 +783,11 @@ static void codegen_gen_math_for_value(const char* reg, const char* value, int f
 // run the chosen op, push the result.
 static void codegen_generate_exp_node_for_arithmetic(struct node* node, struct history* history){
     assert(node->type == NODE_TYPE_EXPRESSION);
+    // ch147: short-circuit && / || routes to the logical path.
+    if(is_logical_operator(node->exp.op)){
+        codegen_generate_exp_node_for_logical_arithmetic(node, history);
+        return;
+    }
     int flags    = history->flags;
     int op_flags = codegen_set_flag_for_operator(node->exp.op);
     codegen_generate_expressionable(node->exp.left,  codegen_history_down(history, flags));
