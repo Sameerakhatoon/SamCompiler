@@ -371,6 +371,8 @@ static void codegen_generate_entity_access_for_variable_or_general(struct resolv
         &(struct stack_frame_data){.dtype = entity->dtype});
 }
 
+static void codegen_generate_entity_access_for_function_call(struct resolver_result* result, struct resolver_entity* entity);
+
 static void codegen_generate_entity_access_for_entity_for_assignment_left_operand(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
     (void)history;
     switch(entity->type){
@@ -382,7 +384,8 @@ static void codegen_generate_entity_access_for_entity_for_assignment_left_operan
             codegen_generate_entity_access_for_variable_or_general(result, entity);
             break;
         case RESOLVER_ENTITY_TYPE_FUNCTION_CALL:
-            // todo: function call
+            // ch148
+            codegen_generate_entity_access_for_function_call(result, entity);
             break;
         case RESOLVER_ENTITY_TYPE_UNARY_INDIRECTION:
             // todo: unary indirection
@@ -577,6 +580,10 @@ static void codegen_generate_entity_access_for_entity(struct resolver_result* re
         case RESOLVER_ENTITY_TYPE_GENERAL:
             codegen_generate_entity_access_for_variable_or_general(result, entity);
             break;
+        // ch148: function-call entity.
+        case RESOLVER_ENTITY_TYPE_FUNCTION_CALL:
+            codegen_generate_entity_access_for_function_call(result, entity);
+            break;
         default:
             // todo: other entity kinds land in later chapters.
             break;
@@ -590,6 +597,43 @@ static void codegen_generate_entity_access(struct resolver_result* result, struc
     while(current){
         codegen_generate_entity_access_for_entity(result, current, history);
         current = resolver_result_entity_next(current);
+    }
+    // ch148: acknowledge the resolved last entity for the parent.
+    codegen_response_acknowledge(&(struct response){
+        .flags = RESPONSE_FLAG_RESOLVED_ENTITY,
+        .data.resolved_entity = result->last_entity,
+    });
+}
+
+// ch148: function call code. Iterate args last-to-first (cdecl push
+// order), then `call ecx` (callee address sits in ecx), pop args
+// off the stack, push the eax return value as our result.
+static void codegen_generate_entity_access_for_function_call(struct resolver_result* result, struct resolver_entity* entity){
+    (void)result;
+    vector_set_flag(entity->func_call_data.arguments, VECTOR_FLAG_PEEK_DECREMENT);
+    vector_set_peek_pointer_end(entity->func_call_data.arguments);
+    struct node* node = vector_peek_ptr(entity->func_call_data.arguments);
+    asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("mov ecx, ebx");
+    if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
+        // todo: caller-allocates return slot for big struct returns.
+    }
+    while(node){
+        codegen_generate_expressionable(node, codegen_history_begin(EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS));
+        node = vector_peek_ptr(entity->func_call_data.arguments);
+    }
+    asm_push("call ecx");
+    size_t stack_size = entity->func_call_data.stack_size;
+    if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
+        stack_size += DATA_SIZE_DWORD;
+    }
+    codegen_stack_add(stack_size);
+    if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
+        // todo: generate a structure push
+    } else {
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = entity->dtype});
     }
 }
 
@@ -836,6 +880,30 @@ static void codegen_generate_exp_node(struct node* node, struct history* history
 // ch138 expressionable dispatch was NUMBER-only; ch142 adds the
 // EXPRESSION case routed through codegen_generate_exp_node.
 
+// ch148: after a statement runs, any "result_value" entries left on
+// the ledger are values nothing's going to consume - bump esp past
+// them so the frame stays balanced.
+static struct stack_frame_element* asm_stack_peek(void){
+    return stackframe_peek(current_function);
+}
+static void asm_stack_peek_start(void){
+    stackframe_peek_start(current_function);
+}
+
+static void codegen_discard_unused_stack(void){
+    asm_stack_peek_start();
+    struct stack_frame_element* el = asm_stack_peek();
+    size_t stack_adjustment = 0;
+    while(el){
+        if(!S_EQ(el->name, "result_value")){
+            break;
+        }
+        stack_adjustment += DATA_SIZE_DWORD;
+        el = asm_stack_peek();
+    }
+    codegen_stack_add(stack_adjustment);
+}
+
 static void codegen_generate_statement(struct node* node, struct history* history){
     (void)history;
     switch(node->type){
@@ -846,6 +914,8 @@ static void codegen_generate_statement(struct node* node, struct history* histor
             codegen_generate_scope_variable(node);
             break;
     }
+    // ch148: drain leftover result_value pushes.
+    codegen_discard_unused_stack();
 }
 
 static void codegen_generate_scope_no_new_scope(struct vector* statements, struct history* history){
