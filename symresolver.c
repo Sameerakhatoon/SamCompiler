@@ -72,14 +72,14 @@ struct node* symresolver_node(struct symbol* sym){
 
 // Each kind of declaration is recognized but not yet handled; the
 // later chapters fill these in.
+// ch149: register the variable / function by name so the resolver
+// can find it. Replaces the placeholder errors.
 static void symresolver_build_for_variable_node(struct compile_process* process, struct node* node){
-    (void)node;
-    compiler_error(process, "Variables not yet supported\n");
+    symresolver_register_symbol(process, node->var.name, SYMBOL_TYPE_NODE, node);
 }
 
 static void symresolver_build_for_function_node(struct compile_process* process, struct node* node){
-    (void)node;
-    compiler_error(process, "Functions are not yet supported\n");
+    symresolver_register_symbol(process, node->func.name, SYMBOL_TYPE_NODE, node);
 }
 
 static void symresolver_build_for_structure_node(struct compile_process* process, struct node* node){
