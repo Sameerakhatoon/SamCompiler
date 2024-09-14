@@ -124,6 +124,21 @@ static void asm_push_ins_push(const char* fmt, int stack_entity_type, const char
     });
 }
 
+// ch150: push variant that also tags the ledger element with extra
+// flags (e.g. IS_PUSHED_ADDRESS for an address rather than a value).
+static void asm_push_ins_push_with_flags(const char* fmt, int stack_entity_type, const char* stack_entity_name, int flags, ...){
+    char tmp_buf[200];
+    sprintf(tmp_buf, "push %s", fmt);
+    va_list args;
+    va_start(args, flags);
+    asm_push_args(tmp_buf, args);
+    va_end(args);
+    assert(current_function);
+    stackframe_push(current_function, &(struct stack_frame_element){
+        .type = stack_entity_type, .name = stack_entity_name, .flags = flags,
+    });
+}
+
 // ch137: matching pop that asserts the top stack-frame element has
 // the expected type/name. Returns the popped element's flags.
 static int asm_push_ins_pop(const char* fmt, int expecting_stack_entity_type, const char* expecting_stack_entity_name, ...){
@@ -238,6 +253,11 @@ static void codegen_generate_exp_node(struct node* node, struct history* history
 static void codegen_generate_identifier(struct node* node, struct history* history);
 // ch147: forward decl - real impl lives in the label-system block below.
 static int  codegen_label_count(void);
+// ch150: forward decls for the structure helpers (real impls live
+// further down).
+static void codegen_generate_structure_push_or_return(struct resolver_entity* entity, struct history* history, int start_pos);
+static void codegen_generate_structure_push(struct resolver_entity* entity, struct history* history, int start_pos);
+static void codegen_generate_move_struct(struct datatype* dtype, const char* base_address, int offset);
 
 // ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
 // nested calls so the recursive walk knows it's deeper than the top.
@@ -427,7 +447,8 @@ static void codegen_generate_assignment_part(struct node* node, const char* op, 
     struct resolver_entity* next_entity = resolver_result_entity_next(root_assignment_entity);
     if(!next_entity){
         if(datatype_is_struct_or_union_non_pointer(&result->last_entity->dtype)){
-            // todo: struct-value move
+            // ch150: struct-by-value assignment - pop chunks and store.
+            codegen_generate_move_struct(&result->last_entity->dtype, result->base.address, 0);
         } else {
             asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
             codegen_generate_assignment_instruction_for_operator(mov_type, result->base.address, reg_to_use, op,
@@ -516,12 +537,27 @@ static void codegen_reduce_register(const char* reg, size_t size, bool is_signed
     }
 }
 
-// ch145: emit the value-load for a variable / general entity. DWORD
-// can push straight from memory; smaller types load through eax via
-// `codegen_reduce_register`.
+// ch150: push the address of an entity (lea ebx + push ebx) tagged
+// as IS_PUSHED_ADDRESS on the ledger.
+static void codegen_gen_mem_access_get_address(struct node* node, int flags, struct resolver_entity* entity){
+    (void)node; (void)flags;
+    asm_push("lea ebx, [%s]", codegen_entity_private(entity)->address);
+    asm_push_ins_push_with_flags("ebx",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
+        STACK_FRAME_ELEMENT_FLAG_IS_PUSHED_ADDRESS);
+}
+
+// ch145/150: emit the value-load for a variable / general entity.
+// - struct/union value: push the address, pop ebx, push chunks.
+// - DWORD primitive: push straight from memory.
+// - smaller primitive: load through eax + movsx/movzx, then push.
 static void codegen_gen_mem_access(struct node* node, int flags, struct resolver_entity* entity){
     (void)node; (void)flags;
-    if(datatype_element_size(&entity->dtype) != DATA_SIZE_DWORD){
+    if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
+        codegen_gen_mem_access_get_address(node, 0, entity);
+        asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        codegen_generate_structure_push_or_return(entity, codegen_history_begin(0), 0);
+    } else if(datatype_element_size(&entity->dtype) != DATA_SIZE_DWORD){
         asm_push("mov eax, [%s]", codegen_entity_private(entity)->address);
         codegen_reduce_register("eax", datatype_element_size(&entity->dtype),
             entity->dtype.flags & DATATYPE_FLAG_IS_SIGNED);
@@ -616,7 +652,11 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
     asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     asm_push("mov ecx, ebx");
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
-        // todo: caller-allocates return slot for big struct returns.
+        // ch150: caller allocates the return slot; push a pointer to
+        // it as the hidden first argument the callee will write to.
+        asm_push("; SUBTRACT ROOM FOR RETURNED STRUCTURE/UNION DATATYPE");
+        codegen_stack_sub_with_name(align_value(datatype_size(&entity->dtype), DATA_SIZE_DWORD), "result_value");
+        asm_push_ins_push("esp", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
     while(node){
         codegen_generate_expressionable(node, codegen_history_begin(EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS));
@@ -629,7 +669,9 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
     }
     codegen_stack_add(stack_size);
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
-        // todo: generate a structure push
+        // ch150: copy the struct return value into a real push chain.
+        asm_push("mov ebx, eax");
+        codegen_generate_structure_push(entity, codegen_history_begin(0), 0);
     } else {
         asm_push_ins_push_with_data("eax",
             STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
@@ -879,6 +921,56 @@ static void codegen_generate_exp_node(struct node* node, struct history* history
 
 // ch138 expressionable dispatch was NUMBER-only; ch142 adds the
 // EXPRESSION case routed through codegen_generate_exp_node.
+
+// ch150: format an offset string like "+12" or "-4" (no `+` for
+// negatives because the minus already prints).
+static void codegen_plus_or_minus_string_for_value(char* out, int val, size_t len){
+    memset(out, 0, len);
+    if(val < 0){
+        sprintf(out, "%i", val);
+    } else {
+        sprintf(out, "+%i", val);
+    }
+}
+
+// ch150: chunk a struct on the stack into DWORD-aligned pushes. We
+// read the chunks from highest offset to lowest so they land on the
+// stack in the canonical order callers expect.
+static void codegen_generate_structure_push(struct resolver_entity* entity, struct history* history, int start_pos){
+    (void)history;
+    asm_push("; STRUCTURE PUSH");
+    size_t structure_size = align_value(entity->dtype.size, DATA_SIZE_DWORD);
+    int pushes = structure_size / DATA_SIZE_DWORD;
+    for(int i = pushes - 1; i >= start_pos; i--){
+        char fmt[10];
+        int chunk_offset = (i * DATA_SIZE_DWORD);
+        codegen_plus_or_minus_string_for_value(fmt, chunk_offset, sizeof(fmt));
+        asm_push_ins_push_with_data("dword [%s%s]",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = entity->dtype}, "ebx", fmt);
+    }
+    asm_push("; END STRUCTURE PUSH");
+    codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_PUSHED_STRUCTURE});
+}
+
+static void codegen_generate_structure_push_or_return(struct resolver_entity* entity, struct history* history, int start_pos){
+    codegen_generate_structure_push(entity, history, start_pos);
+}
+
+// ch150: pop struct chunks off the stack and write them into the
+// destination via `mov [base+offset], eax`. Used for struct-value
+// assignment (`s = t`).
+static void codegen_generate_move_struct(struct datatype* dtype, const char* base_address, int offset){
+    size_t structure_size = align_value(datatype_size(dtype), DATA_SIZE_DWORD);
+    int pops = structure_size / DATA_SIZE_DWORD;
+    for(int i = 0; i < pops; i++){
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        char fmt[10];
+        int chunk_offset = offset + (i * DATA_SIZE_DWORD);
+        codegen_plus_or_minus_string_for_value(fmt, chunk_offset, sizeof(fmt));
+        asm_push("mov [%s%s], eax", base_address, fmt);
+    }
+}
 
 // ch148: after a statement runs, any "result_value" entries left on
 // the ledger are values nothing's going to consume - bump esp past
