@@ -253,6 +253,10 @@ static void codegen_generate_exp_node(struct node* node, struct history* history
 static void codegen_generate_identifier(struct node* node, struct history* history);
 // ch147: forward decl - real impl lives in the label-system block below.
 static int  codegen_label_count(void);
+// ch151: forward decl for the UNARY codegen used by the dispatcher
+// (real impl lives further down).
+static void codegen_generate_unary(struct node* node, struct history* history);
+
 // ch150: forward decls for the structure helpers (real impls live
 // further down).
 static void codegen_generate_structure_push_or_return(struct resolver_entity* entity, struct history* history, int start_pos);
@@ -276,6 +280,10 @@ static void codegen_generate_expressionable(struct node* node, struct history* h
             break;
         case NODE_TYPE_EXPRESSION:
             codegen_generate_exp_node(node, history);
+            break;
+        // ch151: UNARY in expression position (e.g. `&x`).
+        case NODE_TYPE_UNARY:
+            codegen_generate_unary(node, history);
             break;
     }
 }
@@ -547,12 +555,17 @@ static void codegen_gen_mem_access_get_address(struct node* node, int flags, str
         STACK_FRAME_ELEMENT_FLAG_IS_PUSHED_ADDRESS);
 }
 
-// ch145/150: emit the value-load for a variable / general entity.
+// ch145/150/151: emit the value-load for a variable / general entity.
+// - EXPRESSION_GET_ADDRESS flag set: push the address, not the value.
 // - struct/union value: push the address, pop ebx, push chunks.
 // - DWORD primitive: push straight from memory.
 // - smaller primitive: load through eax + movsx/movzx, then push.
 static void codegen_gen_mem_access(struct node* node, int flags, struct resolver_entity* entity){
-    (void)node; (void)flags;
+    (void)node;
+    if(flags & EXPRESSION_GET_ADDRESS){
+        codegen_gen_mem_access_get_address(node, flags, entity);
+        return;
+    }
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
         codegen_gen_mem_access_get_address(node, 0, entity);
         asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
@@ -580,6 +593,10 @@ static void codegen_generate_variable_access(struct node* node, struct resolver_
     codegen_generate_variable_access_for_entity(node, entity, codegen_history_down(history, history->flags));
 }
 
+// ch151: forward decl for the resolver-driven value path used by
+// the unary dispatch below.
+static bool codegen_resolve_node_for_value(struct node* node, struct history* history);
+
 // ch145: NODE_TYPE_IDENTIFIER read path. Resolve the name, emit a
 // value-load, then acknowledge the response with the entity.
 static void codegen_generate_identifier(struct node* node, struct history* history){
@@ -591,6 +608,32 @@ static void codegen_generate_identifier(struct node* node, struct history* histo
         .flags = RESPONSE_FLAG_RESOLVED_ENTITY,
         .data.resolved_entity = entity,
     });
+}
+
+// ch151: `&x` - walk the operand with EXPRESSION_GET_ADDRESS so the
+// mem-access path emits an address rather than a value; acknowledge
+// UNARY_GET_ADDRESS upstream.
+static void codegen_generate_unary_address(struct node* node, struct history* history){
+    int flags = history->flags;
+    codegen_generate_expressionable(node->unary.operand,
+        codegen_history_down(history, flags | EXPRESSION_GET_ADDRESS));
+    codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_UNARY_GET_ADDRESS});
+}
+
+// ch151: NODE_TYPE_UNARY codegen dispatch. Indirection / normal
+// unaries are stubs; only address-of fires today.
+static void codegen_generate_unary(struct node* node, struct history* history){
+    if(codegen_resolve_node_for_value(node, history)){
+        return;
+    }
+    if(op_is_indirection(node->unary.op)){
+        // todo: implement pointer indirection later.
+        return;
+    } else if(op_is_address(node->unary.op)){
+        codegen_generate_unary_address(node, history);
+        return;
+    }
+    // todo: generate normal unary (-, !, ~).
 }
 
 // ch142: asm stackframe peek helpers (current_function back / peek).
