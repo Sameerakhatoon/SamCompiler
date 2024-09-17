@@ -283,7 +283,8 @@ void vector_shift_right_in_bounds_no_increment(struct vector *vector, int index,
     vector_resize_for_index(vector, index, amount);
     int eindex = (index + amount);
     size_t bytes_to_move = vector_elements_until_end(vector, index) * vector->esize;
-    memcpy(vector_at(vector, eindex), vector_at(vector, index), bytes_to_move);
+    // The ranges overlap whenever more than `amount` elements move.
+    memmove(vector_at(vector, eindex), vector_at(vector, index), bytes_to_move);
     memset(vector_at(vector, index), 0x00, amount * vector->esize);
 }
 
@@ -355,7 +356,8 @@ void vector_pop_at(struct vector *vector, int index)
     void *next_element_pos = dst_pos + vector->esize;
     void *end_pos = vector_data_end(vector);
     size_t total = (size_t)end_pos - (size_t)next_element_pos;
-    memcpy(dst_pos, next_element_pos, total);
+    // Overlapping ranges: every later element moves down one slot.
+    memmove(dst_pos, next_element_pos, total);
     vector->count -= 1;
     vector->rindex -= 1;
 }

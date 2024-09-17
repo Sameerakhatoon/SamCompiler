@@ -1,0 +1,29 @@
+# Mutants of the default fuzz corpus (seed 1, 2 per source) that
+# crash or hang the compiler today. See tests/368-fuzz-smoke.sh.
+# Regenerate with FUZZ_UPDATE_KNOWN=1 bash tests/368-fuzz-smoke.sh
+x86 arr_decay_assign.1 segfault
+x86 chain_assign.1 segfault
+x86 inc_statement.1 segfault
+x86 inc_value.1 segfault
+x86 inc_while.0 segfault
+x86 layout_nested.0 segfault
+x86 layout_ptr_member.0 segfault
+x86 pp_obj_paren.0 abort
+x86 pp_self_func.0 abort
+x86 ptr_array_of_ptrs.0 segfault
+x86 ptr_list_walk.0 segfault
+x86 string_escapes.0 segfault
+x86 struct_array_element_copy.1 segfault
+x86 ternary.1 segfault
+x86 unsigned_compare.1 segfault
+x86_64 arr_decay_assign.1 segfault
+x86_64 chain_assign.1 segfault
+x86_64 inc_statement.1 segfault
+x86_64 inc_value.1 segfault
+x86_64 inc_while.0 segfault
+x86_64 layout_nested.0 segfault
+x86_64 layout_ptr_member.0 segfault
+x86_64 ptr_array_of_ptrs.0 segfault
+x86_64 ptr_list_walk.0 segfault
+x86_64 ternary.1 segfault
+x86_64 unsigned_compare.1 segfault
