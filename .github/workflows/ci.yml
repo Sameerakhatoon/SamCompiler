@@ -1,0 +1,34 @@
+# Build SamCompiler, run the gcc differential on all four targets and run
+# the whole test suite. The commands are the ones docs/guides/RUNNING_TESTS.md
+# gives for a local run. Toolchains: docs/guides/targets/*.md.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nasm, cross gcc's and qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential nasm file python3 \
+            gcc-i686-linux-gnu gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu \
+            binutils-i686-linux-gnu binutils-aarch64-linux-gnu binutils-riscv64-linux-gnu \
+            qemu-user
+
+      - name: Build
+        run: ./build.sh clean
+
+      - name: gcc differential (x86, x86_64, aarch64, riscv64)
+        run: bash tools/gcc_differential.sh
+
+      - name: Test suite
+        # No ALLOW_MISSING_TOOLCHAIN: a missing tool fails the run.
+        run: bash tests/run-all.sh
