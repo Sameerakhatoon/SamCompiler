@@ -134,8 +134,8 @@ static int main_setup_samos(const struct target* target){
     return 0;
 }
 
-// ch143: CLI driver. Reads input/output paths from argv and decides
-// whether to run NASM + link (default) or just stop at the .asm.
+// ch143: CLI driver. Reads input/output paths from argv, compiles,
+// then assembles and links (default) or only assembles (`object`).
 int main(int argc, char** argv){
     const char* input_file  = "./test.c";
     const char* output_file = "./test";

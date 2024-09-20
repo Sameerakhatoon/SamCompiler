@@ -48,14 +48,29 @@ or
 <name> ... FAIL: <message>
 ```
 
+or, when its toolchain is missing and `ALLOW_MISSING_TOOLCHAIN=1`
+is set,
+
+```
+<name> ... SKIP (missing: <tools>)
+```
+
 The suite ends with a summary:
 
 ```
-passed: 189   failed: 0
+passed: N   failed: 0   skipped: 0
 ```
 
 Non-zero `failed` -> exit code 1, and the runner lists the failed
-test names below the summary.
+test names below the summary. Skipped tests are listed too and never
+count as passed. Without `ALLOW_MISSING_TOOLCHAIN=1` a missing tool
+is a failure, so a green run means everything ran.
+`bash tests/run-all.sh tests/176-x86-golden.sh tests/362-*.sh` runs
+just the tests given.
+
+The same commands run in CI (`.github/workflows/ci.yml`):
+`./build.sh clean`, `bash tools/gcc_differential.sh`,
+`bash tests/run-all.sh`.
 
 ## Tests per target
 
@@ -66,22 +81,29 @@ program is assembled, linked and executed.
 
 | Test | x86 | x86_64 | aarch64 | riscv64 | Needs |
 |---|---|---|---|---|---|
-| `90-end-to-end-nasm` | assemble | | | | nasm and `i686-linux-gnu-gcc` or `gcc -m32`, else skips |
+| `90-end-to-end-nasm` | assemble | | | | nasm and `i686-linux-gnu-gcc` or `gcc -m32` |
 | `176-x86-golden` | compile, byte-for-byte diff | | | | nothing extra |
 | `177-target-descriptor` | descriptor | | | | nothing extra |
 | `178-target-flag` | `-target=x86` = default | descriptor + macros | descriptor + macros | descriptor + macros | nothing extra |
 | `179-backend-split` | backend, rdefault, stdarg hooks | | | | nothing extra |
-| `180-left-assoc` | `a - b - c` asm order, run input 41 | | | | nasm for the run part, else skips it |
-| `181-x86-run` | run 55 programs | | | | nasm and `i686-linux-gnu-gcc` or `gcc -m32`, else skips |
+| `180-left-assoc` | `a - b - c` asm order, run input 41 | | | | nasm |
+| `181-x86-run` | run 55 programs | | | | nasm and `i686-linux-gnu-gcc` or `gcc -m32` |
 | `200-x86-64-codegen` | | compile, asm shape | | | nothing extra |
-| `201-x86-64-run` | | run 55 programs | | | nasm, gcc; skips without nasm |
+| `201-x86-64-run` | | run 55 programs | | | nasm, gcc |
 | `210-aarch64-codegen` | | | compile, asm shape | | nothing extra |
-| `211-aarch64-run` | | | run 55 programs | | `gcc-aarch64-linux-gnu`, `qemu-user`; skips without them |
+| `211-aarch64-run` | | | run 55 programs | | `gcc-aarch64-linux-gnu`, `qemu-user` |
 | `220-riscv64-codegen` | | | | compile, asm shape | nothing extra |
-| `221-riscv64-run` | | | | run 55 programs | `gcc-riscv64-linux-gnu`, `qemu-user`; skips without them |
-| `230-samples-all-targets` | run samples | run samples | run samples | run samples | cross targets only when their gcc and qemu exist |
-| `240-compare-gcc` | when `i686-linux-gnu-gcc` exists | always | when the cross gcc exists | when the cross gcc exists | gcc per target |
-| `250-gcc-differential` | run `tests/diff`, compare with gcc | same | same | same | gcc and qemu per target; fails if one is missing |
+| `221-riscv64-run` | | | | run 55 programs | `gcc-riscv64-linux-gnu`, `qemu-user` |
+| `230-samples-all-targets` | run samples | run samples | run samples | run samples | gcc and qemu per target |
+| `240-compare-gcc` | compare with gcc | same | same | same | gcc per target |
+| `250-gcc-differential` | run `tests/diff`, compare with gcc | same | same | same | gcc and qemu per target |
+| `362/363/364-*-golden` | | compile, byte-for-byte diff | same | same | nothing extra |
+| `366-long-identifiers` | run | run | run | run | every toolchain |
+| `367-sanitizers` | compile under ASan/UBSan | same | same | same | the target's assembler |
+| `368-fuzz-smoke` | compile mutants | same | | | python3 |
+
+A test whose tools are missing fails; see "Run the full suite" for
+`ALLOW_MISSING_TOOLCHAIN=1`.
 
 The "55 programs" are the 41 golden inputs in
 `tests/golden/inputs/` plus the 14 samples.
@@ -110,10 +132,16 @@ bash tools/gcc_differential.sh tests/diff
 bash tools/gcc_differential.sh /path/to/programs x86_64 riscv64
 ```
 
-The x86 golden test must stay green whatever changes; if a change
-to x86 output is intended, regenerate with
-`bash tests/golden/regen.sh x86` and commit the new files with the
-reason.
+The golden tests (176 for x86, 362-364 for x86_64, aarch64 and
+riscv64) must stay green whatever changes; if a change to a target's
+output is intended, regenerate with
+`bash tests/golden/regen.sh <target>` and commit the new files with
+the reason.
+
+Robustness tests: 367 builds the compiler with ASan and UBSan and
+compiles every sample and `tests/diff` program on every target with
+it; 368 compiles mutated `tests/diff` programs and fails on a crash
+or hang that is not in `tests/fuzz/known-crashes.txt`.
 
 ## Run a single test
 
@@ -184,14 +212,18 @@ binary forks the target's assembler and linker itself (for x86
 `nasm` and `i686-linux-gnu-gcc -static`); the test captures
 combined stdout / stderr and pattern-matches.
 
-Tests that run a binary check for their tools first and skip
-cleanly without them, for example `tests/211-aarch64-run.sh`:
+Tests that run a binary ask `lib.sh` for their tools first, for
+example `tests/211-aarch64-run.sh`:
 
 ```bash
-for tool in aarch64-linux-gnu-as aarch64-linux-gnu-gcc qemu-aarch64; do
-    command -v "$tool" >/dev/null || { echo "211-aarch64-run ... skip (no $tool)"; exit 0; }
-done
+need_tools aarch64-linux-gnu-as aarch64-linux-gnu-gcc qemu-aarch64
 ```
+
+A missing tool fails the test, or with `ALLOW_MISSING_TOOLCHAIN=1`
+exits 77, which `run-all.sh` counts as skipped. `have_tools` is the
+per-target form (it returns false so the test can leave that target
+out, and `pass` then reports a partial skip), and `need_x86_link`
+accepts `i686-linux-gnu-gcc` or a working `gcc -m32`.
 
 `lib.sh` runs every test with `set -euo pipefail`. A loop that runs
 programs must guard their exit codes (`out=$(prog) && ec=0 || ec=$?`)

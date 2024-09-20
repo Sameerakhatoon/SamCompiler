@@ -58,7 +58,8 @@ if(S_EQ(option, "object")){
   driver to run `nasm` after the compiler is done.
 - `COMPILE_PROCESS_EXPORT_AS_OBJECT` (set when arg 3 is the
   literal string `object`) tells the driver to **stop after
-  `nasm`**, i.e. skip the `gcc -m32` link step.
+  the assembler**, i.e. skip the link step. The assembler still
+  runs.
 
 Then:
 
@@ -95,8 +96,11 @@ and runs the five passes inside `./main`:
 5. **`validate()`** - validator. Runs on the AST the parser just
    built (this guide used to list it before `parse()`, which is
    not the order in `compile_file`). Catches duplicate function /
-   variable / struct / union definitions, void-return-with-value
-   errors, missing identifiers. Lives in `validator.c`.
+   variable / struct / union definitions and void-return-with-value
+   errors. It checks only variable, `return` and `if` statements,
+   and an undeclared identifier only when it is the whole `return`
+   expression. Lives in
+   `validator.c`.
 6. **`codegen()`** - codegen. `codegen.c` hands the AST to the
    target's backend (`codegen_x86.c`, `codegen_x86_64.c`,
    `codegen_aarch64.c` or `codegen_riscv64.c`), which emits asm
@@ -219,7 +223,7 @@ first is the one you `./output_file` to run.
 
 | What you want | Command |
 |---|---|
-| Just the asm (no nasm, no gcc) | `./main my.c /tmp/my.asm object` |
+| The asm, no link (the assembler still runs) | `./main my.c /tmp/my.asm object` |
 | Linked 32-bit binary (default) | `./main my.c /tmp/my.bin` |
 | Compile + run | `./main my.c /tmp/my.bin && /tmp/my.bin; echo "exit=$?"` |
 | Inspect the asm | `./main my.c /tmp/my.asm object && less /tmp/my.asm` |
@@ -316,7 +320,7 @@ Sample 07 demonstrates this exact pattern with `values.h`.
 
 | Symptom | What to try |
 |---|---|
-| `Compile failed` | The compiler's own parser / validator bailed. Re-run and read the diagnostic line - it includes line:col and a message. |
+| `Compile failed` | The compiler's own parser / validator bailed at the first error. Read the message on stderr: it ends with `on line L, col C in file F` (not `file:line:col`), the place the compiler had read to, which can be past the real fault. |
 | `Issue assemblign...` (after `everything compiled fine`) | The emitted asm is bad OR the link step failed. Re-run with `object` and inspect the `.asm`. |
 | `Issue assemblign...` after a clean asm | No 32-bit linker. Install `gcc-i686-linux-gnu` (not `gcc-multilib`, which removes the cross compilers;). For the other targets, see the target guide's prerequisites. |
 | `./main: No such file or directory` | The chapter test suite (or `make clean`) deleted it. Just `./build.sh` again. |

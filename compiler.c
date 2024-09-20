@@ -153,17 +153,15 @@ int compile_file(const char* filename, const char* out_filename, int flags){
         goto out;
     }
 
-    // ch104: codegen stage. Right now just emits a placeholder line
-    // through asm_push so we can wire the v-table without committing
-    // to any real instruction selection yet.
-    // ch243: validator stage. Currently scaffolded - returns ALL_OK -
-    // but the failure mode is wired so later chapters can short-circuit
-    // compilation on a check failure.
+    // ch243: validator stage, on the finished AST. Most checks report
+    // through compiler_error and exit; a non-OK result stops here too.
     if(validate(process) != VALIDATION_ALL_OK){
         res = COMPILER_FAILED_WITH_ERRORS;
         goto out;
     }
 
+    // ch104: codegen stage. codegen.c hands the AST to the target's
+    // backend, which writes the asm to the output file.
     if(codegen(process) != CODEGEN_ALL_OK){
         res = COMPILER_FAILED_WITH_ERRORS;
         goto out;

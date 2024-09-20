@@ -41,8 +41,9 @@ Produces `./main` plus per-translation-unit `.o` files under
 
 - `input.c` - source file
 - `output` - output path. With no third arg, `./main` writes the
-  `.asm`, runs `nasm` + `gcc -m32`, and puts the linked binary at
-  `output`. With the literal third arg `object`, the link step is
+  `.asm`, runs `nasm` and links with `i686-linux-gnu-gcc -static`
+  (`gcc -m32` only when the i686 cross gcc is missing), and puts
+  the linked binary at `output`. With the literal third arg `object`, the link step is
   skipped (handy when you only want to inspect the `.asm`).
 
 ## Verify a sample
@@ -193,7 +194,7 @@ that's worth a new sample; it doubles as documentation.
 
 - `USING_THE_COMPILER.md` for how `./main` works internally
   (the lex / preproc / validate / parse / codegen pipeline,
-  the post-codegen `nasm` + `gcc -m32` shell-out, and how to
+  the post-codegen assembler and linker shell-out, and how to
   drive the CLI against your own programs)
 - `RUNNING_TESTS.md` for the chapter test suite
 - `DEBUGGING.md` for failure-shape patterns we've already
