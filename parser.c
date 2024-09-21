@@ -2825,7 +2825,7 @@ static void parse_struct_no_new_scope(struct datatype* dtype, bool is_forward_de
 // body's scope is closed, so `v` lands in the enclosing scope; it used
 // to be registered inside the body's scope, which lost local ones.
 // ch68: NULL-safe via token_is_identifier (handles EOF).
-static void parse_struct_or_union_attached_variable(struct datatype* dtype){
+static void parse_struct_or_union_attached_variable(struct datatype* dtype, struct history* history){
     struct node* su_node = node_pop();
     if(token_is_identifier(token_peek_next())){
         struct token* var_name = token_next();
@@ -2838,8 +2838,10 @@ static void parse_struct_or_union_attached_variable(struct datatype* dtype){
             su_node->_struct.name = var_name->sval;
         }
         // parse_variable reads `[N]` and `= ...` too: `union u {...} g =
-        // { 1 };` and `struct s {...} a[2];`.
-        parse_variable(dtype, var_name, history_begin(0));
+        // { 1 };` and `struct s {...} a[2];`. The declaring context's
+        // history decides its layout: `struct { int x; } data;` inside
+        // a struct is a member, not a stack variable.
+        parse_variable(dtype, var_name, history);
         // _struct and _union share their layout.
         su_node->_struct.var = node_pop();
     }
@@ -2848,7 +2850,7 @@ static void parse_struct_or_union_attached_variable(struct datatype* dtype){
     node_push(su_node);
 }
 
-static void parse_struct(struct datatype* dtype){
+static void parse_struct(struct datatype* dtype, struct history* history){
     bool is_forward_declaration = !token_is_symbol(token_peek_next(), '{');
     if(!is_forward_declaration){
         parser_scope_new();
@@ -2860,7 +2862,7 @@ static void parse_struct(struct datatype* dtype){
         resolver_default_finish_scope(current_process->resolver);
         parser_scope_finish();
     }
-    parse_struct_or_union_attached_variable(dtype);
+    parse_struct_or_union_attached_variable(dtype, history);
 }
 
 // ch99: parse_union_no_scope mirrors parse_struct_no_new_scope but
@@ -2883,7 +2885,7 @@ static void parse_union_no_scope(struct datatype* dtype, bool is_forward_declara
     node_push(union_node);
 }
 
-static void parse_union(struct datatype* dtype){
+static void parse_union(struct datatype* dtype, struct history* history){
     bool is_forward_declaration = !token_is_symbol(token_peek_next(), '{');
     if(!is_forward_declaration){
         parser_scope_new();
@@ -2895,7 +2897,7 @@ static void parse_union(struct datatype* dtype){
         resolver_default_finish_scope(current_process->resolver);
         parser_scope_finish();
     }
-    parse_struct_or_union_attached_variable(dtype);
+    parse_struct_or_union_attached_variable(dtype, history);
 }
 
 // ch73: parse a function's argument list (everything between the
@@ -2924,14 +2926,14 @@ static struct vector* parse_function_arguments(struct history* history){
     return arguments_vec;
 }
 
-static void parse_struct_or_union(struct datatype* dtype){
+static void parse_struct_or_union(struct datatype* dtype, struct history* history){
     switch(dtype->type){
         case DATA_TYPE_STRUCT:
-            parse_struct(dtype);
+            parse_struct(dtype, history);
             break;
         case DATA_TYPE_UNION:
             // ch99: real union body now parses.
-            parse_union(dtype);
+            parse_union(dtype, history);
             break;
         default:
             compiler_error(current_process,
@@ -2945,7 +2947,7 @@ static void parse_struct_or_union(struct datatype* dtype){
 // We delegate to parse_struct; the lack of a `{` body causes
 // make_struct_node to set NODE_FLAG_IS_FORWARD_DECLARATION.
 static void parse_forward_declaration(struct datatype* dtype){
-    parse_struct(dtype);
+    parse_struct(dtype, history_begin(0));
 }
 
 static void parse_variable_function_or_struct_union(struct history* history){
@@ -2957,7 +2959,7 @@ static void parse_variable_function_or_struct_union(struct history* history){
     // consumes the trailing `;`. We pop it, register the symbol, push
     // back so the caller's pop+push pair sees it.
     if(datatype_is_struct_or_union(&dtype) && token_next_is_symbol('{')){
-        parse_struct_or_union(&dtype);
+        parse_struct_or_union(&dtype, history);
 
         struct node* su_node = node_pop();
         symresolver_build_for_node(current_process, su_node);
