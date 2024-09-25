@@ -15,6 +15,14 @@ static struct compile_process* current_process  = 0;
 // frame elements against this.
 static struct node*            current_function = 0;
 
+// ch154: codegen entity-rule flags for the entity-access dispatchers.
+enum {
+    CODEGEN_ENTITY_RULE_IS_STRUCT_OR_UNION_NON_POINTER = 0b00000001,
+    CODEGEN_ENTITY_RULE_IS_FUNCTION_CALL               = 0b00000010,
+    CODEGEN_ENTITY_RULE_IS_GET_ADDRESS                 = 0b00000100,
+    CODEGEN_ENTITY_RULE_WILL_PEEK_AT_EBX               = 0b00001000,
+};
+
 // ch147: per-expression bookkeeping for logical && / || codegen.
 struct history_exp {
     const char* logical_start_op;
@@ -256,6 +264,8 @@ static int  codegen_label_count(void);
 // ch151: forward decl for the UNARY codegen used by the dispatcher
 // (real impl lives further down).
 static void codegen_generate_unary(struct node* node, struct history* history);
+// ch154: forward decl for asm_datatype_back (real impl lives below).
+static bool asm_datatype_back(struct datatype* dtype_out);
 
 // ch150: forward decls for the structure helpers (real impls live
 // further down).
@@ -400,6 +410,35 @@ static void codegen_generate_entity_access_for_variable_or_general(struct resolv
 }
 
 static void codegen_generate_entity_access_for_function_call(struct resolver_result* result, struct resolver_entity* entity);
+static void codegen_generate_entity_access_for_unary_indirection_for_assignment_left_operand(struct resolver_result* result, struct resolver_entity* entity, struct history* history);
+static void codegen_generate_entity_access_for_unary_get_address(struct resolver_result* result, struct resolver_entity* entity);
+
+// ch154: codegen rules for an entity in the access chain. Used by
+// the indirection / get-address paths.
+static int codegen_entity_rules(struct resolver_entity* last_entity, struct history* history){
+    int rule_flags = 0;
+    if(!last_entity){ return 0; }
+    if(datatype_is_struct_or_union_non_pointer(&last_entity->dtype)){
+        rule_flags |= CODEGEN_ENTITY_RULE_IS_STRUCT_OR_UNION_NON_POINTER;
+    }
+    if(last_entity->type == RESOLVER_ENTITY_TYPE_FUNCTION_CALL){
+        rule_flags |= CODEGEN_ENTITY_RULE_IS_FUNCTION_CALL;
+    } else if(history->flags & EXPRESSION_GET_ADDRESS){
+        rule_flags |= CODEGEN_ENTITY_RULE_IS_GET_ADDRESS;
+    } else if(last_entity->type == RESOLVER_ENTITY_TYPE_UNARY_GET_ADDRESS){
+        rule_flags |= CODEGEN_ENTITY_RULE_IS_GET_ADDRESS;
+    } else {
+        rule_flags |= CODEGEN_ENTITY_RULE_WILL_PEEK_AT_EBX;
+    }
+    return rule_flags;
+}
+
+// ch154: chain of `mov ebx, [ebx]` for `depth` dereferences.
+static void codegen_apply_unary_access(int depth){
+    for(int i = 0; i < depth; i++){
+        asm_push("mov ebx, [ebx]");
+    }
+}
 
 static void codegen_generate_entity_access_for_entity_for_assignment_left_operand(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
     (void)history;
@@ -415,11 +454,12 @@ static void codegen_generate_entity_access_for_entity_for_assignment_left_operan
             // ch148
             codegen_generate_entity_access_for_function_call(result, entity);
             break;
+        // ch154: unary indirection / get-address on the LHS.
         case RESOLVER_ENTITY_TYPE_UNARY_INDIRECTION:
-            // todo: unary indirection
+            codegen_generate_entity_access_for_unary_indirection_for_assignment_left_operand(result, entity, history);
             break;
         case RESOLVER_ENTITY_TYPE_UNARY_GET_ADDRESS:
-            // todo: unary get address
+            codegen_generate_entity_access_for_unary_get_address(result, entity);
             break;
         case RESOLVER_ENTITY_TYPE_UNSUPPORTED:
             // todo: unsupported
@@ -430,6 +470,22 @@ static void codegen_generate_entity_access_for_entity_for_assignment_left_operan
         default:
             compiler_error(current_process, "COMPILER BUG: unexpected entity type in assignment LHS\n");
     }
+}
+
+// ch154: LHS unary indirection. Pop the address, walk
+// `depth - 1` dereferences (the last one is the store, handled
+// upstream), push tagged IS_PUSHED_ADDRESS.
+static void codegen_generate_entity_access_for_unary_indirection_for_assignment_left_operand(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
+    asm_push("; INDIRECTION");
+    int flags = asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    (void)flags;
+    int gen_entity_rules = codegen_entity_rules(result->last_entity, history);
+    (void)gen_entity_rules;
+    int depth = entity->indirection.depth - 1;
+    codegen_apply_unary_access(depth);
+    asm_push_ins_push_with_flags("ebx",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
+        STACK_FRAME_ELEMENT_FLAG_IS_PUSHED_ADDRESS);
 }
 
 static void codegen_generate_entity_access_for_assignment_left_operand(struct resolver_result* result, struct resolver_entity* root_assignment_entity, struct node* top_most_node, struct history* history){
@@ -620,20 +676,78 @@ static void codegen_generate_unary_address(struct node* node, struct history* hi
     codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_UNARY_GET_ADDRESS});
 }
 
-// ch151: NODE_TYPE_UNARY codegen dispatch. Indirection / normal
-// unaries are stubs; only address-of fires today.
+// ch154: `*p` / `**p`. Pull the operand as an address (push it),
+// pop into ebx, do `depth` `mov ebx, [ebx]` steps. The final dtype
+// gets a sign/zero extension if depth fully matches the operand's
+// pointer depth.
+static void codegen_generate_unary_indirection(struct node* node, struct history* history){
+    const char* reg_to_use = "ebx";
+    int flags = history->flags;
+    codegen_response_expect();
+    codegen_generate_expressionable(node->unary.operand,
+        codegen_history_down(history, flags | EXPRESSION_GET_ADDRESS | EXPRESSION_INDIRECTION));
+    struct response* res = codegen_response_pull();
+    assert(codegen_response_has_entity(res));
+    struct datatype operand_datatype;
+    assert(asm_datatype_back(&operand_datatype));
+    asm_push_ins_pop(reg_to_use, STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+
+    int depth = node->unary.indirection.depth;
+    int real_depth = depth;
+    if(!(history->flags & EXPRESSION_GET_ADDRESS)){
+        depth++;
+    }
+    for(int i = 0; i < depth; i++){
+        asm_push("mov %s, [%s]", reg_to_use, reg_to_use);
+    }
+    if(real_depth == res->data.resolved_entity->dtype.pointer_depth){
+        codegen_reduce_register(reg_to_use, datatype_size_no_ptr(&operand_datatype),
+            operand_datatype.flags & DATATYPE_FLAG_IS_SIGNED);
+    }
+    asm_push_ins_push_with_data(reg_to_use,
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = operand_datatype});
+    codegen_response_acknowledge(&(struct response){
+        .flags = RESPONSE_FLAG_RESOLVED_ENTITY,
+        .data.resolved_entity = res->data.resolved_entity,
+    });
+}
+
+// ch154: `-x`, `~x`, `*p` (the last hands off to indirection). `!`
+// and other unaries land in later chapters.
+static void codegen_generate_normal_unary(struct node* node, struct history* history){
+    codegen_generate_expressionable(node->unary.operand, history);
+    struct datatype last_dtype;
+    assert(asm_datatype_back(&last_dtype));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    if(S_EQ(node->unary.op, "-")){
+        asm_push("neg eax");
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = last_dtype});
+    } else if(S_EQ(node->unary.op, "~")){
+        asm_push("not eax");
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = last_dtype});
+    } else if(S_EQ(node->unary.op, "*")){
+        codegen_generate_unary_indirection(node, history);
+    }
+}
+
+// ch151/154: NODE_TYPE_UNARY codegen dispatch.
 static void codegen_generate_unary(struct node* node, struct history* history){
     if(codegen_resolve_node_for_value(node, history)){
         return;
     }
     if(op_is_indirection(node->unary.op)){
-        // todo: implement pointer indirection later.
+        codegen_generate_unary_indirection(node, history);
         return;
     } else if(op_is_address(node->unary.op)){
         codegen_generate_unary_address(node, history);
         return;
     }
-    // todo: generate normal unary (-, !, ~).
+    codegen_generate_normal_unary(node, history);
 }
 
 // ch142: asm stackframe peek helpers (current_function back / peek).
@@ -652,8 +766,41 @@ static bool asm_datatype_back(struct datatype* dtype_out){
 // ch142: read-side entity-access dispatch. Mirrors the assignment
 // LHS version. Used by codegen_resolve_node_return_result so a bare
 // `b` expression resolves through entity-access too.
-static void codegen_generate_entity_access_for_entity(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
+// ch154: read-side unary indirection on the access chain. Pop the
+// address, walk `depth` `[ebx]` dereferences, push tagged
+// IS_PUSHED_ADDRESS.
+static void codegen_generate_entity_access_for_unary_indirection(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
     (void)history;
+    asm_push("; INDIRECTION");
+    struct datatype operand_datatype;
+    assert(asm_datatype_back(&operand_datatype));
+    int flags = asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    (void)flags;
+    // Book passes `result` here where the signature wants `history`;
+    // we pass the actual history so the type-check holds.
+    int gen_entity_rules = codegen_entity_rules(result->last_entity, history);
+    (void)gen_entity_rules;
+    int depth = entity->indirection.depth;
+    codegen_apply_unary_access(depth);
+    asm_push_ins_push_with_data("ebx",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
+        STACK_FRAME_ELEMENT_FLAG_IS_PUSHED_ADDRESS,
+        &(struct stack_frame_data){.dtype = operand_datatype});
+}
+
+// ch154: read-side unary get-address. Pop ebx (the address from the
+// access chain), comment `; PUSH ADDRESS &`, push it back as the
+// result value with the entity's dtype.
+static void codegen_generate_entity_access_for_unary_get_address(struct resolver_result* result, struct resolver_entity* entity){
+    (void)result;
+    asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("; PUSH ADDRESS &");
+    asm_push_ins_push_with_data("ebx",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = entity->dtype});
+}
+
+static void codegen_generate_entity_access_for_entity(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
     switch(entity->type){
         case RESOLVER_ENTITY_TYPE_VARIABLE:
         case RESOLVER_ENTITY_TYPE_GENERAL:
@@ -662,6 +809,13 @@ static void codegen_generate_entity_access_for_entity(struct resolver_result* re
         // ch148: function-call entity.
         case RESOLVER_ENTITY_TYPE_FUNCTION_CALL:
             codegen_generate_entity_access_for_function_call(result, entity);
+            break;
+        // ch154: unary indirection / get-address on read path.
+        case RESOLVER_ENTITY_TYPE_UNARY_INDIRECTION:
+            codegen_generate_entity_access_for_unary_indirection(result, entity, history);
+            break;
+        case RESOLVER_ENTITY_TYPE_UNARY_GET_ADDRESS:
+            codegen_generate_entity_access_for_unary_get_address(result, entity);
             break;
         default:
             // todo: other entity kinds land in later chapters.
