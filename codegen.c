@@ -188,6 +188,20 @@ static void asm_pop_ebp(void){
     asm_push_ins_pop("ebp", STACK_FRAME_ELEMENT_TYPE_SAVED_BP, "function_entry_saved_ebp");
 }
 
+// ch156: emit `add esp, N` and `pop ebp` WITHOUT touching the
+// stack-frame ledger. Used by `return` so the runtime stack pops
+// without making the compile-time ledger think we've left the
+// function.
+static void codegen_stack_add_no_compile_time_stack_frame_restore(size_t stack_size){
+    if(stack_size != 0){
+        asm_push("add esp, %lu", (unsigned long)stack_size);
+    }
+}
+
+static void asm_pop_ebp_no_stack_frame_restore(void){
+    asm_push("pop ebp");
+}
+
 // ch137: bump esp down (allocate locals). The stack-frame ledger
 // gets `amount/STACK_PUSH_SIZE` UNKNOWN entries pushed so it matches
 // what codegen will pop on exit.
@@ -1222,14 +1236,54 @@ static void codegen_discard_unused_stack(void){
     codegen_stack_add(stack_adjustment);
 }
 
+// ch156: walk the return value as an expression. Struct/union return
+// goes via the hidden caller-allocated slot pointed to by [ebp+8];
+// other types pop into eax.
+static void codegen_generate_statement_return_exp(struct node* node){
+    codegen_response_expect();
+    codegen_generate_expressionable(node->stmt.return_stmt.exp,
+        codegen_history_begin(IS_STATEMENT_RETURN));
+    struct datatype dtype;
+    assert(asm_datatype_back(&dtype));
+    if(datatype_is_struct_or_union_non_pointer(&dtype)){
+        asm_push("mov edx, [ebp+8]");
+        codegen_generate_move_struct(&dtype, "edx", 0);
+        asm_push("mov eax, [ebp+8]");
+        return;
+    }
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+}
+
+// ch156: real `return [expr];` emit. Drops the frame WITHOUT touching
+// the compile-time ledger (the ledger only finalises at the function
+// epilogue assertion), then `pop ebp; ret`.
+static void codegen_generate_statement_return(struct node* node){
+    if(node->stmt.return_stmt.exp){
+        codegen_generate_statement_return_exp(node);
+    }
+    codegen_stack_add_no_compile_time_stack_frame_restore(
+        C_ALIGN(function_node_stack_size(node->binded.function)));
+    asm_pop_ebp_no_stack_frame_restore();
+    asm_push("ret");
+}
+
 static void codegen_generate_statement(struct node* node, struct history* history){
     (void)history;
     switch(node->type){
         case NODE_TYPE_EXPRESSION:
             codegen_generate_exp_node(node, codegen_history_begin(history->flags));
             break;
+        // ch156: a unary in statement position (e.g. `*p = ...` mixed
+        // in with normal exp statements) needs its own dispatch entry.
+        case NODE_TYPE_UNARY:
+            codegen_generate_unary(node, codegen_history_begin(history->flags));
+            break;
         case NODE_TYPE_VARIABLE:
             codegen_generate_scope_variable(node);
+            break;
+        // ch156: return statement.
+        case NODE_TYPE_STATEMENT_RETURN:
+            codegen_generate_statement_return(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
