@@ -32,7 +32,22 @@ const char* compiler_include_dir_next(struct compile_process* process){
     return dir;
 }
 
+// The driver sets this to the pc_includes next to the compiler binary.
+// Programs that call compile_file themselves (the chapter tests) keep
+// the old list above.
+static const char* compiler_own_include_dir;
+
+void compiler_set_own_include_dir(const char* dir){
+    compiler_own_include_dir = dir;
+}
+
 void compiler_setup_default_include_directories(struct vector* include_vec){
+    if(compiler_own_include_dir){
+        static const char* usr_include = "/usr/include";
+        vector_push(include_vec, &compiler_own_include_dir);
+        vector_push(include_vec, &usr_include);
+        return;
+    }
     size_t total = sizeof(default_include_dirs) / sizeof(const char*);
     for(int i = 0; i < (int)total; i++){
         vector_push(include_vec, &default_include_dirs[i]);
@@ -44,7 +59,9 @@ struct compile_process* compile_process_create(const char* filename, const char*
     FILE* file     = 0;
     FILE* out_file = 0;
 
-    file = fopen(filename, "r");
+    // "-" is standard input.
+    bool from_stdin = S_EQ(filename, "-");
+    file = from_stdin ? stdin : fopen(filename, "r");
     if(!file){
         goto out_err;
     }
@@ -115,7 +132,11 @@ struct compile_process* compile_process_create(const char* filename, const char*
     // node vectors to the global node module so node_create works
     // for this process.
     char* path = malloc(PATH_MAX);
-    realpath(filename, path);
+    if(from_stdin){
+        strcpy(path, "<stdin>");
+    } else {
+        realpath(filename, path);
+    }
     process->cfile.abs_path = path;
     // The path given may be a caller's stack buffer (compile_include).
     process->pos.filename   = path;
@@ -127,7 +148,7 @@ out_err:
     if(out_file){
         fclose(out_file);
     }
-    if(file){
+    if(file && file != stdin){
         fclose(file);
     }
     return 0;

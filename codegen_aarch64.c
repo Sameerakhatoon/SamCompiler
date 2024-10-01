@@ -80,15 +80,12 @@ static void asm_push_args(const char* ins, va_list args){
     if(exp64_output_muted()){
         return;
     }
-    va_list args2;
-    va_copy(args2, args);
-    vfprintf(stdout, ins, args);
-    fprintf(stdout, "\n");
+    // The asm goes to the output file only. It used to be echoed to
+    // stdout on every compile as well.
     if(current_process->ofile){
-        vfprintf(current_process->ofile, ins, args2);
+        vfprintf(current_process->ofile, ins, args);
         fprintf(current_process->ofile, "\n");
     }
-    va_end(args2);
 }
 
 static void asm_push(const char* ins, ...){

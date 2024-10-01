@@ -19,4 +19,30 @@ typedef unsigned long  uintptr_t;
 typedef int            intptr_t;
 typedef unsigned int   uintptr_t;
 #endif
+
+// The limits of those types.
+#define INT8_MIN    (-128)
+#define INT8_MAX    127
+#define UINT8_MAX   255
+#define INT16_MIN   (-32768)
+#define INT16_MAX   32767
+#define UINT16_MAX  65535
+#define INT32_MIN   (-2147483647 - 1)
+#define INT32_MAX   2147483647
+#define UINT32_MAX  4294967295U
+#ifdef __LP64__
+#define INT64_MIN   (-9223372036854775807L - 1)
+#define INT64_MAX   9223372036854775807L
+#define UINT64_MAX  18446744073709551615UL
+#define INTPTR_MIN  INT64_MIN
+#define INTPTR_MAX  INT64_MAX
+#define UINTPTR_MAX UINT64_MAX
+#define SIZE_MAX    UINT64_MAX
+#endif
+#ifndef __LP64__
+#define INTPTR_MIN  INT32_MIN
+#define INTPTR_MAX  INT32_MAX
+#define UINTPTR_MAX UINT32_MAX
+#define SIZE_MAX    UINT32_MAX
+#endif
 #endif

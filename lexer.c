@@ -507,7 +507,9 @@ static struct token* token_make_operator_or_string(void){
     if(op == '<'){
         struct token* last_token = lexer_last_token();
         if(token_is_keyword(last_token, "include")){
-            return token_make_string('<', '>');
+            struct token* token = token_make_string('<', '>');
+            token->flags |= TOKEN_FLAG_ANGLED_INCLUDE;
+            return token;
         }
     }
 

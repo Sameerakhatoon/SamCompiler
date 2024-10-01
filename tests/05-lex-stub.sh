@@ -7,7 +7,9 @@
 ./build.sh >/dev/null 2>&1
 # test.c has no main, so the link step fails and ./main exits non-zero
 # (it reported 0); only the compile result matters here.
-out="$(./main)" || true
+# With no arguments the driver prints its usage now instead of
+# compiling ./test.c, so name the files.
+out="$(./main ./test.c ./test)" || true
 assert_contains "$out" "everything compiled fine" "main output (lexer stub)"
 
 # Probe: confirm we can create a lex_process and that pos starts at 1/1.

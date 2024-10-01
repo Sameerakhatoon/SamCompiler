@@ -1927,7 +1927,8 @@ void preprocessor_handle_include_token(struct compile_process* compiler)
         compiler_error(compiler, "#include nested more than 200 deep");
     }
     include_depth++;
-    struct compile_process* new_compile_process = compile_include(file_path_token->sval, compiler);
+    bool quoted = !(file_path_token->flags & TOKEN_FLAG_ANGLED_INCLUDE);
+    struct compile_process* new_compile_process = compile_include_search(file_path_token->sval, compiler, quoted);
     include_depth--;
     if (!new_compile_process)
     {

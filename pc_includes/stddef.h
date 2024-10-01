@@ -18,5 +18,13 @@ typedef long size_t;
 #endif
 #endif
 
+// ptrdiff_t, pointer-sized and signed.
+#ifndef __LP64__
+typedef int ptrdiff_t;
+#endif
+#ifdef __LP64__
+typedef long ptrdiff_t;
+#endif
+
 #define NULL 0
 #endif

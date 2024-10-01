@@ -3,6 +3,47 @@
 What actually happens when you run `./main my.c my.bin`, and how
 to drive it against your own programs.
 
+## Quick start
+
+The driver takes gcc-style options:
+
+```
+./main -target=x86_64 hello.c -o hello      # compile, assemble, link
+./main -target=x86_64 a.c b.c util.o -o app # several inputs, one executable
+./main -target=x86_64 -c a.c                # a.o in the current directory
+./main -target=aarch64 -S a.c -o a.s        # assembly only
+./main -E -DDEBUG=1 a.c                     # preprocessed C on stdout
+echo 'int main(){return 3;}' | ./main -target=x86_64 - -o three
+./main --help
+```
+
+| Option | Meaning |
+|---|---|
+| `-o FILE` | output (default `a.out`; `NAME.o` / `NAME.s` with `-c` / `-S`) |
+| `-c`, `-S`, `-E` | stop after assembling, after compiling, after preprocessing |
+| `-I DIR` | include directory, before pc_includes and `/usr/include` |
+| `-D NAME[=VALUE]`, `-U NAME` | define (VALUE defaults to 1) / undefine a macro |
+| `-target=T` | `x86` (default), `x86_64`, `aarch64`, `riscv64`, `samos-*` |
+| `-sysroot=DIR` | SamOS sysroot for the `samos-*` targets |
+| `-v` | print the assembler and linker commands |
+| `-` | read the source from standard input |
+
+Options may come before or after the file names. `.c` inputs are
+compiled, `.o` and `.a` inputs go to the linker; an unknown option or
+file type is an error. This form is quiet: nothing on stdout but `-E`
+output, errors on stderr, exit status 0 or non-zero. Intermediate files
+live in a private directory under `$TMPDIR` and are removed; the output
+is written to a temporary next to it and renamed into place, so a
+failed build leaves nothing behind.
+
+The rest of this guide describes the original form,
+`./main [-target=X] in out [object]`, which still works exactly as
+before (the tests, `tools/gcc_differential.sh` and SamOS's tools use
+it). It is chosen when none of `-o`, `-c`, `-S`, `-E` is given and the
+second file name is not itself an input (`.c`, `.o`, `.a`, `-`), so
+`./main a.c b.c` links both files into `a.out`. With no arguments the
+driver prints its usage instead of compiling `./test.c`.
+
 ## The pipeline at a glance
 
 ```
@@ -45,7 +86,8 @@ below.
 
 ## What main.c actually does
 
-`main.c` is a thin CLI driver. The interesting parts:
+`main.c` is a thin CLI driver. For the original form it runs
+`main_legacy`; the interesting parts:
 
 ```c
 int compile_flags = COMPILE_PROCESS_EXECUTE_NASM;
@@ -166,8 +208,9 @@ OVERWRITING the asm. So at the end (x86):
 ./main [-target=x86|x86_64|aarch64|riscv64] <input.c> <output_path> [object]
 ```
 
-`-target=` must come before the file names. Without it the target
-is `x86` and everything behaves as before the multi-target work.
+`-target=` may come anywhere on the command line. Without it the
+target is `x86` and everything behaves as before the multi-target
+work.
 
 | `-target=` | Output | Assembler | Linker | Run | Guide |
 |---|---|---|---|---|---|
@@ -197,7 +240,8 @@ The preprocessor predefines `__x86_64__`, `__aarch64__` or
 `__riscv` (with `__riscv_xlen` = 64) for the 64-bit targets, and
 `__LP64__` on all three; x86 adds none.
 
-`-I<dir>` adds an include directory, searched before the defaults.
+`-I<dir>` (or `-I <dir>`) adds an include directory, searched
+before the defaults; `-D` and `-U` work in either form.
 
 ### SamOS programs
 
@@ -221,22 +265,24 @@ first is the one you `./output_file` to run.
 ./main <input.c> <output_path> [object]
 ```
 
-| What you want | Command |
-|---|---|
-| The asm, no link (the assembler still runs) | `./main my.c /tmp/my.asm object` |
-| Linked 32-bit binary (default) | `./main my.c /tmp/my.bin` |
-| Compile + run | `./main my.c /tmp/my.bin && /tmp/my.bin; echo "exit=$?"` |
-| Inspect the asm | `./main my.c /tmp/my.asm object && less /tmp/my.asm` |
-| Inspect the asm AND link | `./main my.c /tmp/my.asm object; cp /tmp/my.asm /tmp/inspect.asm; ./main my.c /tmp/my.bin` |
+| What you want | Original form | gcc-style |
+|---|---|---|
+| The asm, no link (the old form still assembles it, leaving `out.o`) | `./main my.c /tmp/my.asm object` | `./main -S my.c -o /tmp/my.asm` |
+| Linked 32-bit binary (default) | `./main my.c /tmp/my.bin` | `./main my.c -o /tmp/my.bin` |
+| Compile + run | `./main my.c /tmp/my.bin && /tmp/my.bin; echo "exit=$?"` | `./main my.c -o /tmp/my.bin && /tmp/my.bin` |
+| Inspect the asm | `./main my.c /tmp/my.asm object && less /tmp/my.asm` | `./main -S my.c && less my.s` |
+| An object file only | (`out.o` next to the asm) | `./main -c my.c` |
+| See the preprocessor output | | `./main -E my.c` |
 
-The third positional arg is the toggle:
-- `object` -> stops after `nasm`. The `output_file` holds the
-  NASM source; the `.o` is next to it; no binary is produced.
-- anything else (or omitted) -> full pipeline through gcc; final
-  binary at `output_file`.
+In the original form the third positional arg is the toggle:
+- `object` -> stops after the assembler. The `output_file` holds
+  the asm source; the `.o` is next to it; no binary is produced.
+- omitted -> full pipeline through gcc; final binary at
+  `output_file`, `output_file.o` left next to it.
+- anything else -> an error (it used to mean "link").
 
-If you want both the asm AND the binary, run the command twice
-with different output paths.
+The asm is no longer printed on stdout as it is generated; read the
+output file.
 
 ## Drive it from your own .c file
 
@@ -302,19 +348,26 @@ Your file shows up in the table automatically.
 
 ### 4. Use the includes you ship
 
-Anything you `#include` resolves via the search list set in
-`cprocess.c`:
+Anything you `#include` resolves in this order
+, whatever the current directory:
 
 ```
-./pc_includes
-../pc_includes
-/usr/include/peach-includes
+the including file's directory      ("x.h" only, not <x.h>)
+each -I directory, in order
+<directory of ./main>/pc_includes   (found through /proc/self/exe)
 /usr/include
 ```
 
-To ship a header for your program, drop `my_header.h` into
-`pc_includes/` and `#include <my_header.h>` from your source.
-Sample 07 demonstrates this exact pattern with `values.h`.
+A samos target replaces the last two with `<sysroot>/include` and
+pc_includes. pc_includes declares the common C library
+: `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`,
+`errno.h`, `limits.h`, `stdint.h`, `stddef.h`, `stdbool.h`,
+`stdarg.h` and `assert.h`, with glibc's signatures, so a program
+using them links against the target's C library.
+
+To ship a header for your program, put it next to your source and
+`#include "my_header.h"`, or pass `-I dir`. Sample 07 includes
+`values.h` from `pc_includes/`.
 
 ## Debug recipes
 
@@ -323,6 +376,8 @@ Sample 07 demonstrates this exact pattern with `values.h`.
 | `Compile failed` | The compiler's own parser / validator bailed at the first error. Read the message on stderr: it ends with `on line L, col C in file F` (not `file:line:col`), the place the compiler had read to, which can be past the real fault. |
 | `Issue assemblign...` (after `everything compiled fine`) | The emitted asm is bad OR the link step failed. Re-run with `object` and inspect the `.asm`. |
 | `Issue assemblign...` after a clean asm | No 32-bit linker. Install `gcc-i686-linux-gnu` (not `gcc-multilib`, which removes the cross compilers;). For the other targets, see the target guide's prerequisites. |
+| `unknown option` / `unknown file type` | The gcc-style form takes the options in `./main --help`, and `.c`, `.o`, `.a` or `-` as inputs. |
+| `unknown mode X` | The original form's third argument can only be `object`. |
 | `./main: No such file or directory` | The chapter test suite (or `make clean`) deleted it. Just `./build.sh` again. |
 | Exit code is wrong, compile succeeded | Codegen quirk. Check the `Known codegen quirks` section in `samples/README.md` - the patterns there are real (bare `int[]` reads return addresses, void-return loads, comparison right-operand drops). |
 | `cannot find -lgcc` | `gcc -m32` was used without its 32-bit runtime. Install `gcc-i686-linux-gnu`; the driver then links with it. |

@@ -21,7 +21,9 @@ int main() {
 }
 EOF
 
-out=$("$REPO_ROOT/main" "$src" "$asm" 2>&1 || true)
+# The asm is no longer echoed to stdout:
+# read it from the output file.
+out=$("$REPO_ROOT/main" "$src" "$asm" object 2>&1 || true; cat "$asm")
 case "$out" in
     *"push dword 4"*) ;;
     *) fail "expected push dword 4 in emitted asm for sizeof(int); got: $out" ;;

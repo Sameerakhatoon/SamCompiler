@@ -117,6 +117,8 @@ enum {
 
 enum {
     TOKEN_FLAG_IS_CUSTOM_OPERATOR = 0b00000001,
+    // The string token of `#include <x.h>`, as opposed to "x.h".
+    TOKEN_FLAG_ANGLED_INCLUDE     = 0b00000010,
 };
 
 struct token {
@@ -527,7 +529,18 @@ void        compiler_setup_default_include_directories(struct vector* include_ve
 // directories the driver adds (-I, the samos sysroot). They come
 // before the defaults; a samos target uses only these.
 void        compiler_add_include_dir(const char* dir);
+// The driver's pc_includes, found next to the compiler binary. When
+// set, the defaults are this directory and /usr/include instead of
+// ./pc_includes and ../pc_includes, which depended on the current
+// directory.
+void        compiler_set_own_include_dir(const char* dir);
+// -D / -U from the driver, as "#define NAME VALUE" / "#undef NAME"
+// lines run through the preprocessor ahead of each top-level source.
+void        compiler_add_cli_macro_line(const char* line);
 struct compile_process* compile_include(const char* filename, struct compile_process* parent_process);
+// `#include <x.h>` (angled) skips the including file's own directory;
+// `#include "x.h"` searches it first.
+struct compile_process* compile_include_search(const char* filename, struct compile_process* parent_process, bool quoted);
 
 // ch229: helpers.
 bool file_exists(const char* filename);
@@ -1054,6 +1067,9 @@ enum {
 enum {
     COMPILE_PROCESS_EXECUTE_NASM     = 0b00000001,
     COMPILE_PROCESS_EXPORT_AS_OBJECT = 0b00000010,
+    // -E: stop after the preprocessor and write the expanded tokens
+    // as C text instead of asm.
+    COMPILE_PROCESS_PREPROCESS_ONLY  = 0b00000100,
 };
 
 // ch108: entry / exit "label" book-keeping for break / continue.
