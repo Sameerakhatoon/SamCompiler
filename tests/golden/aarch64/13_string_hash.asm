@@ -137,3 +137,4 @@ ret
 .data
 .section .rodata
 str_9: .asciz "ag"
+.section .note.GNU-stack,"",@progbits

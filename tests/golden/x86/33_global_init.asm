@@ -1,26 +1,29 @@
 section .data
 ; int g
-g: dd 20
+global $g
+$g: dd 20
 ; char k
-k: db 100
+global $k
+$k: db 100
 ; char msg
-msg: dd str_1
+global $msg
+$msg: dd str_1
 section .text
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
-push dword [g]
-mov eax, [k]
+push dword [$g]
+mov eax, [$k]
 movsx eax, al
 push eax
 pop ecx
 pop eax
 add eax, ecx
 push eax
-mov ebx, [msg]
+mov ebx, [$msg]
 push ebx
 pop ebx
 push dword 1
@@ -46,3 +49,4 @@ ret
 section .data
 section .rodata
 str_1: db 'x', 0
+section .note.GNU-stack noalloc noexec nowrite progbits

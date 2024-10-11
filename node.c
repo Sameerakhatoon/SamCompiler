@@ -427,6 +427,47 @@ bool function_defined_in_tree(struct compile_process* process, const char* name)
     return false;
 }
 
+static bool variable_node_defines(struct node* var, const char* name){
+    return var && var->type == NODE_TYPE_VARIABLE && !(var->var.type.flags & DATATYPE_FLAG_IS_EXTERN)
+        && var->var.name && S_EQ(var->var.name, name);
+}
+
+// Whether this translation unit defines the global variable `name`
+// (not just `extern`), in any of the shapes a global comes in: alone,
+// in a list (`int a, b;`) or after a struct or union body.
+bool variable_defined_in_tree(struct compile_process* process, const char* name){
+    for(int i = 0; i < vector_count(process->node_tree_vec); i++){
+        struct node* node = *(struct node**)vector_at(process->node_tree_vec, i);
+        if(variable_node_defines(node, name)){
+            return true;
+        }
+        if(node->type == NODE_TYPE_VARIABLE_LIST){
+            for(int j = 0; j < vector_count(node->var_list.list); j++){
+                if(variable_node_defines(*(struct node**)vector_at(node->var_list.list, j), name)){
+                    return true;
+                }
+            }
+        }
+        if(node->type == NODE_TYPE_STRUCT && (node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED)
+           && variable_node_defines(node->_struct.var, name)){
+            return true;
+        }
+        if(node->type == NODE_TYPE_UNION && (node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED)
+           && variable_node_defines(node->_union.var, name)){
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether `name` is a function or variable this translation unit
+// defines, so its address is known at link time relative to this code
+// (a direct, pc-relative reference works even in a PIE). Anything else
+// may live in a shared library and is reached through the GOT.
+bool symbol_defined_in_tree(struct compile_process* process, const char* name){
+    return function_defined_in_tree(process, name) || variable_defined_in_tree(process, name);
+}
+
 struct vector* function_node_argument_vec(struct node* node){
     assert(node->type == NODE_TYPE_FUNCTION);
     return node->func.args.vector;

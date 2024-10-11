@@ -285,12 +285,23 @@ static struct resolver_entity* codegen_register_function(struct node* func_node,
     return resolver_default_register_function(current_process->resolver, func_node, flags);
 }
 
+// A C name as NASM must see it. `$` marks an identifier, so a name that
+// is also a register or keyword (`gs`, `eax`, `abs`) works; rdefault.c
+// writes the same prefix into the addresses (backend symbol_prefix).
+static const char* codegen_symbol(const char* name){
+    static char buffers[4][256];
+    static int next;
+    char* out = buffers[next++ % 4];
+    snprintf(out, sizeof(buffers[0]), "$%s", name);
+    return out;
+}
+
 static void codegen_generate_function_prototype(struct node* node){
     codegen_register_function(node, 0);
     // A prototype of a function defined further down is not external;
     // NASM rejects a symbol that is both extern and defined.
     if(!function_defined_in_tree(current_process, node->func.name)){
-        asm_push("extern %s", node->func.name);
+        asm_push("extern %s", codegen_symbol(node->func.name));
     }
 }
 
@@ -2206,9 +2217,12 @@ static void codegen_generate_body(struct node* node, struct history* history){
 
 static void codegen_generate_function_with_body(struct node* node){
     codegen_register_function(node, 0);
-    asm_push("global %s", node->func.name);
+    // A static function stays local to the object.
+    if(!(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC)){
+        asm_push("global %s", codegen_symbol(node->func.name));
+    }
     asm_push("; %s function", node->func.name);
-    asm_push("%s:", node->func.name);
+    asm_push("%s:", codegen_symbol(node->func.name));
 
     asm_push_ebp();
     asm_push("mov ebp, esp");
@@ -2394,19 +2408,19 @@ static void codegen_generate_global_variable_for_primitive(struct node* node){
             // holds the address of the string in .rodata).
             const char* label = codegen_register_string(node->var.val->sval);
             asm_push("%s: %s %s",
-                node->var.name,
+                codegen_symbol(node->var.name),
                 asm_keyword_for_size(variable_size(node), tmp_buf),
                 label);
         } else {
             // ch111: emit the integer initializer literal.
             asm_push("%s: %s %lld",
-                node->var.name,
+                codegen_symbol(node->var.name),
                 asm_keyword_for_size(variable_size(node), tmp_buf),
                 node->var.val->llnum);
         }
     } else {
         asm_push("%s: %s 0",
-            node->var.name,
+            codegen_symbol(node->var.name),
             asm_keyword_for_size(variable_size(node), tmp_buf));
     }
 }
@@ -2420,7 +2434,7 @@ static void codegen_generate_global_variable_for_struct(struct node* node){
         return;
     }
     char tmp_buf[256];
-    asm_push("%s: %s 0", node->var.name,
+    asm_push("%s: %s 0", codegen_symbol(node->var.name),
         asm_keyword_for_size(variable_size(node), tmp_buf));
 }
 
@@ -2432,7 +2446,7 @@ static void codegen_generate_global_variable_for_union(struct node* node){
         return;
     }
     char tmp_buf[256];
-    asm_push("%s: %s 0", node->var.name,
+    asm_push("%s: %s 0", codegen_symbol(node->var.name),
         asm_keyword_for_size(variable_size(node), tmp_buf));
 }
 
@@ -2445,7 +2459,7 @@ static void codegen_generate_variable_for_array(struct node* node){
         return;
     }
     char tmp_buf[256];
-    asm_push("%s: %s 0", node->var.name,
+    asm_push("%s: %s 0", codegen_symbol(node->var.name),
         asm_keyword_for_size(variable_size(node), tmp_buf));
 }
 
@@ -2465,16 +2479,24 @@ static void codegen_init_value(size_t size, long long value){
 }
 
 static void codegen_init_symbol(size_t size, const char* symbol){
-    asm_push("%s %s", codegen_init_nasm_size(size), symbol);
+    asm_push("%s %s", codegen_init_nasm_size(size), codegen_symbol(symbol));
 }
 
 static void codegen_init_zero(size_t count){
     asm_push("times %lu db 0", (unsigned long)count);
 }
 
+// A global's symbol is exported unless it is static.
+static void codegen_global_label(struct node* node){
+    if(!(node->var.type.flags & DATATYPE_FLAG_IS_STATIC)){
+        asm_push("global %s", codegen_symbol(node->var.name));
+    }
+}
+
 static void codegen_generate_global_initializer(struct node* node){
+    codegen_global_label(node);
     asm_push("align %lu, db 0", (unsigned long)datatype_alignment(&node->var.type));
-    asm_push("%s:", node->var.name);
+    asm_push("%s:", codegen_symbol(node->var.name));
     codegen_emit_initializer(node, &(struct initializer_emitter){
         .value        = codegen_init_value,
         .symbol       = codegen_init_symbol,
@@ -2490,6 +2512,16 @@ static void codegen_generate_global_variable(struct node* node){
         codegen_new_scope_entity(node, 0, 0);
         return;
     }
+    // `extern int g;` names another object's variable; it
+    // gets no storage here, and no extern when this file defines it too.
+    if(node->var.type.flags & DATATYPE_FLAG_IS_EXTERN){
+        if(!variable_defined_in_tree(current_process, node->var.name)){
+            asm_push("extern %s", codegen_symbol(node->var.name));
+        }
+        codegen_new_scope_entity(node, 0, 0);
+        return;
+    }
+    codegen_global_label(node);
     // ch179: arrays go through their own emit path and also register
     // a scope entity so the resolver can find them.
     if(node->var.type.flags & DATATYPE_FLAG_IS_ARRAY){
@@ -2765,5 +2797,7 @@ int codegen_x86(struct compile_process* process){
     // slots etc.) before .rodata.
     codegen_generate_data_section_add_ons();
     codegen_generate_rod();
+    // The stack is not executable (the linker warns otherwise).
+    asm_push("section .note.GNU-stack noalloc noexec nowrite progbits");
     return CODEGEN_ALL_OK;
 }

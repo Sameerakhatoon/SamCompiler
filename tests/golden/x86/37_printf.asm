@@ -1,13 +1,13 @@
 section .data
 section .text
-extern printf
-global main
+extern $printf
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [printf]
+lea ebx, [$printf]
 push ebx
 pop ebx
 mov dword [function_call_1], ebx
@@ -38,3 +38,4 @@ function_call_1: dd 0
 section .rodata
 str_2: db 'h', 'i', 0
 str_3: db 'v', '=', '%', 'd', ' ', 's', '=', '%', 's', 10, 0
+section .note.GNU-stack noalloc noexec nowrite progbits

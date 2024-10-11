@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # every golden input and every sample, compiled with
 # -target=x86_64, assembled with nasm -f elf64, linked with
-# gcc -no-pie and run natively. The exit code must match the
+# gcc (a PIE) and run natively. The exit code must match the
 # `// EXPECTED EXIT lp64: N` line if there is one, else
 # `// EXPECTED EXIT: N`. `// EXPECTED OUTPUT: text` checks stdout.
 . "$(dirname "$0")/lib.sh"
@@ -26,7 +26,7 @@ for src in tests/golden/inputs/*.c samples/*.c; do
         continue
     fi
     if [ "$count" -eq 0 ]; then
-        file "$tmp/$base" | grep -q 'ELF 64-bit LSB executable, x86-64' || fail "$base is not an x86-64 ELF: $(file "$tmp/$base")"
+        file "$tmp/$base" | grep -qE 'ELF 64-bit LSB (pie )?executable, x86-64' || fail "$base is not an x86-64 ELF: $(file "$tmp/$base")"
     fi
     # set -e would end the test on the first non-zero exit code
     out=$("$tmp/$base") && ec=0 || ec=$?

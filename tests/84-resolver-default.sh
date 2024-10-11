@@ -43,5 +43,5 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 [ -x "$bin" ] || fail "ch136 probe failed to compile"
 got="$("$bin")"
 # Global var (no IS_LOCAL_STACK), offset 0: address == name, base == name.
-assert_contains "$got" "ok=1 addr=v base=v off=0" "default resolver fills result.base with name-anchored address"
+assert_contains "$got" 'ok=1 addr=$v base=$v off=0' "default resolver fills result.base with name-anchored address"
 pass

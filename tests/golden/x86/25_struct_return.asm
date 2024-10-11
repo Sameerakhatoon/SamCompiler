@@ -1,8 +1,8 @@
 section .data
 section .text
-global make
+global $make
 ; make function
-make:
+$make:
 push ebp
 mov ebp, esp
 sub esp, 16
@@ -34,14 +34,14 @@ pop ebx
 add esp, 16
 pop ebp
 ret 4
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 sub esp, 16
 push ebx
-lea ebx, [make]
+lea ebx, [$make]
 push ebx
 pop ebx
 mov dword [function_call_1], ebx
@@ -79,3 +79,4 @@ ret
 section .data
 function_call_1: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

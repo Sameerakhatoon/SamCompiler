@@ -126,3 +126,4 @@ ret 48
 section .data
 section .rodata
 str_9: db 'a', 'g', 0
+section .note.GNU-stack noalloc noexec nowrite progbits

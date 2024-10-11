@@ -12,7 +12,7 @@ trimmed only where marked `...`.
 | Data model | LP64: int 4, long 8, pointer 8 |
 | ABI | AAPCS64 (Linux): arguments in x0-x7, result in x0, struct result address in x8 |
 | Assembler | GNU as (`aarch64-linux-gnu-as`) |
-| Linker | `aarch64-linux-gnu-gcc -static` |
+| Linker | `aarch64-linux-gnu-gcc -static-pie` |
 | Runs | under qemu-user (`qemu-aarch64`) on the x86-64 host |
 | Backend | `codegen_aarch64.c` |
 
@@ -77,7 +77,7 @@ int main()
 $ ./main -target=aarch64 /tmp/g/add.c /tmp/g/add_a64
 ...
 everything compiled fine
-aarch64-linux-gnu-as /tmp/g/add_a64 -o /tmp/g/add_a64.o && aarch64-linux-gnu-gcc -static /tmp/g/add_a64.o -o /tmp/g/add_a64
+aarch64-linux-gnu-as /tmp/g/add_a64 -o /tmp/g/add_a64.o && aarch64-linux-gnu-gcc -static-pie /tmp/g/add_a64.o -o /tmp/g/add_a64
 run with: qemu-aarch64 /tmp/g/add_a64
 ```
 
@@ -142,16 +142,16 @@ sxtw x0, w0
 ```
 $ cd /tmp/g
 $ aarch64-linux-gnu-as add_a64.s -o add_a64.o
-$ aarch64-linux-gnu-gcc -static add_a64.o -o add_a64_manual
+$ aarch64-linux-gnu-gcc -static-pie add_a64.o -o add_a64_manual
 $ qemu-aarch64 ./add_a64_manual; echo "exit=$?"
 exit=5
 ```
 
-The driver links statically so qemu-user needs nothing else:
+The driver links a static PIE, so qemu-user needs nothing else:
 
 ```
 $ file /tmp/g/add_a64
-/tmp/g/add_a64: ELF 64-bit LSB executable, ARM aarch64, version 1 (GNU/Linux), statically linked, BuildID[sha1]=c872bb3bcb2e8dcb8e3fb774cc444f6dcb8f80cb, for GNU/Linux 3.7.0, not stripped
+/tmp/g/add_a64: ELF 64-bit LSB pie executable, ARM aarch64, version 1 (GNU/Linux), static-pie linked, BuildID[sha1]=c872bb3bcb2e8dcb8e3fb774cc444f6dcb8f80cb, for GNU/Linux 3.7.0, not stripped
 ```
 
 A dynamic link also works, but qemu then has to find the aarch64
@@ -168,9 +168,11 @@ $ file add_a64_dyn
 add_a64_dyn: ELF 64-bit LSB pie executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, BuildID[sha1]=c4ead4dc509817f5ca29f4cf68759e40ea05aa71, for GNU/Linux 3.7.0, not stripped
 ```
 
-(Unlike x86_64, the aarch64 asm builds addresses with
-`adrp`/`add :lo12:`, which is PC-relative, so the default PIE link
-works.)
+(The asm builds the address of a function or variable the file
+defines with `adrp`/`add :lo12:`, which is PC-relative, and reads any
+other, such as `printf`, from the GOT with `adrp :got:`/`ldr
+:got_lo12:`, so both PIE links work, with or without libc calls.
+`-static` still links the same objects.)
 
 ## 7. Run it
 

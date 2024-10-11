@@ -91,3 +91,4 @@ pop rbp
 ret 48
 section .data
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

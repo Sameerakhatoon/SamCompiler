@@ -157,6 +157,18 @@ static void codegen_symbol_into(const char* reg, const char* name){
     asm_push("add %s, %s, :lo12:%s", reg, reg, name);
 }
 
+// reg = the address of a C function or variable. One this file defines
+// is pc-relative as above; any other may be in a shared library, so a
+// PIE reads its address from the GOT.
+static void codegen_c_symbol_into(const char* reg, const char* name){
+    if(symbol_defined_in_tree(current_process, name)){
+        codegen_symbol_into(reg, name);
+        return;
+    }
+    asm_push("adrp %s, :got:%s", reg, name);
+    asm_push("ldr %s, [%s, :got_lo12:%s]", reg, reg, name);
+}
+
 static void asm_push_rbp(void){
     asm_push("stp x29, x30, [sp, #-16]!");
     stackframe_push(current_function, &(struct stack_frame_element){
@@ -245,7 +257,7 @@ static void aarch64_frame_address(int offset){
 }
 
 static void aarch64_symbol_address(const char* name){
-    codegen_symbol_into("x0", name);
+    codegen_c_symbol_into("x0", name);
 }
 
 static void aarch64_string_address(const char* str){
@@ -547,7 +559,7 @@ static int aarch64_call_general(const struct exp64_call* call){
 static void aarch64_call(const struct exp64_call* call){
     int above = call->simple ? aarch64_call_simple(call) : aarch64_call_general(call);
     if(call->symbol){
-        codegen_symbol_into("x9", call->symbol);
+        codegen_c_symbol_into("x9", call->symbol);
     } else {
         codegen_sp_word("ldr", "x9", above);
     }
@@ -1390,5 +1402,7 @@ int codegen_aarch64(struct compile_process* process){
     codegen_finish_scope();
 
     codegen_generate_rod();
+    // The stack is not executable (the linker warns otherwise).
+    asm_push(".section .note.GNU-stack,\"\",@progbits");
     return CODEGEN_ALL_OK;
 }

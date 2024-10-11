@@ -24,7 +24,7 @@ push rax
 pop rdi
 pop rsi
 pop rdx
-lea r11, [$printf]
+mov r11, [rel $printf wrt ..gotpc]
 xor eax, eax
 call r11
 movsxd rax, eax
@@ -38,3 +38,4 @@ section .data
 section .rodata
 str_1: db 'h', 'i', 0
 str_2: db 'v', '=', '%', 'd', ' ', 's', '=', '%', 's', 10, 0
+section .note.GNU-stack noalloc noexec nowrite progbits

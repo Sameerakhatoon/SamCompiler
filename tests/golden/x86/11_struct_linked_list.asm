@@ -1,10 +1,11 @@
 section .data
 ; node nodes
-nodes: times 40 db  0
+global $nodes
+$nodes: times 40 db  0
 section .text
-global sum_from
+global $sum_from
 ; sum_from function
-sum_from:
+$sum_from:
 push ebp
 mov ebp, esp
 sub esp, 16
@@ -29,7 +30,7 @@ pop eax
 cmp eax, 0
 je .while_end_4
 push dword [ebp-4]
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 push dword [ebp-8]
@@ -49,7 +50,7 @@ add eax, ecx
 push eax
 pop eax
 mov dword [ebp-4], eax
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 push dword [ebp-8]
@@ -78,14 +79,14 @@ pop ebx
 add esp, 16
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
 push dword 10
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 0
@@ -94,7 +95,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 2
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 4
@@ -103,7 +104,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 20
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 16
@@ -112,7 +113,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 4
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 20
@@ -121,7 +122,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 30
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 32
@@ -133,7 +134,7 @@ push dword 1
 pop eax
 neg eax
 push eax
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 36
@@ -142,7 +143,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 999
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 8
@@ -154,7 +155,7 @@ push dword 1
 pop eax
 neg eax
 push eax
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 12
@@ -163,7 +164,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 777
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 24
@@ -175,7 +176,7 @@ push dword 1
 pop eax
 neg eax
 push eax
-lea ebx, [nodes]
+lea ebx, [$nodes]
 push ebx
 pop ebx
 add ebx, 28
@@ -183,7 +184,7 @@ push ebx
 pop edx
 pop eax
 mov dword [edx], eax
-lea ebx, [sum_from]
+lea ebx, [$sum_from]
 push ebx
 pop ebx
 mov dword [function_call_5], ebx
@@ -204,3 +205,4 @@ ret
 section .data
 function_call_5: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

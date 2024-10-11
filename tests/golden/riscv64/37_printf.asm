@@ -34,7 +34,10 @@ ld a1, 0(sp)
 addi sp, sp, 16
 ld a2, 0(sp)
 addi sp, sp, 16
-lla t0, printf
+.option push
+.option pic
+la t0, printf
+.option pop
 jalr t0
 sext.w a0, a0
 li a0, 0
@@ -54,3 +57,4 @@ ret
 .section .rodata
 str_1: .asciz "hi"
 str_2: .asciz "v=%d s=%s\012"
+.section .note.GNU-stack,"",@progbits

@@ -1,8 +1,8 @@
 section .data
 section .text
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 sub esp, 32
@@ -53,3 +53,4 @@ pop ebp
 ret
 section .data
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

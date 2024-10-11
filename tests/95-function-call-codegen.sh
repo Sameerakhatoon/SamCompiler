@@ -24,7 +24,7 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 [ -x "$bin" ] || fail "ch148 probe failed to compile"
 "$bin" >/dev/null
 got="$(cat "$outfile")"
-assert_contains "$got" "extern puts"     "external symbol declared"
+assert_contains "$got" 'extern $puts'    "external symbol declared"
 assert_contains "$got" "push dword 42"   "argument pushed"
 # ch187 changed the indirect call to go through a per-call .data
 # slot instead of ecx (so arguments that are themselves calls can't

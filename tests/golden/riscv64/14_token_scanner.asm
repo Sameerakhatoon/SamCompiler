@@ -280,3 +280,4 @@ ret
 .data
 .section .rodata
 str_8: .asciz "one two three four"
+.section .note.GNU-stack,"",@progbits

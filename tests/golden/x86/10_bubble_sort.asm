@@ -1,10 +1,11 @@
 section .data
 ; cell values
-values: times 24 db  0
+global $values
+$values: times 24 db  0
 section .text
-global bubble_sort
+global $bubble_sort
 ; bubble_sort function
-bubble_sort:
+$bubble_sort:
 push ebp
 mov ebp, esp
 sub esp, 32
@@ -100,7 +101,7 @@ add eax, ecx
 push eax
 pop eax
 mov dword [ebp-12], eax
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 push dword [ebp-8]
@@ -116,7 +117,7 @@ mov eax, [eax]
 push eax
 pop eax
 mov dword [ebp-20], eax
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 push dword [ebp-12]
@@ -143,7 +144,7 @@ push eax
 pop eax
 cmp eax, 0
 je .if_10
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 push dword [ebp-8]
@@ -159,7 +160,7 @@ mov eax, [eax]
 push eax
 pop eax
 mov dword [ebp-16], eax
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 push dword [ebp-12]
@@ -173,7 +174,7 @@ push ebx
 pop eax
 mov eax, [eax]
 push eax
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 push dword [ebp-8]
@@ -188,7 +189,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword [ebp-16]
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 push dword [ebp-12]
@@ -237,14 +238,14 @@ pop ebx
 add esp, 32
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
 push dword 5
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 add ebx, 0
@@ -253,7 +254,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 2
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 add ebx, 4
@@ -262,7 +263,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 8
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 add ebx, 8
@@ -271,7 +272,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 1
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 add ebx, 12
@@ -280,7 +281,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 7
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 add ebx, 16
@@ -289,7 +290,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 3
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 add ebx, 20
@@ -297,7 +298,7 @@ push ebx
 pop edx
 pop eax
 mov dword [edx], eax
-lea ebx, [bubble_sort]
+lea ebx, [$bubble_sort]
 push ebx
 pop ebx
 mov dword [function_call_11], ebx
@@ -308,7 +309,7 @@ push eax
 pop eax
 push eax
 add esp, 4
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 add ebx, 0
@@ -327,3 +328,4 @@ ret
 section .data
 function_call_11: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

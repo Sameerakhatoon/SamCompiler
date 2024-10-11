@@ -1,8 +1,8 @@
 section .data
 section .text
-global factorial
+global $factorial
 ; factorial function
-factorial:
+$factorial:
 push ebp
 mov ebp, esp
 push ebx
@@ -27,7 +27,7 @@ jmp .if_end_1
 .if_2:
 .if_end_1:
 push dword [ebp+8]
-lea ebx, [factorial]
+lea ebx, [$factorial]
 push ebx
 pop ebx
 mov dword [function_call_3], ebx
@@ -57,13 +57,13 @@ ret
 pop ebx
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [factorial]
+lea ebx, [$factorial]
 push ebx
 pop ebx
 mov dword [function_call_4], ebx
@@ -85,3 +85,4 @@ section .data
 function_call_3: dd 0
 function_call_4: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

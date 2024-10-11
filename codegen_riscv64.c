@@ -146,6 +146,21 @@ static void codegen_symbol_into(const char* reg, const char* name){
     asm_push("lla %s, %s", reg, name);
 }
 
+// reg = the address of a C function or variable. One this file defines
+// is pc-relative as above; any other may be in a shared library, so a
+// PIE reads its address from the GOT: `la` under `.option pic` is
+// auipc + ld from the symbol's GOT entry.
+static void codegen_c_symbol_into(const char* reg, const char* name){
+    if(symbol_defined_in_tree(current_process, name)){
+        codegen_symbol_into(reg, name);
+        return;
+    }
+    asm_push(".option push");
+    asm_push(".option pic");
+    asm_push("la %s, %s", reg, name);
+    asm_push(".option pop");
+}
+
 // The frame record: ra above s0, in one 16-byte slot.
 static void asm_push_rbp(void){
     asm_push("addi sp, sp, -16");
@@ -241,7 +256,7 @@ static void riscv64_frame_address(int offset){
 }
 
 static void riscv64_symbol_address(const char* name){
-    codegen_symbol_into("a0", name);
+    codegen_c_symbol_into("a0", name);
 }
 
 static void riscv64_string_address(const char* str){
@@ -538,7 +553,7 @@ static int riscv64_call_general(const struct exp64_call* call){
 static void riscv64_call(const struct exp64_call* call){
     int above = call->simple ? riscv64_call_simple(call) : riscv64_call_general(call);
     if(call->symbol){
-        codegen_symbol_into("t0", call->symbol);
+        codegen_c_symbol_into("t0", call->symbol);
     } else {
         codegen_sp_word("ld", "t0", above);
     }
@@ -1370,5 +1385,7 @@ int codegen_riscv64(struct compile_process* process){
     codegen_finish_scope();
 
     codegen_generate_rod();
+    // The stack is not executable (the linker warns otherwise).
+    asm_push(".section .note.GNU-stack,\"\",@progbits");
     return CODEGEN_ALL_OK;
 }

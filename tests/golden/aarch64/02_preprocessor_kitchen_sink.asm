@@ -50,3 +50,4 @@ ret
 .size main, .-main
 .data
 .section .rodata
+.section .note.GNU-stack,"",@progbits

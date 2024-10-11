@@ -1,8 +1,8 @@
 section .data
 section .text
-global popcount
+global $popcount
 ; popcount function
-popcount:
+$popcount:
 push ebp
 mov ebp, esp
 sub esp, 16
@@ -57,14 +57,14 @@ pop ebx
 add esp, 16
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 sub esp, 16
 push ebx
-lea ebx, [popcount]
+lea ebx, [$popcount]
 push ebx
 pop ebx
 mov dword [function_call_5], ebx
@@ -76,7 +76,7 @@ pop eax
 push eax
 pop eax
 mov dword [ebp-4], eax
-lea ebx, [popcount]
+lea ebx, [$popcount]
 push ebx
 pop ebx
 mov dword [function_call_6], ebx
@@ -107,3 +107,4 @@ section .data
 function_call_5: dd 0
 function_call_6: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

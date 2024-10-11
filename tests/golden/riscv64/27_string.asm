@@ -52,3 +52,4 @@ ret
 .data
 .section .rodata
 str_1: .asciz "hi"
+.section .note.GNU-stack,"",@progbits

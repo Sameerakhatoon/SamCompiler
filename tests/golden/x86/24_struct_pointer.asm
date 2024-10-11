@@ -1,8 +1,8 @@
 section .data
 section .text
-global sum
+global $sum
 ; sum function
-sum:
+$sum:
 push ebp
 mov ebp, esp
 push ebx
@@ -36,9 +36,9 @@ ret
 pop ebx
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 sub esp, 16
@@ -49,7 +49,7 @@ mov dword [ebp-8], eax
 push dword 10
 pop eax
 mov dword [ebp-4], eax
-lea ebx, [sum]
+lea ebx, [$sum]
 push ebx
 pop ebx
 mov dword [function_call_1], ebx
@@ -75,3 +75,4 @@ ret
 section .data
 function_call_1: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

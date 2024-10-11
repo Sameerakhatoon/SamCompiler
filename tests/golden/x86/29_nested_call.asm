@@ -1,8 +1,8 @@
 section .data
 section .text
-global add
+global $add
 ; add function
-add:
+$add:
 push ebp
 mov ebp, esp
 push ebx
@@ -20,9 +20,9 @@ ret
 pop ebx
 pop ebp
 ret
-global twice
+global $twice
 ; twice function
-twice:
+$twice:
 push ebp
 mov ebp, esp
 push ebx
@@ -41,18 +41,18 @@ ret
 pop ebx
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [add]
+lea ebx, [$add]
 push ebx
 pop ebx
 mov dword [function_call_1], ebx
 sub esp, 12
-lea ebx, [add]
+lea ebx, [$add]
 push ebx
 pop ebx
 mov dword [function_call_2], ebx
@@ -63,7 +63,7 @@ add esp, 8
 push eax
 pop eax
 push eax
-lea ebx, [twice]
+lea ebx, [$twice]
 push ebx
 pop ebx
 mov dword [function_call_3], ebx
@@ -92,3 +92,4 @@ function_call_1: dd 0
 function_call_2: dd 0
 function_call_3: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

@@ -1,8 +1,8 @@
 section .data
 section .text
-global pick
+global $pick
 ; pick function
-pick:
+$pick:
 push ebp
 mov ebp, esp
 push ebx
@@ -60,13 +60,13 @@ ret
 pop ebx
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [pick]
+lea ebx, [$pick]
 push ebx
 pop ebx
 mov dword [function_call_4], ebx
@@ -87,3 +87,4 @@ ret
 section .data
 function_call_4: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

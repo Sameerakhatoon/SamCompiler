@@ -41,6 +41,8 @@ static const struct codegen_backend codegen_backend_x86 = {
     .name           = "x86",
     .generate       = codegen_x86,
     .frame_register = "ebp",
+    // `$name` is always a symbol to NASM, even `gs` or `eax`.
+    .symbol_prefix  = "$",
 };
 
 // the x86_64 backend, built from codegen_x86.c.
@@ -79,7 +81,9 @@ static const struct target target_x86_desc = {
     .asm_cmd           = "nasm -f elf32 %s -o %s",
     //
     .link_cmd          = "i686-linux-gnu-gcc -static %s -o %s",
-    .link_fallback_cmd = "gcc -m32 %s -o %s",
+    // The i386 code is not position independent (absolute addresses,
+    // no GOT), so the fallback must not make a PIE either.
+    .link_fallback_cmd = "gcc -m32 -no-pie %s -o %s",
     .run_cmd           = "",
     .macros            = target_x86_macros,
 };
@@ -98,10 +102,9 @@ static const struct target target_x86_64_desc = {
     .max_reg_args      = 6,
     .backend           = &codegen_backend_x86_64,
     .asm_cmd           = "nasm -f elf64 %s -o %s",
-    // -no-pie: calls take the callee's address with `lea r11, [name]`
-    // even for libc functions such as printf. A PIE would have to go
-    // through the GOT for those.
-    .link_cmd          = "gcc -no-pie %s -o %s",
+    // gcc's default PIE: a symbol this file defines is reached
+    // rip-relative, any other through the GOT.
+    .link_cmd          = "gcc %s -o %s",
     .link_fallback_cmd = 0,
     .run_cmd           = "",
     .macros            = target_x86_64_macros,
@@ -123,8 +126,9 @@ static const struct target target_aarch64_desc = {
     .max_reg_args      = 8,
     .backend           = &codegen_backend_aarch64,
     .asm_cmd           = "aarch64-linux-gnu-as %s -o %s",
-    // -static: qemu-user then needs no aarch64 sysroot.
-    .link_cmd          = "aarch64-linux-gnu-gcc -static %s -o %s",
+    // -static-pie: qemu-user then needs no aarch64 sysroot, and the
+    // code is still checked as position independent.
+    .link_cmd          = "aarch64-linux-gnu-gcc -static-pie %s -o %s",
     .link_fallback_cmd = 0,
     .run_cmd           = "qemu-aarch64",
     .macros            = target_aarch64_macros,
@@ -146,6 +150,9 @@ static const struct target target_riscv64_desc = {
     .max_reg_args      = 8,
     .backend           = &codegen_backend_riscv64,
     .asm_cmd           = "riscv64-linux-gnu-as %s -o %s",
+    // -static: qemu-user then needs no riscv64 sysroot. Not -static-pie:
+    // Ubuntu's riscv64 cross glibc has no rcrt1.o. The code also links
+    // as a dynamic PIE.
     .link_cmd          = "riscv64-linux-gnu-gcc -static %s -o %s",
     .link_fallback_cmd = 0,
     .run_cmd           = "qemu-riscv64",

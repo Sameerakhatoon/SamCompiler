@@ -27,7 +27,7 @@ for src in tests/golden/inputs/*.c samples/*.c; do
         continue
     fi
     if [ "$count" -eq 0 ]; then
-        file "$tmp/$base" | grep -q 'ELF 64-bit LSB executable, ARM aarch64' || fail "$base is not an AArch64 ELF: $(file "$tmp/$base")"
+        file "$tmp/$base" | grep -qE 'ELF 64-bit LSB (pie )?executable, ARM aarch64' || fail "$base is not an AArch64 ELF: $(file "$tmp/$base")"
     fi
     out=$(timeout 20 qemu-aarch64 "$tmp/$base") && ec=0 || ec=$?
     [ "$ec" = "$expected" ] || failures="$failures $base(exit=$ec,want=$expected)"

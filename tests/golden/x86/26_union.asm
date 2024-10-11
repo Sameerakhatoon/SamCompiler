@@ -1,17 +1,18 @@
 section .data
 ; u g
-g: dd 0
+global $g
+$g: dd 0
 section .text
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
 push dword 321
 pop eax
-mov dword [g], eax
-push dword [g]
+mov dword [$g], eax
+push dword [$g]
 pop eax
 movsx eax, al
 push eax
@@ -25,3 +26,4 @@ pop ebp
 ret
 section .data
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

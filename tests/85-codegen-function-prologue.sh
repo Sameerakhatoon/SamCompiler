@@ -26,7 +26,7 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 [ -x "$bin" ] || fail "ch137 probe failed to compile"
 "$bin" >/dev/null
 got="$(cat "$outfile")"
-assert_contains "$got" "global main"   "function symbol exported"
+assert_contains "$got" 'global $main'  "function symbol exported"
 assert_contains "$got" "main:"         "function entry label"
 assert_contains "$got" "push ebp"      "save ebp on entry"
 assert_contains "$got" "mov ebp, esp"  "set up frame pointer"

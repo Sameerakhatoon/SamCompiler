@@ -1,26 +1,27 @@
 section .data
 ; int g
-g: times 16 db  0
+global $g
+$g: times 16 db  0
 section .text
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 sub esp, 16
 push ebx
 push dword 4
 pop eax
-mov dword [g+4], eax
+mov dword [$g+4], eax
 push dword 5
 pop eax
-mov dword [g+12], eax
-push dword [g+4]
+mov dword [$g+12], eax
+push dword [$g+4]
 pop eax
 push eax
 pop eax
 mov dword [ebp-4], eax
-push dword [g+12]
+push dword [$g+12]
 pop eax
 push eax
 pop eax
@@ -42,3 +43,4 @@ pop ebp
 ret
 section .data
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

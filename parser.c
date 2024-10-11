@@ -2275,6 +2275,21 @@ static void parse_static_local(struct datatype* dtype, struct token* name_token,
     node_create(&(struct node){ .type = NODE_TYPE_BLANK });
 }
 
+// `extern int g;` inside a function names the file-scope g, usually
+// another object's (C11 6.2.2p4); it was a stack variable with no
+// value. Like a static local it becomes a global node, here
+// an extern one under its own name, and the declaration is blank.
+static void parse_extern_local(struct datatype* dtype, struct token* name_token){
+    make_variable_node(dtype, name_token, 0);
+    struct node* var_node = node_pop();
+    vector_push(current_process->node_tree_vec, &var_node);
+    resolver_default_new_scope_entity(current_process->resolver, var_node, 0, 0);
+
+    struct parser_enumerator e = { .name = name_token->sval, .depth = parser_scope_depth(), .rename = name_token->sval };
+    vector_push(parser_enumerators, &e);
+    node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+}
+
 // Variable declarator: `name` already consumed; optionally followed by
 // `[N]...` (ch44) or `= expr`.
 static void parse_variable(struct datatype* dtype, struct token* name_token, struct history* history){
@@ -2290,6 +2305,9 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
 
     bool is_global = current_process->scope.current == current_process->scope.root;
     bool is_static_local = (dtype->flags & DATATYPE_FLAG_IS_STATIC) && name_token && parser_current_function
+       && !is_global
+       && !(history->flags & (HISTORY_FLAG_IS_UPWARD_STACK | HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION));
+    bool is_extern_local = (dtype->flags & DATATYPE_FLAG_IS_EXTERN) && name_token && parser_current_function
        && !is_global
        && !(history->flags & (HISTORY_FLAG_IS_UPWARD_STACK | HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION));
     struct vector* leaves = 0;
@@ -2318,6 +2336,13 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
 
     if(is_static_local){
         parse_static_local(dtype, name_token, value_node);
+        return;
+    }
+    if(is_extern_local){
+        if(value_node){
+            compiler_error(current_process, "The block scope extern %s cannot have an initializer\n", name_token->sval);
+        }
+        parse_extern_local(dtype, name_token);
         return;
     }
 

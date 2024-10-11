@@ -455,6 +455,10 @@ struct codegen_backend {
     const char* name;
     int (*generate)(struct compile_process* process);
     const char* frame_register;
+    // Written before a global's name in the addresses rdefault.c
+    // formats: "$" on i386, where NASM then reads a name such as `gs`
+    // or `eax` as a symbol. 0 for none (exp64 backends mark their own).
+    const char* symbol_prefix;
 };
 
 struct target_macro {
@@ -1577,6 +1581,8 @@ enum {
 
 bool          function_node_is_prototype(struct node* node);
 bool          function_defined_in_tree(struct compile_process* process, const char* name);
+bool          variable_defined_in_tree(struct compile_process* process, const char* name);
+bool          symbol_defined_in_tree(struct compile_process* process, const char* name);
 size_t        function_node_stack_size(struct node* node);
 struct vector* function_node_argument_vec(struct node* node);
 

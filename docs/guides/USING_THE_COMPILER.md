@@ -215,8 +215,8 @@ work.
 | `-target=` | Output | Assembler | Linker | Run | Guide |
 |---|---|---|---|---|---|
 | `x86` | NASM, 32-bit | `nasm -f elf32` | `i686-linux-gnu-gcc -static` (else `gcc -m32`) | native | [x86](targets/x86.md) |
-| `x86_64` | NASM, 64-bit, `default rel` | `nasm -f elf64` | `gcc -no-pie` | native | [x86_64](targets/x86_64.md) |
-| `aarch64` | GNU as | `aarch64-linux-gnu-as` | `aarch64-linux-gnu-gcc -static` | `qemu-aarch64` | [aarch64](targets/aarch64.md) |
+| `x86_64` | NASM, 64-bit, `default rel` | `nasm -f elf64` | `gcc` (PIE) | native | [x86_64](targets/x86_64.md) |
+| `aarch64` | GNU as | `aarch64-linux-gnu-as` | `aarch64-linux-gnu-gcc -static-pie` | `qemu-aarch64` | [aarch64](targets/aarch64.md) |
 | `riscv64` | GNU as | `riscv64-linux-gnu-as` | `riscv64-linux-gnu-gcc -static` | `qemu-riscv64` | [riscv64](targets/riscv64.md) |
 
 For the cross targets the driver prints how to run the result:
@@ -225,7 +225,7 @@ For the cross targets the driver prints how to run the result:
 $ ./main -target=aarch64 /tmp/g/add.c /tmp/g/add_a64
 ...
 everything compiled fine
-aarch64-linux-gnu-as /tmp/g/add_a64 -o /tmp/g/add_a64.o && aarch64-linux-gnu-gcc -static /tmp/g/add_a64.o -o /tmp/g/add_a64
+aarch64-linux-gnu-as /tmp/g/add_a64 -o /tmp/g/add_a64.o && aarch64-linux-gnu-gcc -static-pie /tmp/g/add_a64.o -o /tmp/g/add_a64
 run with: qemu-aarch64 /tmp/g/add_a64
 ```
 

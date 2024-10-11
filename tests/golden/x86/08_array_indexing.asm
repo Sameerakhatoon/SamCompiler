@@ -1,10 +1,11 @@
 section .data
 ; cell values
-values: times 20 db  0
+global $values
+$values: times 20 db  0
 section .text
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 sub esp, 16
@@ -38,7 +39,7 @@ pop eax
 cmp eax, 0
 je .for_loop_end2
 push dword 5
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 push dword [ebp-4]
@@ -92,7 +93,7 @@ pop eax
 cmp eax, 0
 je .for_loop_end6
 push dword [ebp-8]
-lea ebx, [values]
+lea ebx, [$values]
 push ebx
 pop ebx
 push dword [ebp-4]
@@ -135,3 +136,4 @@ pop ebp
 ret
 section .data
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

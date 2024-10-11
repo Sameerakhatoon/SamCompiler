@@ -1,8 +1,8 @@
 section .data
 section .text
-global fib
+global $fib
 ; fib function
-fib:
+$fib:
 push ebp
 mov ebp, esp
 push ebx
@@ -26,7 +26,7 @@ ret
 jmp .if_end_1
 .if_2:
 .if_end_1:
-lea ebx, [fib]
+lea ebx, [$fib]
 push ebx
 pop ebx
 mov dword [function_call_3], ebx
@@ -41,7 +41,7 @@ add esp, 4
 push eax
 pop eax
 push eax
-lea ebx, [fib]
+lea ebx, [$fib]
 push ebx
 pop ebx
 mov dword [function_call_4], ebx
@@ -70,13 +70,13 @@ ret
 pop ebx
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [fib]
+lea ebx, [$fib]
 push ebx
 pop ebx
 mov dword [function_call_5], ebx
@@ -99,3 +99,4 @@ function_call_3: dd 0
 function_call_4: dd 0
 function_call_5: dd 0
 section .rodata
+section .note.GNU-stack noalloc noexec nowrite progbits

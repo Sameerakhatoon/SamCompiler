@@ -24,8 +24,8 @@ str x0, [sp, #-16]!
 ldr x0, [sp], #16
 ldr x1, [sp], #16
 ldr x2, [sp], #16
-adrp x9, printf
-add x9, x9, :lo12:printf
+adrp x9, :got:printf
+ldr x9, [x9, :got_lo12:printf]
 blr x9
 sxtw x0, w0
 mov x0, #0
@@ -41,3 +41,4 @@ ret
 .section .rodata
 str_1: .asciz "hi"
 str_2: .asciz "v=%d s=%s\012"
+.section .note.GNU-stack,"",@progbits

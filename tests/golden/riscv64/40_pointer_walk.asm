@@ -96,3 +96,4 @@ ret
 .data
 .section .rodata
 str_1: .asciz "abcdefg"
+.section .note.GNU-stack,"",@progbits

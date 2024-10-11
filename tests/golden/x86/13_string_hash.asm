@@ -1,8 +1,8 @@
 section .data
 section .text
-global simple_hash
+global $simple_hash
 ; simple_hash function
-simple_hash:
+$simple_hash:
 push ebp
 mov ebp, esp
 sub esp, 16
@@ -99,13 +99,13 @@ pop ebx
 add esp, 16
 pop ebp
 ret
-global main
+global $main
 ; main function
-main:
+$main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [simple_hash]
+lea ebx, [$simple_hash]
 push ebx
 pop ebx
 mov dword [function_call_9], ebx
@@ -128,3 +128,4 @@ section .data
 function_call_9: dd 0
 section .rodata
 str_10: db 'a', 'g', 0
+section .note.GNU-stack noalloc noexec nowrite progbits

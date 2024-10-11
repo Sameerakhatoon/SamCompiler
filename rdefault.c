@@ -38,12 +38,19 @@ static struct resolver_default_entity_data* resolver_default_new_entity_data(voi
     return calloc(1, sizeof(struct resolver_default_entity_data));
 }
 
+// The backend's symbol prefix ("$" on i386), or "".
+static const char* resolver_default_symbol_prefix(void){
+    const char* prefix = target_current()->backend->symbol_prefix;
+    return prefix ? prefix : "";
+}
+
 void resolver_default_global_asm_address(const char* name, int offset, char* address_out){
+    const char* prefix = resolver_default_symbol_prefix();
     if(offset == 0){
-        snprintf(address_out, RESOLVER_ADDRESS_MAX, "%s", name);
+        snprintf(address_out, RESOLVER_ADDRESS_MAX, "%s%s", prefix, name);
         return;
     }
-    snprintf(address_out, RESOLVER_ADDRESS_MAX, "%s+%i", name, offset);
+    snprintf(address_out, RESOLVER_ADDRESS_MAX, "%s%s+%i", prefix, name, offset);
 }
 
 static void resolver_default_entity_data_set_address(struct resolver_default_entity_data* entity_data, struct node* var_node, int offset, int flags){
@@ -59,7 +66,7 @@ static void resolver_default_entity_data_set_address(struct resolver_default_ent
         snprintf(entity_data->base_address, RESOLVER_ADDRESS_MAX, "%s", target_current()->backend->frame_register);
     } else {
         resolver_default_global_asm_address(variable_node(var_node)->var.name, offset, entity_data->address);
-        snprintf(entity_data->base_address, RESOLVER_ADDRESS_MAX, "%s", variable_node(var_node)->var.name);
+        snprintf(entity_data->base_address, RESOLVER_ADDRESS_MAX, "%s%s", resolver_default_symbol_prefix(), variable_node(var_node)->var.name);
     }
 }
 

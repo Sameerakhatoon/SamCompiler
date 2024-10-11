@@ -187,27 +187,13 @@ static struct resolver_entity* codegen_register_function(struct node* func_node,
 // `extern` for a label the same file defines (`static int f(int);`
 // before f's body).
 static bool codegen_function_defined_here(const char* name){
-    struct vector* roots = current_process->node_tree_vec;
-    for(int i = 0; i < vector_count(roots); i++){
-        struct node* root = *(struct node**)vector_at(roots, i);
-        if(root->type == NODE_TYPE_FUNCTION && !function_node_is_prototype(root) && S_EQ(root->func.name, name)){
-            return true;
-        }
-    }
-    return false;
+    return function_defined_in_tree(current_process, name);
 }
 
 // is the variable `name` defined (not extern) in this file?
 // `extern int errno;` before `int errno;`.
 static bool codegen_variable_defined_here(const char* name){
-    struct vector* roots = current_process->node_tree_vec;
-    for(int i = 0; i < vector_count(roots); i++){
-        struct node* root = *(struct node**)vector_at(roots, i);
-        if(root->type == NODE_TYPE_VARIABLE && !(root->var.type.flags & DATATYPE_FLAG_IS_EXTERN) && S_EQ(root->var.name, name)){
-            return true;
-        }
-    }
-    return false;
+    return variable_defined_in_tree(current_process, name);
 }
 
 // a symbol as NASM must see it. `$` marks an identifier, so a C
@@ -357,8 +343,19 @@ static void x86_64_frame_address(int offset){
     asm_push("lea rax, [rbp%+i]", offset);
 }
 
+// reg = the address of a symbol. One this file defines is rip-relative
+// (`default rel`); any other may be in a shared library, so a PIE
+// reads its address from the GOT.
+static void codegen_symbol_into(const char* reg, const char* name){
+    if(symbol_defined_in_tree(current_process, name)){
+        asm_push("lea %s, [%s]", reg, codegen_symbol(name));
+        return;
+    }
+    asm_push("mov %s, [rel %s wrt ..gotpc]", reg, codegen_symbol(name));
+}
+
 static void x86_64_symbol_address(const char* name){
-    asm_push("lea rax, [%s]", codegen_symbol(name));
+    codegen_symbol_into("rax", name);
 }
 
 // String literals live in .rodata; `lea` with `default rel` gives a
@@ -620,7 +617,7 @@ static int x86_64_call_general(const struct exp64_call* call){
 static void x86_64_call(const struct exp64_call* call){
     int above = call->simple ? x86_64_call_simple(call) : x86_64_call_general(call);
     if(call->symbol){
-        asm_push("lea r11, [%s]", codegen_symbol(call->symbol));
+        codegen_symbol_into("r11", call->symbol);
     } else {
         asm_push("mov r11, [rsp+%i]", above);
     }
@@ -1471,5 +1468,7 @@ int codegen_x86_64(struct compile_process* process){
     codegen_finish_scope();
 
     codegen_generate_rod();
+    // The stack is not executable (the linker warns otherwise).
+    asm_push("section .note.GNU-stack noalloc noexec nowrite progbits");
     return CODEGEN_ALL_OK;
 }
