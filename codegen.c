@@ -306,6 +306,8 @@ static void codegen_generate_body(struct node* node, struct history* history);
 // live in the label-system block below).
 static void codegen_begin_entry_exit_point(void);
 static void codegen_end_entry_exit_point(void);
+// ch161: forward decl for the goto-exit-point helper.
+static void codegen_goto_exit_point(struct node* node);
 
 // ch150: forward decls for the structure helpers (real impls live
 // further down).
@@ -1375,6 +1377,12 @@ static void codegen_generate_for_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
+// ch161: `break;` - jumps to the innermost exit point (the loop's
+// .while_end / .for_loop_end / etc.).
+static void codegen_generate_break_stmt(struct node* node){
+    codegen_goto_exit_point(node);
+}
+
 // ch159: do/while - body first, then condition; jump back to start
 // when condition is non-zero.
 static void codegen_generate_do_while_stmt(struct node* node){
@@ -1435,6 +1443,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // ch160: for loop.
         case NODE_TYPE_STATEMENT_FOR:
             codegen_generate_for_stmt(node);
+            break;
+        // ch161: break statement.
+        case NODE_TYPE_STATEMENT_BREAK:
+            codegen_generate_break_stmt(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
