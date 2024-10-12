@@ -308,6 +308,8 @@ static void codegen_begin_entry_exit_point(void);
 static void codegen_end_entry_exit_point(void);
 // ch161: forward decl for the goto-exit-point helper.
 static void codegen_goto_exit_point(struct node* node);
+// ch162: forward decl for the goto-entry-point helper.
+static void codegen_goto_entry_point(struct node* node);
 
 // ch150: forward decls for the structure helpers (real impls live
 // further down).
@@ -1383,6 +1385,14 @@ static void codegen_generate_break_stmt(struct node* node){
     codegen_goto_exit_point(node);
 }
 
+// ch162: `continue;` - jumps to the innermost entry point. NOTE:
+// inside a for loop this currently skips the incrementer; the book
+// ships the same bug with a `#warning`. We'll fix it in a later
+// gotcha when we have a real failing test.
+static void codegen_generate_continue_stmt(struct node* node){
+    codegen_goto_entry_point(node);
+}
+
 // ch159: do/while - body first, then condition; jump back to start
 // when condition is non-zero.
 static void codegen_generate_do_while_stmt(struct node* node){
@@ -1447,6 +1457,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // ch161: break statement.
         case NODE_TYPE_STATEMENT_BREAK:
             codegen_generate_break_stmt(node);
+            break;
+        // ch162: continue statement.
+        case NODE_TYPE_STATEMENT_CONTINUE:
+            codegen_generate_continue_stmt(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
