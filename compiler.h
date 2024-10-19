@@ -683,6 +683,11 @@ struct string_table_element {
     char        label[50];
 };
 
+// ch166: moved here from parser.c so codegen can iterate switch cases.
+struct parsed_switch_case {
+    int index;
+};
+
 struct code_generator {
     // ch164: nested switch-statement bookkeeping. `current` is the
     // innermost switch's data; outer switches stack into `swtiches`
