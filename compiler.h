@@ -684,6 +684,16 @@ struct string_table_element {
 };
 
 struct code_generator {
+    // ch164: nested switch-statement bookkeeping. `current` is the
+    // innermost switch's data; outer switches stack into `swtiches`
+    // (book typo preserved).
+    struct generator_switch_stmt {
+        struct generator_switch_stmt_entity {
+            int id;
+        } current;
+        struct vector* swtiches;     // vector of generator_switch_stmt_entity
+    } _switch;
+
     struct vector* string_table;     // vector of struct string_table_element*
     struct vector* entry_points;     // vector of struct codegen_entry_point*
     struct vector* exit_points;      // vector of struct codegen_exit_point*

@@ -1550,6 +1550,8 @@ struct code_generator* codegenerator_new(struct compile_process* process){
     gen->exit_points  = vector_create(sizeof(struct codegen_exit_point*));
     // ch142: codegen response stack.
     gen->responses    = vector_create(sizeof(struct response*));
+    // ch164: nested-switch bookkeeping vector.
+    gen->_switch.swtiches = vector_create(sizeof(struct generator_switch_stmt_entity));
     return gen;
 }
 
@@ -1630,6 +1632,40 @@ static void codegen_begin_entry_exit_point(void){
 static void codegen_end_entry_exit_point(void){
     codegen_end_entry_point();
     codegen_end_exit_point();
+}
+
+// ch164: switch-statement bookkeeping. Stack the outer switch onto
+// `swtiches` and emit a fresh `.switch_stmt_<id>:` label.
+static void codegen_begin_switch_statement(void){
+    struct code_generator* gen = current_process->generator;
+    struct generator_switch_stmt* sd = &gen->_switch;
+    vector_push(sd->swtiches, &sd->current);
+    memset(&sd->current, 0, sizeof(struct generator_switch_stmt_entity));
+    int switch_stmt_id = codegen_label_count();
+    asm_push(".switch_stmt_%i:", switch_stmt_id);
+    sd->current.id = switch_stmt_id;
+}
+
+static void codegen_end_switch_statement(void){
+    struct code_generator* gen = current_process->generator;
+    struct generator_switch_stmt* sd = &gen->_switch;
+    asm_push(".switch_stmt_%i_end:", sd->current.id);
+    memcpy(&sd->current, vector_back(sd->swtiches), sizeof(struct generator_switch_stmt_entity));
+    vector_pop(sd->swtiches);
+}
+
+static int codegen_switch_id(void){
+    struct code_generator* gen = current_process->generator;
+    return gen->_switch.current.id;
+}
+
+static void codegen_begin_case_statement(int index){
+    struct code_generator* gen = current_process->generator;
+    asm_push(".switch_stmt_%i_case_%i:", gen->_switch.current.id, index);
+}
+
+static void codegen_end_case_statement(void){
+    // No-op (placeholder).
 }
 
 // ch106: map a primitive's byte size to its NASM "db / dw / dd / dq"
