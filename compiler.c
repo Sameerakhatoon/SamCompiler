@@ -1,10 +1,10 @@
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 #include "compiler.h"
 #include "helpers/vector.h"
 #include "helpers/buffer.h"
 
-static void compiler_emit_pos(struct compile_process* compiler);
 static struct compile_process* compile_include_path(const char* path, struct compile_process* parent_process);
 
 // -D and -U, in command-line order, as preprocessor lines.
@@ -162,40 +162,97 @@ struct lex_process_functions compiler_lex_functions = {
     .push_char = compile_process_push_char,
 };
 
+static int      compiler_errors;
+static int      compiler_warnings;
+static jmp_buf* compiler_recovery;
+
+void compiler_set_recovery(jmp_buf* point){
+    compiler_recovery = point;
+}
+
+int compiler_error_count(void){
+    return compiler_errors;
+}
+
+// "1 error generated.", "2 errors and 1 warning generated." Printed
+// once, when the compile fails.
+void compiler_finish_errors(void){
+    if(!compiler_errors){
+        return;
+    }
+    fprintf(stderr, "%i error%s", compiler_errors, compiler_errors == 1 ? "" : "s");
+    if(compiler_warnings){
+        fprintf(stderr, " and %i warning%s", compiler_warnings, compiler_warnings == 1 ? "" : "s");
+    }
+    fprintf(stderr, " generated.\n");
+    exit(-1);
+}
+
+// One diagnostic line: the message (many end in "\n", which is dropped
+// so the position stays on the same line), then where. Before, a
+// validator error printed `line 0, col 0 in file (null)`.
+static void compiler_report(const char* kind, struct pos* pos, const char* msg, va_list args){
+    char text[1024];
+    vsnprintf(text, sizeof(text), msg, args);
+    size_t len = strlen(text);
+    while(len && (text[len - 1] == '\n' || text[len - 1] == ' ')){
+        text[--len] = 0;
+    }
+    const char* file = pos && pos->filename ? pos->filename : "<unknown>";
+    fprintf(stderr, "%s%s on line %i, col %i in file %s\n", kind, text,
+        pos ? pos->line : 0, pos ? pos->col : 0, file);
+}
+
+static void compiler_fail(void){
+    compiler_errors++;
+    if(compiler_recovery){
+        longjmp(*compiler_recovery, 1);
+    }
+    compiler_finish_errors();
+}
+
 // ch255: error formatter for the validator. Same shape as
 // compiler_error, but anchored at a parse-tree node's position so
 // validation diagnostics point at the offending source line.
 void compiler_node_error(struct node* node, const char* msg, ...){
     va_list args;
     va_start(args, msg);
-    vfprintf(stderr, msg, args);
+    compiler_report("", node ? &node->pos : 0, msg, args);
     va_end(args);
+    compiler_fail();
+}
 
-    fprintf(stderr, " on line %i, col %i in file %s\n", node->pos.line, node->pos.col, node->pos.filename);
-    exit(-1);
+// An error at `pos` (may be NULL), for code that has no process or node.
+void compiler_error_at(struct pos* pos, const char* msg, ...){
+    va_list args;
+    va_start(args, msg);
+    compiler_report("", pos, msg, args);
+    va_end(args);
+    compiler_fail();
 }
 
 void compiler_error(struct compile_process* compiler, const char* msg, ...){
     va_list args;
     va_start(args, msg);
-    vfprintf(stderr, msg, args);
+    compiler_report("", &compiler->pos, msg, args);
     va_end(args);
-    compiler_emit_pos(compiler);
-    exit(-1);
+    compiler_fail();
 }
 
 void compiler_warning(struct compile_process* compiler, const char* msg, ...){
     va_list args;
     va_start(args, msg);
-    vfprintf(stderr, msg, args);
+    compiler_report("warning: ", &compiler->pos, msg, args);
     va_end(args);
-    compiler_emit_pos(compiler);
+    compiler_warnings++;
 }
 
-static void compiler_emit_pos(struct compile_process* compiler){
-    const char* file = compiler->pos.filename ? compiler->pos.filename : "<unknown>";
-    fprintf(stderr, " on line %i, col %i in file %s\n",
-        compiler->pos.line, compiler->pos.col, file);
+void compiler_node_warning(struct node* node, const char* msg, ...){
+    va_list args;
+    va_start(args, msg);
+    compiler_report("warning: ", &node->pos, msg, args);
+    va_end(args);
+    compiler_warnings++;
 }
 
 // ch229: try to open + lex + preprocess `<include_dir>/<filename>`
@@ -344,6 +401,11 @@ int compile_file(const char* filename, const char* out_filename, int flags){
     if(parse(process) != PARSE_ALL_OK){
         res = COMPILER_FAILED_WITH_ERRORS;
         goto out;
+    }
+    // C11 6.9p1: a translation unit has at least one declaration. An
+    // empty file compiled silently to an empty object.
+    if(!vector_count(process->node_tree_vec)){
+        compiler_warning(process, "%s declares nothing (ISO C requires at least one declaration)", filename);
     }
 
     // ch243: validator stage, on the finished AST. Most checks report

@@ -552,6 +552,19 @@ bool file_exists(const char* filename);
 void compiler_error(struct compile_process* compiler, const char* msg, ...);
 void compiler_warning(struct compile_process* compiler, const char* msg, ...);
 void compiler_node_error(struct node* node, const char* msg, ...);
+void compiler_node_warning(struct node* node, const char* msg, ...);
+void compiler_error_at(struct pos* pos, const char* msg, ...);
+
+// Error recovery. An error normally
+// ends the compile; while a recovery point is set (the validator sets
+// one per statement), compiler_error and compiler_node_error count the
+// error and longjmp there instead, so the next statement is checked
+// too. compiler_finish_errors prints the totals ("2 errors and 1
+// warning generated.") and exits with -1 when there was an error.
+#include <setjmp.h>
+void compiler_set_recovery(jmp_buf* point);
+int  compiler_error_count(void);
+void compiler_finish_errors(void);
 
 // FILE*-backed adapters that plug into lex_process_functions.
 char compile_process_next_char(struct lex_process* lex_process);
@@ -629,6 +642,8 @@ enum {
     NODE_FLAG_INSIDE_EXPRESSION      = 0b00000001,
     NODE_FLAG_IS_FORWARD_DECLARATION = 0b00000010,
     NODE_FLAG_HAS_VARIABLE_COMBINED  = 0b00000100,
+    // On a variable: the validator saw a name refer to it.
+    NODE_FLAG_IS_REFERENCED          = 0b00001000,
 };
 
 // Datatype shape is needed before struct node because var nodes embed
@@ -755,6 +770,9 @@ struct node {
         // The value itself is in llnum.
         struct node_number {
             int flags;
+            // A folded `sizeof expr`: the operand, kept so the validator
+            // can check its names (and count them as used). Not generated.
+            struct node* sizeof_operand;
         } num;
 
         struct var {
@@ -922,6 +940,8 @@ struct node {
 };
 
 int  parse(struct compile_process* process);
+// The position of the token the parser read last.
+struct pos parser_position(void);
 
 // ch243: validator entry point. Scaffolded only; later chapters
 // hang the actual checks off this.
@@ -1385,6 +1405,7 @@ void           symresolver_initialize(struct compile_process* process);
 void           symresolver_new_table(struct compile_process* process);
 void           symresolver_end_table(struct compile_process* process);
 struct symbol* symresolver_get_symbol(struct compile_process* process, const char* name);
+struct symbol* symresolver_get_symbol_any(struct compile_process* process, const char* name);
 struct symbol* symresolver_register_symbol(struct compile_process* process, const char* sym_name, int type, void* data);
 struct symbol* symresolver_get_symbol_for_native_function(struct compile_process* process, const char* name);
 struct symbol* symresolver_register_symbol(struct compile_process* process, const char* sym_name, int type, void* data);
@@ -1824,7 +1845,9 @@ enum {
 
 // ch71: flags on NODE_TYPE_FUNCTION (.func.flags).
 enum {
-    FUNCTION_NODE_FLAG_IS_NATIVE = 0b00000001,
+    FUNCTION_NODE_FLAG_IS_NATIVE   = 0b00000001,
+    // The parameter list ends in `...`: a call may pass more arguments.
+    FUNCTION_NODE_FLAG_IS_VARIADIC = 0b00000010,
 };
 
 // Operator precedence table - definitions moved out of expressionable.c

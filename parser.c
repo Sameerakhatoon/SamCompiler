@@ -105,6 +105,7 @@ static void            parse_compound_literal(struct datatype* dtype);
 static bool            parse_function_pointer_declarator(struct datatype* dtype, struct token** name_out);
 static struct array_brackets* parse_array_brackets(struct history* history);
 static bool            parser_name_in(struct vector* names, const char* name);
+static bool            parser_is_statement_keyword(const char* keyword);
 
 static struct compile_process* current_process;
 // ch97: parser-owned fixup system. Forward references to as-yet-
@@ -117,6 +118,13 @@ static struct token*           parser_last_token;
 static struct token*           parser_previous_token;
 // Set once a _Bool type has been parsed.
 static bool                    parser_saw_bool;
+// How many loops, and loops or switches, enclose the statement being
+// parsed: `break` needs one of either, `continue` a loop. Outside them
+// both reached codegen without a target and segfaulted.
+static int                     parser_loop_depth;
+static int                     parser_breakable_depth;
+// Set by parse_function_arguments when the list ends in `...`.
+static bool                    parser_arguments_variadic;
 // Statements that belong right after the statement being parsed: the
 // stores a local's brace initializer turns into. parse_body takes them.
 static struct vector*          parser_pending_statements;
@@ -237,6 +245,12 @@ static struct token* token_next(void){
     parser_previous_token = parser_last_token;
     parser_last_token = next_token;
     return vector_peek(current_process->token_vec);
+}
+
+// The position of the token read last; node_create stamps it on nodes.
+struct pos parser_position(void){
+    struct pos none = {0};
+    return current_process ? current_process->pos : none;
 }
 
 static struct token* token_peek_next(void){
@@ -434,6 +448,9 @@ static bool parser_left_op_has_priority(const char* op_left, const char* op_righ
 
     int precdence_left  = parser_get_precedence_for_operator(op_left,  &group_left);
     int precdence_right = parser_get_precedence_for_operator(op_right, &group_right);
+    if(!group_left || !group_right){
+        compiler_error(current_process, "'%s' cannot be used between two operands\n", group_left ? op_right : op_left);
+    }
     if(group_left->associtivity == ASSOCIATIVITY_RIGHT_TO_LEFT){
         return false;
     }
@@ -631,6 +648,10 @@ static void parse_exp_normal(struct history* history){
         node_peek()->unary.flags |= UNARY_FLAG_IS_POSTFIX;
         return;
     }
+    // A prefix-only operator after an operand: `n !x`, `a ~b`.
+    if(S_EQ(op, "!") || S_EQ(op, "~")){
+        compiler_error(current_process, "Expected an operator or ';' but found '%s'\n", op);
+    }
 
     token_next();          // consume operator
 
@@ -737,6 +758,10 @@ static void parse_for_parentheses(struct history* history){
     if(!token_next_is_symbol(')')){
         parse_expressionable_root(history_begin(0));
         exp_node = node_pop();
+    } else if(!left_node){
+        // `()` is a call's empty argument list, never a value: `*()`
+        // reached the x86 backend and failed a stack frame assert.
+        compiler_error(current_process, "Expected an expression but found ')'\n");
     }
     expect_sym(')');
 
@@ -832,6 +857,11 @@ static void parse_for_array(struct history* history){
 // ch91: `a, b` sequence operator.
 static void parse_for_comma(struct history* history){
     token_next();   // eat `,`
+    // `struct p {, int x; }`: a comma with nothing before it popped an
+    // empty node stack.
+    if(!node_count()){
+        compiler_error(current_process, "Expected an expression before ','\n");
+    }
     struct node* left_node = node_pop();
     parse_expressionable_root(history);
     struct node* right_node = node_pop();
@@ -970,21 +1000,21 @@ static void parser_scope_push(struct parser_scope_entity* entity, size_t size){
 static void expect_sym(char c){
     struct token* next_token = token_next();
     if(!next_token || next_token->type != TOKEN_TYPE_SYMBOL || next_token->cval != c){
-        compiler_error(current_process, "Expecting symbol %c however something else was provided\n", c);
+        compiler_error(current_process, "Expecting symbol %c but found %s\n", c, parser_token_text(next_token));
     }
 }
 
 static void expect_op(const char* op){
     struct token* next_token = token_next();
     if(!next_token || next_token->type != TOKEN_TYPE_OPERATOR || !S_EQ(next_token->sval, op)){
-        compiler_error(current_process, "Expecting the operator %s but something else was provided\n", op);
+        compiler_error(current_process, "Expecting the operator %s but found %s\n", op, parser_token_text(next_token));
     }
 }
 
 static void expect_keyword(const char* keyword){
     struct token* next_token = token_next();
     if(!next_token || next_token->type != TOKEN_TYPE_KEYWORD || !S_EQ(next_token->sval, keyword)){
-        compiler_error(current_process, "Expecting the keyword %s but something else was provided\n", keyword);
+        compiler_error(current_process, "Expecting the keyword %s but found %s\n", keyword, parser_token_text(next_token));
     }
 }
 
@@ -1338,7 +1368,7 @@ static void parse_datatype_type(struct datatype* dtype){
     // For `struct` / `union`, the next token names the type (or is
     // missing, in which case we forge a synthetic identifier).
     if(datatype_is_struct_or_union_for_name(datatype_token->sval)){
-        if(token_peek_next()->type == TOKEN_TYPE_IDENTIFIER){
+        if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_IDENTIFIER){
             datatype_token = token_next();
         } else {
             datatype_token = parser_build_random_type_name();
@@ -2435,6 +2465,14 @@ static void parser_check_gotos(const char* function){
 
 static void parse_function(struct datatype* ret_type, struct token* name_token, struct history* history){
     struct vector* arguments_vector = 0;
+    // A function inside a function body, defined (a GNU extension) or
+    // only declared (C allows a block-scope prototype), became a body
+    // statement that codegen segfaulted on.
+    if(parser_current_function){
+        compiler_error(current_process, "Function %s is declared inside function %s; "
+            "declare it at file scope (block-scope functions are not supported)\n",
+            name_token->sval, parser_current_function->func.name);
+    }
     parser_scope_new();
     // ch149: open the matching resolver-side scope.
     resolver_default_new_scope(current_process->resolver, 0);
@@ -2455,6 +2493,9 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
     expect_sym(')');
 
     function_node->func.args.vector = arguments_vector;
+    if(parser_arguments_variadic){
+        function_node->func.flags |= FUNCTION_NODE_FLAG_IS_VARIADIC;
+    }
     if(symresolver_get_symbol_for_native_function(current_process, name_token->sval)){
         function_node->func.flags |= FUNCTION_NODE_FLAG_IS_NATIVE;
     }
@@ -2509,7 +2550,7 @@ static void parse_asm(void){
     }
     expect_op("(");
     struct buffer* text = buffer_create();
-    while(token_peek_next()->type == TOKEN_TYPE_STRING){
+    while(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
         for(const char* c = token_next()->sval; *c; c++){
             buffer_write(text, *c);
         }
@@ -2517,6 +2558,9 @@ static void parse_asm(void){
     buffer_write(text, 0);
     while(!token_next_is_symbol(')')){
         struct token* token = token_next();
+        if(!token){
+            compiler_error(current_process, "Expected ')' to end the asm statement but found the end of the file\n");
+        }
         if(token_is_operator(token, "(")){
             compiler_error(current_process, "asm operands are not supported, only clobbers\n");
         }
@@ -2581,7 +2625,7 @@ static void parse_statement(struct history* history){
     }
 
     parse_expressionable_root(history);
-    if(token_peek_next()->type == TOKEN_TYPE_SYMBOL
+    if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_SYMBOL
        && !token_is_symbol(token_peek_next(), ';')){
         parse_symbol();
         return;
@@ -2796,6 +2840,18 @@ static void parse_body_multiple_statements(size_t* variable_size,
     node_push(body_node);
 }
 
+static void parse_body(size_t* variable_size, struct history* history);
+
+// The body of a loop (is_loop) or a switch: `break` may leave it, and
+// `continue` too when it is a loop.
+static void parse_loop_body(size_t* variable_size, struct history* history, bool is_loop){
+    parser_breakable_depth++;
+    parser_loop_depth += is_loop;
+    parse_body(variable_size, history);
+    parser_loop_depth -= is_loop;
+    parser_breakable_depth--;
+}
+
 // Body entry. Single-statement (ch49) or { ... } (ch62).
 static void parse_body(size_t* variable_size, struct history* history){
     parser_scope_new();
@@ -2934,6 +2990,7 @@ static struct vector* parse_function_arguments(struct history* history){
         // `...` variadic - consume the three dots and stop.
         if(token_next_is_operator(".")){
             token_read_dots(3);
+            parser_arguments_variadic = true;
             parser_scope_finish();
             return arguments_vec;
         }
@@ -2947,6 +3004,8 @@ static struct vector* parse_function_arguments(struct history* history){
         }
         token_next();   // eat the comma
     }
+    // A parameter's own list (a function pointer) may have set it.
+    parser_arguments_variadic = false;
     parser_scope_finish();
     return arguments_vec;
 }
@@ -3138,7 +3197,7 @@ static void parse_while(struct history* history){
     parse_keyword_parentheses_expression("while");
     struct node* exp_node = node_pop();
     size_t var_size = 0;
-    parse_body(&var_size, history);
+    parse_loop_body(&var_size, history, true);
     struct node* body_node = node_pop();
     make_while_node(exp_node, body_node);
 }
@@ -3147,7 +3206,7 @@ static void parse_while(struct history* history){
 static void parse_do_while(struct history* history){
     expect_keyword("do");
     size_t var_size = 0;
-    parse_body(&var_size, history);
+    parse_loop_body(&var_size, history, true);
     struct node* body_node = node_pop();
     parse_keyword_parentheses_expression("while");
     struct node* exp_node = node_pop();
@@ -3163,7 +3222,7 @@ static void parse_switch(struct history* history){
     parse_keyword_parentheses_expression("switch");
     struct node* exp_node = node_pop();
     size_t var_size = 0;
-    parse_body(&var_size, history);
+    parse_loop_body(&var_size, history, false);
     struct node* body_node = node_pop();
     make_switch_node(exp_node, body_node, sw.case_data->cases, sw.case_data->has_default_case);
     parser_end_switch_statement(&sw);
@@ -3173,6 +3232,9 @@ static void parse_switch(struct history* history){
 static void parse_break(struct history* history){
     (void)history;
     expect_keyword("break");
+    if(!parser_breakable_depth){
+        compiler_error(current_process, "'break' is only valid inside a loop or switch\n");
+    }
     expect_sym(';');
     make_break_node();
 }
@@ -3180,6 +3242,9 @@ static void parse_break(struct history* history){
 static void parse_continue(struct history* history){
     (void)history;
     expect_keyword("continue");
+    if(!parser_loop_depth){
+        compiler_error(current_process, "'continue' is only valid inside a loop\n");
+    }
     expect_sym(';');
     make_continue_node();
 }
@@ -3297,7 +3362,7 @@ static void parse_for_stmt(struct history* history){
     expect_sym(')');
 
     size_t var_size = 0;
-    parse_body(&var_size, history);
+    parse_loop_body(&var_size, history, true);
     body_node = node_pop();
     if(declares){
         resolver_default_finish_scope(current_process->resolver);
@@ -3330,6 +3395,17 @@ static bool parser_expression_type(struct node* node, struct datatype* out);
 // that reaches an element keeps the array's flags in the resolver; for
 // sizeof and the operators around it that is the element type.
 static bool parser_resolved_type(struct node* node, struct datatype* out){
+    // The name an access chain starts from must exist: the resolver
+    // follows `zz[0]` into a NULL entity and segfaulted.
+    struct node* root = node;
+    while(root && (root->type == NODE_TYPE_EXPRESSION || root->type == NODE_TYPE_EXPRESSION_PARENTHESES)){
+        root = root->type == NODE_TYPE_EXPRESSION ? root->exp.left : root->parenthesis.exp;
+    }
+    if(root && root->type == NODE_TYPE_IDENTIFIER
+       && !resolver_get_variable(0, current_process->resolver, root->sval)
+       && !symresolver_get_symbol(current_process, root->sval)){
+        compiler_error(current_process, "'%s' is not declared\n", root->sval);
+    }
     struct resolver_result* result = resolver_follow(current_process->resolver, node);
     if(!resolver_result_ok(result) || !result->last_entity){
         return false;
@@ -3437,6 +3513,7 @@ static void parse_sizeof(struct history* history){
     expect_keyword("sizeof");
     struct datatype dtype;
     struct token* after_paren = 0;
+    struct node* operand = 0;
     if(token_next_is_operator("(")){
         expect_op("(");
         after_paren = token_peek_next();
@@ -3454,14 +3531,14 @@ static void parse_sizeof(struct history* history){
             parse_expressionable(parser_unary_operand_history());
         }
         parser_expect_new_node(count_before, "an operand after sizeof");
-        struct node* operand = node_pop();
+        operand = node_pop();
         if(!parser_expression_type(operand, &dtype)){
             compiler_error(current_process, "Cannot work out the size of this sizeof operand\n");
         }
     }
     // sizeof yields a size_t, which is unsigned long on every target.
     node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&dtype),
-        .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG });
+        .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG, .num.sizeof_operand = operand });
 }
 
 static void parse_keyword(struct history* history){
@@ -3553,15 +3630,50 @@ static int parse_expressionable_single(struct history* history){
             break;
 
         case TOKEN_TYPE_KEYWORD:
+            // `return 50 else + 1`: a statement keyword inside an
+            // expression built nothing and consumed nothing, and this
+            // loop never ended.
+            if(parser_is_statement_keyword(token->sval)){
+                compiler_error(current_process, "Expected an expression but found '%s'\n", token->sval);
+            }
             parse_keyword(history);
+            if(token_peek_next() == token){
+                compiler_error(current_process, "The keyword '%s' is not supported here\n", token->sval);
+            }
             res = 0;
             break;
     }
     return res;
 }
 
+// Keywords that begin a statement, never an expression or a declaration.
+static bool parser_is_statement_keyword(const char* keyword){
+    return S_EQ(keyword, "return") || S_EQ(keyword, "if")       || S_EQ(keyword, "else")
+        || S_EQ(keyword, "while")  || S_EQ(keyword, "for")      || S_EQ(keyword, "do")
+        || S_EQ(keyword, "break")  || S_EQ(keyword, "continue") || S_EQ(keyword, "switch")
+        || S_EQ(keyword, "case")   || S_EQ(keyword, "default")  || S_EQ(keyword, "goto");
+}
+
+static bool parser_is_operand_token(struct token* token){
+    return token && (token->type == TOKEN_TYPE_IDENTIFIER || token->type == TOKEN_TYPE_NUMBER
+        || token->type == TOKEN_TYPE_STRING);
+}
+
 static void parse_expressionable(struct history* history){
     while(parse_expressionable_single(history) == 0){
+        // Two operands in a row (`foo x;` with foo an unknown type name,
+        // `a b`) are not an expression. Both were pushed, the statement
+        // took one and the other was left on the node stack, where it
+        // replaced the function being parsed: main vanished (A13).
+        struct token* next = token_peek_next();
+        if(parser_is_operand_token(parser_last_token) && parser_is_operand_token(next)){
+            char last[64];
+            snprintf(last, sizeof(last), "%s", parser_token_text(parser_last_token));
+            compiler_error(current_process, "Expected an operator or ';' after %s but found %s%s\n",
+                last, parser_token_text(next),
+                parser_last_token->type == TOKEN_TYPE_IDENTIFIER && next->type == TOKEN_TYPE_IDENTIFIER
+                    ? " (is the first an unknown type name?)" : "");
+        }
     }
 }
 
@@ -3569,10 +3681,20 @@ static void parse_expressionable(struct history* history){
 // ch42 variables push a real node. ch47 added bare `struct foo {};`
 // which pushes nothing, so guard the pop/push.
 static void parse_keyword_for_global(void){
+    // Only declarations live at file scope. `return` there reached
+    // parse_for_stmt with no function and segfaulted; `else` was never
+    // consumed and the parser looped forever.
+    struct token* keyword = token_peek_next();
+    if(parser_is_statement_keyword(keyword->sval) || S_EQ(keyword->sval, "sizeof")){
+        compiler_error(current_process, "Expected a declaration at file scope but found '%s'\n", keyword->sval);
+    }
     // ch149: top-level parse runs under HISTORY_FLAG_IS_GLOBAL_SCOPE
     // and we register variable / function / struct / union names with
     // the symbol resolver so codegen can look them up.
     parse_keyword(history_begin(HISTORY_FLAG_IS_GLOBAL_SCOPE));
+    if(token_peek_next() == keyword){
+        compiler_error(current_process, "The keyword '%s' is not supported here\n", keyword->sval);
+    }
     if(!vector_empty(current_process->node_vec)){
         struct node* node = node_pop();
         switch(node->type){

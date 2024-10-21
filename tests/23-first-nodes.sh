@@ -6,7 +6,7 @@
 ./build.sh >/dev/null 2>&1
 
 scratch=$(mktemp /tmp/sam_ch27_input.XXXXXX)
-printf '5837 ABCD' > "$scratch"
+printf 'ABCD' > "$scratch"
 
 probe=$(mktemp /tmp/sam_ch27_probe.XXXXXX.c)
 bin=$(mktemp /tmp/sam_ch27_bin.XXXXXX)
@@ -47,12 +47,16 @@ EOF
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>&1 | head -5
 [ -x "$bin" ] || fail "ch27 probe failed to compile"
 got="$("$bin")"
-# After ch28, parse_expressionable() greedily consumes adjacent
-# expressionable tokens. For "5837 ABCD" with no operator, only the
-# last one (ABCD) ends up in node_tree_vec; 5837 is left on the
-# scratch stack. The book's parser does the same, and real C input
-# never has two bare expressionable tokens in a row so it doesn't
-# matter past ch28.
-assert_contains "$got" "roots=1"     "one top-level node (post-ch28 greedy parse_expressionable)"
-assert_contains "$got" "ND ID ABCD"  "trailing identifier surfaces as the root"
+assert_contains "$got" "roots=1"     "one top-level node"
+assert_contains "$got" "ND ID ABCD"  "the identifier is the root"
+
+# The probe used "5837 ABCD": after ch28 parse_expressionable() took
+# both, the root was ABCD and 5837 stayed on the scratch stack, where in
+# a function it replaced the function node.
+# Two operands in a row are now an error.
+printf '5837 ABCD' > "$scratch"
+rc=0
+err=$(./main -target=x86_64 "$scratch" /tmp/sam_ch27_out object 2>&1 >/dev/null) || rc=$?
+[ $rc != 0 ] || fail "two operands in a row were accepted"
+assert_contains "$err" "after the number 5837 but found 'ABCD'" "two operands in a row"
 pass

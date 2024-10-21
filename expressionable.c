@@ -31,9 +31,12 @@ struct expressionable_op_precedence_group op_precedence[TOTAL_OPERATOR_GROUPS] =
 void expressionable_ignore_nl(struct expressionable* expressionable, struct token* next_token);
 void expressionable_parse(struct expressionable* expressionable);
 
+// A malformed `#if` expression (`7 % 4 == =3`) failed an assert here;
+// it is an error at the token being read.
 void expressionable_error(struct expressionable* expressionable, const char* str)
 {
-    assert(0 == 1 && str);
+    struct token* token = vector_peek_no_increment(expressionable->token_vec);
+    compiler_error_at(token ? &token->pos : 0, "%s in a preprocessor expression", str);
 }
 
 int expressionable_parse_single(struct expressionable* expressionable);

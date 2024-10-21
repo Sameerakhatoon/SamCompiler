@@ -142,9 +142,12 @@ static struct node* struct_member_named(struct vector* statements, const char* n
 
 int struct_offset(struct compile_process* compile_proc, const char* struct_name, const char* var_name, struct node** var_node_out, int last_pos, int flags){
     struct symbol* struct_sym = symresolver_get_symbol(compile_proc, struct_name);
-    assert(struct_sym && struct_sym->type == SYMBOL_TYPE_NODE);
+    // A member of a struct not defined yet (`static struct s v;` before
+    // `struct s {...}`) failed these asserts.
+    if(!struct_sym || struct_sym->type != SYMBOL_TYPE_NODE || !node_is_struct_or_union(struct_sym->data)){
+        compiler_error(compile_proc, "struct %s is not defined here, so it has no member %s", struct_name, var_name);
+    }
     struct node* node = struct_sym->data;
-    assert(node_is_struct_or_union(node));
 
     (void)flags;
     if(!node->_struct.body_n){

@@ -363,7 +363,14 @@ struct token *preprocessor_previous_token(struct compile_process *compiler)
 
 struct token *preprocessor_next_token(struct compile_process *compiler)
 {
-    return vector_peek(compiler->token_vec_original);
+    struct token *token = vector_peek(compiler->token_vec_original);
+    // Errors point at the token being read; they named the end of the
+    // file, where the lexer left the position.
+    if (token && token->pos.line)
+    {
+        compiler->pos = token->pos;
+    }
+    return token;
 }
 
 struct token *preprocessor_next_token_no_increment(struct compile_process *compiler)
@@ -985,6 +992,10 @@ void preprocessor_handle_definition_token(struct compile_process *compiler)
 void preprocessor_handle_undef_token(struct compile_process *compiler)
 {
     struct token *name_token = preprocessor_next_token(compiler);
+    if (!name_token || (name_token->type != TOKEN_TYPE_IDENTIFIER && name_token->type != TOKEN_TYPE_KEYWORD))
+    {
+        compiler_error(compiler, "#undef needs a macro name");
+    }
     preprocessor_definition_remove(compiler->preprocessor, name_token->sval);
 }
 void preprocessor_handle_warning_token(struct compile_process *compiler)
@@ -1319,6 +1330,11 @@ void preprocessor_handle_typedef_body_for_struct_or_union(struct compile_process
     while (token && token->type == TOKEN_TYPE_NEWLINE)
     {
         token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
+    }
+    if (!token)
+    {
+        // `typedef enum` at the end of the file.
+        compiler_error(compiler, "The typedef of a %s ends at the end of the file", td->structure.keyword);
     }
     // Do we have a name for this structure
     if (token->type == TOKEN_TYPE_IDENTIFIER)
@@ -1989,6 +2005,12 @@ int preprocessor_handle_hashtag_token(struct compile_process *compiler, struct t
 {
     bool is_preprocessed = false;
     struct token *next_token = preprocessor_next_token(compiler);
+    if (!next_token)
+    {
+        // A `#` alone at the end of the file is a null directive; it
+        // read past the end and segfaulted.
+        return 1;
+    }
     if (preprocessor_token_is_define(next_token))
     {
         // handle the definition token.

@@ -293,6 +293,9 @@ static struct datatype exp64_indirection_address(struct node* node){
 }
 
 static struct datatype exp64_address(struct node* node){
+    if(node->pos.line){
+        current_process->pos = node->pos;
+    }
     switch(node->type){
         case NODE_TYPE_IDENTIFIER:
             return exp64_identifier_address(node);
@@ -928,6 +931,10 @@ static struct datatype exp64_rvalue(struct node* node, bool decay){
 }
 
 static struct datatype exp64_rvalue_of(struct node* node, bool decay){
+    // Errors name the line of the expression being generated.
+    if(node->pos.line){
+        current_process->pos = node->pos;
+    }
     switch(node->type){
         case NODE_TYPE_NUMBER:
             return exp64_number(node);

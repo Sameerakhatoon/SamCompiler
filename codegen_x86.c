@@ -388,6 +388,9 @@ static void codegen_generate_move_struct(struct datatype* dtype, const char* bas
 // ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
 // nested calls so the recursive walk knows it's deeper than the top.
 static void codegen_generate_expressionable(struct node* node, struct history* history){
+    if(node->pos.line){
+        current_process->pos = node->pos;
+    }
     if(codegen_is_exp_root(history)){
         history->flags |= EXPRESSION_IS_NOT_ROOT_NODE;
     }
@@ -2115,6 +2118,10 @@ static void codegen_generate_statement_return(struct node* node){
 
 static void codegen_generate_statement(struct node* node, struct history* history){
     (void)history;
+    // A backend error names the statement's line, not the end of the file.
+    if(node->pos.line){
+        current_process->pos = node->pos;
+    }
     switch(node->type){
         case NODE_TYPE_EXPRESSION:
             codegen_generate_exp_node(node, codegen_history_begin(history->flags));

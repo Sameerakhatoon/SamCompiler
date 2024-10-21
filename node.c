@@ -201,6 +201,12 @@ struct node* node_create(struct node* _node){
     // where it sits in the tree without the parser threading args.
     node->binded.owner    = parser_current_body;
     node->binded.function = parser_current_function;
+    // Where the node is: the token the parser read last (the name for
+    // an identifier, the end of a statement). Diagnostics after parsing
+    // (validator, codegen) point there; nodes had no position at all.
+    if(!node->pos.filename && !node->pos.line){
+        node->pos = parser_position();
+    }
     node_push(node);
     return node;
 }

@@ -750,9 +750,13 @@ int main(int argc, char** argv){
         return 1;
     }
 
-    // The original form: `in out` or `in out object`.
-    bool legacy = !output && !mode_given && (file_count == 2 || file_count == 3)
-        && !main_is_source(files[1]) && !main_is_linker_input(files[1]);
+    // The original form: `in out` or `in out object`. A trailing
+    // `object` only exists in that form, so it decides even when `out`
+    // ends in .o (`in.c out.o object`, which the tests use).
+    bool legacy = !output && !mode_given
+        && ((file_count == 3 && S_EQ(files[2], "object") && main_is_source(files[0]))
+            || ((file_count == 2 || file_count == 3)
+                && !main_is_source(files[1]) && !main_is_linker_input(files[1])));
     if(legacy){
         if(file_count == 3 && !S_EQ(files[2], "object")){
             main_error("unknown mode %s: the third argument of `%s in out [object]` can only be object", files[2], main_prog);

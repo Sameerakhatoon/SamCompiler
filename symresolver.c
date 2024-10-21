@@ -42,6 +42,24 @@ struct symbol* symresolver_get_symbol(struct compile_process* process, const cha
     return symbol;
 }
 
+// The symbol in the current table or, failing that, in the saved ones,
+// newest first. The validator works in a table of its own and finds
+// what the parser registered (structs, native functions) this way.
+struct symbol* symresolver_get_symbol_any(struct compile_process* process, const char* name){
+    struct symbol* symbol = symresolver_get_symbol(process, name);
+    for(int i = vector_count(process->symbols.tables) - 1; !symbol && i >= 0; i--){
+        struct vector* table = *(struct vector**)vector_at(process->symbols.tables, i);
+        for(int j = 0; table && j < vector_count(table); j++){
+            struct symbol* candidate = *(struct symbol**)vector_at(table, j);
+            if(S_EQ(candidate->name, name)){
+                symbol = candidate;
+                break;
+            }
+        }
+    }
+    return symbol;
+}
+
 struct symbol* symresolver_get_symbol_for_native_function(struct compile_process* process, const char* name){
     struct symbol* sym = symresolver_get_symbol(process, name);
     if(!sym || sym->type != SYMBOL_TYPE_NATIVE_FUNCTION){
