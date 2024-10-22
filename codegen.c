@@ -1447,6 +1447,16 @@ static void codegen_generate_switch_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
+// ch168: `goto LABEL;` - emits `jmp label_<name>`.
+static void codegen_generate_goto_stmt(struct node* node){
+    asm_push("jmp label_%s", node->stmt._goto.label->sval);
+}
+
+// ch169: `LABEL:` statement - emits the asm label.
+static void codegen_generate_label(struct node* node){
+    asm_push("label_%s:", node->stmt.label.name->sval);
+}
+
 // ch167: `case N:` - emits the `.switch_stmt_<id>_case_N:` label
 // and a comment marker. Body statements follow normally.
 static void codegen_generate_switch_case_stmt(struct node* node){
@@ -1550,6 +1560,14 @@ static void codegen_generate_statement(struct node* node, struct history* histor
             break;
         case NODE_TYPE_STATEMENT_DEFAULT:
             codegen_generate_switch_default_stmt(node);
+            break;
+        // ch168: goto statement.
+        case NODE_TYPE_STATEMENT_GOTO:
+            codegen_generate_goto_stmt(node);
+            break;
+        // ch169: label.
+        case NODE_TYPE_LABEL:
+            codegen_generate_label(node);
             break;
     }
     // ch148: drain leftover result_value pushes.
