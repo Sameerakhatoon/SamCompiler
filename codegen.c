@@ -300,6 +300,8 @@ static void codegen_generate_exp_parenthesis_node(struct node* node, struct hist
 static int  codegen_remove_uninheritable_flags(int flags);
 // ch172: forward decl for the ternary emitter.
 static void codegen_generate_tenary(struct node* node, struct history* history);
+// ch173: forward decl for the cast emitter.
+static void codegen_generate_cast(struct node* node, struct history* history);
 // ch147: forward decl - real impl lives in the label-system block below.
 static int  codegen_label_count(void);
 // ch151: forward decl for the UNARY codegen used by the dispatcher
@@ -367,6 +369,10 @@ static void codegen_generate_expressionable(struct node* node, struct history* h
         // ch172: ternary.
         case NODE_TYPE_TENARY:
             codegen_generate_tenary(node, history);
+            break;
+        // ch173: cast.
+        case NODE_TYPE_CAST:
+            codegen_generate_cast(node, history);
             break;
     }
 }
@@ -840,6 +846,23 @@ static void codegen_generate_string(struct node* node, struct history* history){
 static void codegen_generate_exp_parenthesis_node(struct node* node, struct history* history){
     codegen_generate_expressionable(node->parenthesis.exp,
         codegen_history_down(history, codegen_remove_uninheritable_flags(history->flags)));
+}
+
+// ch173: `(T) operand`. Resolve the cast (which already pushed a
+// value via the resolver path if possible); otherwise walk the
+// operand. Then pop into eax, reduce-register to the target dtype's
+// width with sign/zero extension, and re-push tagged with the new
+// dtype.
+static void codegen_generate_cast(struct node* node, struct history* history){
+    if(!codegen_resolve_node_for_value(node, history)){
+        codegen_generate_expressionable(node->cast.operand, history);
+    }
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    codegen_reduce_register("eax", datatype_size(&node->cast.dtype),
+        node->cast.dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+    asm_push_ins_push_with_data("eax",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = node->cast.dtype});
 }
 
 // ch172: ternary `cond ? T : F`. The cond was already evaluated and
