@@ -493,6 +493,9 @@ static void codegen_generate_entity_access_for_unary_indirection_for_assignment_
 static void codegen_generate_entity_access_for_unary_get_address(struct resolver_result* result, struct resolver_entity* entity);
 // ch155: forward decl - shared between LHS and read-side dispatchers.
 static void codegen_generate_entity_access_for_unsupported(struct resolver_result* result, struct resolver_entity* entity);
+// ch174: forward decls - shared between LHS and read-side dispatchers.
+static void codegen_generate_entity_access_for_cast(struct resolver_result* result, struct resolver_entity* entity);
+static void codegen_generate_entity_access_array_bracket(struct resolver_result* result, struct resolver_entity* entity);
 
 // ch154: codegen rules for an entity in the access chain. Used by
 // the indirection / get-address paths.
@@ -524,8 +527,9 @@ static void codegen_apply_unary_access(int depth){
 static void codegen_generate_entity_access_for_entity_for_assignment_left_operand(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
     (void)history;
     switch(entity->type){
+        // ch174: array bracket on LHS.
         case RESOLVER_ENTITY_TYPE_ARRAY_BRACKET:
-            // todo: array bracket
+            codegen_generate_entity_access_array_bracket(result, entity);
             break;
         case RESOLVER_ENTITY_TYPE_VARIABLE:
         case RESOLVER_ENTITY_TYPE_GENERAL:
@@ -546,8 +550,9 @@ static void codegen_generate_entity_access_for_entity_for_assignment_left_operan
         case RESOLVER_ENTITY_TYPE_UNSUPPORTED:
             codegen_generate_entity_access_for_unsupported(result, entity);
             break;
+        // ch174: cast - just a `; CAST` comment marker.
         case RESOLVER_ENTITY_TYPE_CAST:
-            // todo: cast
+            codegen_generate_entity_access_for_cast(result, entity);
             break;
         default:
             compiler_error(current_process, "COMPILER BUG: unexpected entity type in assignment LHS\n");
@@ -559,6 +564,53 @@ static void codegen_generate_entity_access_for_entity_for_assignment_left_operan
 static void codegen_generate_entity_access_for_unsupported(struct resolver_result* result, struct resolver_entity* entity){
     (void)result;
     codegen_generate_expressionable(entity->node, codegen_history_begin(0));
+}
+
+// ch174: cast on the access chain - just a comment marker (the
+// resolver entity carries the dtype, no extra emit needed).
+static void codegen_generate_entity_access_for_cast(struct resolver_result* result, struct resolver_entity* entity){
+    (void)result; (void)entity;
+    asm_push("; CAST");
+}
+
+// ch174: pointer-array bracket access. Pop the base into ebx,
+// evaluate the index, pop into eax, scale by element size (skip if
+// byte-sized), add ebx + eax, push.
+static void codegen_generate_entity_access_array_bracket_pointer(struct resolver_result* result, struct resolver_entity* entity){
+    (void)result;
+    asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    codegen_generate_expressionable(entity->array.array_index_node, codegen_history_begin(0));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    if(datatype_element_size(&entity->dtype) > DATA_SIZE_BYTE){
+        asm_push("imul eax, %i", (int)datatype_size_for_array_access(&entity->dtype));
+    }
+    asm_push("add ebx, eax");
+    asm_push_ins_push_with_data("ebx",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = entity->dtype});
+}
+
+// ch174: array-bracket access on a non-pointer-array entity. Two
+// cases: JUST_USE_OFFSET (constant index already folded into the
+// entity's offset) -> add the offset; otherwise scale the runtime
+// index by the per-element offset.
+static void codegen_generate_entity_access_array_bracket(struct resolver_result* result, struct resolver_entity* entity){
+    if(entity->flags & RESOLVER_ENTITY_FLAG_IS_POINTER_ARRAY_ENTITY){
+        codegen_generate_entity_access_array_bracket_pointer(result, entity);
+        return;
+    }
+    asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    codegen_generate_expressionable(entity->array.array_index_node, codegen_history_begin(0));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    if(entity->flags & RESOLVER_ENTITY_FLAG_JUST_USE_OFFSET){
+        asm_push("add ebx, %i", entity->offset);
+    } else {
+        asm_push("imul eax, %i", entity->offset);
+        asm_push("add ebx, eax");
+    }
+    asm_push_ins_push_with_data("ebx",
+        STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = entity->dtype});
 }
 
 // ch154: LHS unary indirection. Pop the address, walk
@@ -955,6 +1007,10 @@ static void codegen_generate_entity_access_for_unary_get_address(struct resolver
 
 static void codegen_generate_entity_access_for_entity(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
     switch(entity->type){
+        // ch174: array bracket on read path.
+        case RESOLVER_ENTITY_TYPE_ARRAY_BRACKET:
+            codegen_generate_entity_access_array_bracket(result, entity);
+            break;
         case RESOLVER_ENTITY_TYPE_VARIABLE:
         case RESOLVER_ENTITY_TYPE_GENERAL:
             codegen_generate_entity_access_for_variable_or_general(result, entity);
@@ -969,6 +1025,13 @@ static void codegen_generate_entity_access_for_entity(struct resolver_result* re
             break;
         case RESOLVER_ENTITY_TYPE_UNARY_GET_ADDRESS:
             codegen_generate_entity_access_for_unary_get_address(result, entity);
+            break;
+        // ch155 / ch174: unsupported + cast.
+        case RESOLVER_ENTITY_TYPE_UNSUPPORTED:
+            codegen_generate_entity_access_for_unsupported(result, entity);
+            break;
+        case RESOLVER_ENTITY_TYPE_CAST:
+            codegen_generate_entity_access_for_cast(result, entity);
             break;
         default:
             // todo: other entity kinds land in later chapters.
