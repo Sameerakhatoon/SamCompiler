@@ -314,11 +314,14 @@ static void parser_reorder_expression(struct node** node_out){
         }
     }
 
-    // ch101: extra reordering for `a[i] op b`, `x = a op b`, and
-    // `(...)` followed by `,`. In each case the right-grandchild has
-    // to flow up so codegen sees the operands in the order it expects.
-    if((is_array_node(node->exp.left) || is_node_assignment(node->exp.right))
-       || (node_is_expression(node->exp.left, "()")
+    // ch101 + ch175: extra reordering. ch101 was too aggressive
+    // (`||` between the array and assignment tests reordered any
+    // `a[i] op b` regardless of op). ch175 tightens to:
+    //   - LHS array AND RHS assignment, or
+    //   - LHS `()` or `[]` AND RHS `,`.
+    if((is_array_node(node->exp.left) && is_node_assignment(node->exp.right))
+       || ((node_is_expression(node->exp.left, "()")
+            || node_is_expression(node->exp.left, "[]"))
            && node_is_expression(node->exp.right, ","))){
         parser_node_move_right_left_to_left(node);
     }
