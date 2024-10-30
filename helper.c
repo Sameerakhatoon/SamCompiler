@@ -248,6 +248,17 @@ struct datatype datatype_for_numeric(void){
     return dtype;
 }
 
+// ch176: tiny predicates for the parser-side unary-operand check.
+bool is_parentheses(const char* op){
+    return S_EQ(op, "(");
+}
+
+bool unary_operand_compatible(struct token* token){
+    return is_access_operator(token->sval)
+        || is_array_operator(token->sval)
+        || is_parentheses(token->sval);
+}
+
 // ch170: synthetic datatype for string literals - `const char*`
 // flagged IS_LITERAL.
 struct datatype datatype_for_string(void){

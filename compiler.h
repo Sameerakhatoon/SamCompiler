@@ -652,6 +652,9 @@ bool         is_unary_operator(const char* op);
 bool         op_is_indirection(const char* op);
 bool         op_is_address(const char* op);
 void         make_unary_node(const char* op, struct node* operand_node);
+// ch176: parser-side unary-operand compatibility predicates.
+bool         is_parentheses(const char* op);
+bool         unary_operand_compatible(struct token* token);
 bool         is_node_assignment(struct node* node);
 
 // ch104: codegen entry point + status enum. Module 2/3 fills in the
