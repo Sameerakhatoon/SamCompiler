@@ -14,5 +14,7 @@ typedef long __builtin_va_list;
 #endif
 typedef __builtin_va_list va_list;
 
-#define va_arg(list, type) __builtin_va_arg(list, sizeof(type))
+// The third argument only carries the type: a float or double is
+// rejected where its argument is not in the integer slots va_arg walks.
+#define va_arg(list, type) __builtin_va_arg(list, sizeof(type), (type*)0)
 #endif

@@ -225,6 +225,9 @@ static void codegen_generate_function_prototype(struct node* node){
 
 static int riscv64_skip_count;
 
+static void riscv64_from_freg(const char* freg, int size);
+static void riscv64_to_freg(const char* freg, const char* reg, int size);
+
 static const char* riscv64_reg(int reg){
     return reg ? "a1" : "a0";
 }
@@ -529,6 +532,14 @@ static int riscv64_call_general(const struct exp64_call* call){
                 }
                 continue;
             }
+            if(a->fp){
+                if(pass == 1){
+                    char reg[8];
+                    snprintf(reg, sizeof(reg), "fa%i", a->reg);
+                    codegen_sp_word(a->size == DATA_SIZE_DWORD ? "flw" : "fld", reg, from);
+                }
+                continue;
+            }
             for(int w = 0; w < a->words; w++){
                 if(w >= a->reg_words && pass == 0){
                     codegen_sp_word("ld", "t1", from + CODEGEN_SLOT * w);
@@ -565,6 +576,9 @@ static void riscv64_call(const struct exp64_call* call){
     if(!call->symbol){
         asm_push_ins_pop("t0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
+    if(call->float_return){
+        riscv64_from_freg("fa0", call->float_return);
+    }
     if(call->struct_size){
         if(call->struct_in_regs){
             asm_push("sd a0, 0(sp)");
@@ -578,6 +592,73 @@ static void riscv64_call(const struct exp64_call* call){
 
 static void riscv64_asm_text(const char* text){
     asm_push("%s", text);
+}
+
+// ---------------------------------------------------------------
+// Floating point (the D and F extensions). A value travels in a0 as
+// its bits and is moved to ft0 (the right operand from a1 to ft1) for
+// each operation; a1 is kept.
+// ---------------------------------------------------------------
+
+static const char* riscv64_fsuffix(int size){
+    return size == DATA_SIZE_DWORD ? "s" : "d";
+}
+
+// fmv.w.x NaN-boxes a float into the 64-bit register, as the F
+// instructions on a D machine want.
+static void riscv64_to_freg(const char* freg, const char* reg, int size){
+    asm_push("fmv.%s.x %s, %s", size == DATA_SIZE_DWORD ? "w" : "d", freg, reg);
+}
+
+static void riscv64_from_freg(const char* freg, int size){
+    asm_push("fmv.x.%s a0, %s", size == DATA_SIZE_DWORD ? "w" : "d", freg);
+}
+
+static void riscv64_fbinop(const char* op, int size){
+    const char* ins = S_EQ(op, "+") ? "fadd" : S_EQ(op, "-") ? "fsub" : S_EQ(op, "*") ? "fmul" : "fdiv";
+    riscv64_to_freg("ft0", "a0", size);
+    riscv64_to_freg("ft1", "a1", size);
+    asm_push("%s.%s ft0, ft0, ft1", ins, riscv64_fsuffix(size));
+    riscv64_from_freg("ft0", size);
+}
+
+// feq, flt and fle give 0 for an unordered pair (a NaN); != is the
+// negated feq, so it is 1 then.
+static void riscv64_fcompare(const char* op, int size){
+    const char* s = riscv64_fsuffix(size);
+    riscv64_to_freg("ft0", "a0", size);
+    riscv64_to_freg("ft1", "a1", size);
+    if(S_EQ(op, "==") || S_EQ(op, "!=")){
+        asm_push("feq.%s a0, ft0, ft1", s);
+        if(S_EQ(op, "!=")){
+            asm_push("xori a0, a0, 1");
+        }
+    } else if(S_EQ(op, "<")){
+        asm_push("flt.%s a0, ft0, ft1", s);
+    } else if(S_EQ(op, ">")){
+        asm_push("flt.%s a0, ft1, ft0", s);
+    } else if(S_EQ(op, "<=")){
+        asm_push("fle.%s a0, ft0, ft1", s);
+    } else {
+        asm_push("fle.%s a0, ft1, ft0", s);
+    }
+}
+
+static void riscv64_int_to_float(int size, bool from_u64){
+    asm_push("fcvt.%s.%s ft0, a0", riscv64_fsuffix(size), from_u64 ? "lu" : "l");
+    riscv64_from_freg("ft0", size);
+}
+
+// C truncates: the rounding mode is rtz, not the dynamic one.
+static void riscv64_float_to_int(int size, bool to_u64){
+    riscv64_to_freg("ft0", "a0", size);
+    asm_push("fcvt.%s.%s a0, ft0, rtz", to_u64 ? "lu" : "l", riscv64_fsuffix(size));
+}
+
+static void riscv64_float_resize(int from, int to){
+    riscv64_to_freg("ft0", "a0", from);
+    asm_push("fcvt.%s.%s ft0, ft0", riscv64_fsuffix(to), riscv64_fsuffix(from));
+    riscv64_from_freg("ft0", to);
 }
 
 static const struct exp64_ops riscv64_ops = {
@@ -607,6 +688,11 @@ static const struct exp64_ops riscv64_ops = {
     .drop           = riscv64_drop,
     .call           = riscv64_call,
     .asm_text       = riscv64_asm_text,
+    .fbinop         = riscv64_fbinop,
+    .fcompare       = riscv64_fcompare,
+    .int_to_float   = riscv64_int_to_float,
+    .float_to_int   = riscv64_float_to_int,
+    .float_resize   = riscv64_float_resize,
 };
 
 // ---------------------------------------------------------------
@@ -628,9 +714,9 @@ static void codegen_generate_scope_variable(struct node* node){
     }
 }
 
-// A condition: its value in a0.
+// A condition: its value in a0 (a floating one tested against 0.0).
 static void codegen_generate_condition(struct node* node){
-    exp64_generate(node);
+    exp64_test(node);
 }
 
 // a condition that jumps to a label when it is false. A
@@ -664,9 +750,14 @@ static void codegen_discard_unused_stack(void){
 
 // A struct result of more than 16 bytes is copied through the pointer
 // that arrived in a0, so it is in the first home-area slot; it is also
-// the return value. B1: a smaller one goes back in a0:a1.
+// the return value. B1: a smaller one goes back in a0:a1. A float or
+// double goes back in fa0.
 static void codegen_generate_statement_return_exp(struct node* node){
-    struct datatype dtype = exp64_generate(node->stmt.return_stmt.exp);
+    struct datatype dtype = exp64_return_value(node->stmt.return_stmt.exp, &current_function->func.rtype);
+    if(datatype_is_floating(&dtype)){
+        riscv64_to_freg("fa0", "a0", dtype.size);
+        return;
+    }
     if(!datatype_is_struct_or_union_non_pointer(&dtype)){
         return;
     }
@@ -982,13 +1073,28 @@ static void codegen_generate_function_with_body(struct node* node){
     for(int i = 0; i < 8; i++){
         asm_push("sd a%i, %i(s0)", i, 16 + 8 * i);
     }
-    codegen_stack_sub(C_ALIGN(function_node_stack_size(node)));
+    int locals = C_ALIGN(function_node_stack_size(node));
+    codegen_stack_sub(locals);
+    // Float and double parameters arrive in fa0-fa7, which go to a home
+    // of their own under the locals; only functions that have some. A
+    // float is stored NaN-boxed, its bits in the low word.
+    int fp_registers = exp64_fp_parameter_registers(node);
+    int fp_home_size = fp_registers ? EXP64_FP_ARG_REGISTERS * DATA_SIZE_DDWORD : 0;
+    int fp_home = -(locals + fp_home_size);
+    codegen_stack_sub(fp_home_size);
+    if(fp_registers){
+        codegen_add_imm("t2", "s0", fp_home);
+        for(int i = 0; i < fp_registers; i++){
+            asm_push("fsd fa%i, %i(t2)", i, DATA_SIZE_DDWORD * i);
+        }
+    }
     codegen_new_scope(RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
-    exp64_parameters(node, 16, 16 + codegen_home_area_size());
+    exp64_parameters(node, 16, 16 + codegen_home_area_size(), fp_home);
 
     codegen_generate_body(node->func.body_n, codegen_history_begin(IS_ALONE_STATEMENT));
     codegen_finish_scope();
-    codegen_stack_add(C_ALIGN(function_node_stack_size(node)));
+    codegen_stack_add(fp_home_size);
+    codegen_stack_add(locals);
     asm_pop_rbp();
     stackframe_assert_empty(current_function);
     codegen_generate_epilogue_ret();
@@ -1224,10 +1330,6 @@ static void codegen_generate_global_variable(struct node* node){
                     compiler_error(current_process, "A struct or union global needs a { } initializer\n");
                 }
                 codegen_generate_global_data(node->var.name, variable_size(node), "0");
-                break;
-            case DATA_TYPE_DOUBLE:
-            case DATA_TYPE_FLOAT:
-                compiler_error(current_process, "Doubles and floats are not supported in our subset of C\n");
                 break;
             default:
                 codegen_generate_global_variable_for_primitive(node);

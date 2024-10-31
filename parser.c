@@ -360,6 +360,9 @@ static void parse_single_token_to_node(void){
     struct token* token = token_next();
     switch(token->type){
         case TOKEN_TYPE_NUMBER:
+            if(token->num.flags & NUMBER_FLAG_FLOATING){
+                current_process->uses_floating = true;
+            }
             node_create(&(struct node){ .type = NODE_TYPE_NUMBER,     .llnum = token->llnum, .num.flags = token->num.flags });
             break;
         case TOKEN_TYPE_IDENTIFIER: {
@@ -1116,6 +1119,13 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
             "Your not allowed a secondary datatype here for the given datatype %s\n",
             datatype_token->sval);
     }
+    // `long double` would silently be a long; gcc's is 10 or 16 bytes,
+    // which this compiler has no code for.
+    if(datatype_secondary_token
+       && ((S_EQ(datatype_token->sval, "long") && S_EQ(datatype_secondary_token->sval, "double"))
+           || (S_EQ(datatype_token->sval, "double") && S_EQ(datatype_secondary_token->sval, "long")))){
+        compiler_error(current_process, "long double is not supported\n");
+    }
 
     if(S_EQ(datatype_token->sval, "void")){
         datatype_out->type = DATA_TYPE_VOID;
@@ -1143,12 +1153,13 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
     } else if(S_EQ(datatype_token->sval, "float")){
         datatype_out->type = DATA_TYPE_FLOAT;
         datatype_out->size = DATA_SIZE_DWORD;
+        current_process->uses_floating = true;
     } else if(S_EQ(datatype_token->sval, "double")){
         // g02: write the type to .type, not .size. A double is 8 bytes
-        // on every target (it was 4); floating point is still
-        // rejected where a value would be generated.
+        // on every target (it was 4).
         datatype_out->type = DATA_TYPE_DOUBLE;
         datatype_out->size = DATA_SIZE_DDWORD;
+        current_process->uses_floating = true;
     } else {
         compiler_error(current_process, "BUG: Invalid primitive datatype\n");
     }
@@ -1324,7 +1335,7 @@ static void parse_enum_specifier(void){
         if(token_next_is_operator("=")){
             token_next();
             parse_expressionable_root(history_begin(HISTORY_FLAG_NO_COMMA_OPERATOR));
-            if(!constant_fold(current_process, node_pop(), &value)){
+            if(!constant_fold(current_process, node_pop(), &value) || !constant_is_integer(&value)){
                 compiler_error(current_process, "The value of %s must be an integer constant expression\n", name->sval);
             }
         } else if(!first){
@@ -1598,8 +1609,14 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
     if(last_entity){
         offset += variable_node(last_entity->node)->var.aoffset;
         if(variable_node_is_primitive(node)){
+            // A21: a double parameter is 4-aligned on the i386 stack,
+            // like every argument slot (cdecl).
+            size_t align = node->var.type.size;
+            if(upward_stack && datatype_is_floating(&node->var.type) && align > current_process->target->arg_slot_size){
+                align = current_process->target->arg_slot_size;
+            }
             variable_node(node)->var.padding =
-                padding(upward_stack ? offset : -offset, node->var.type.size);
+                padding(upward_stack ? offset : -offset, align);
         }
     }
 
@@ -1713,7 +1730,7 @@ static void make_variable_list_node(struct vector* var_list_vec){
 // an integer constant expression.
 static struct node* parser_fold_required(struct node* node, const char* what){
     struct constant c;
-    if(!constant_fold(current_process, node, &c)){
+    if(!constant_fold(current_process, node, &c) || !constant_is_integer(&c)){
         compiler_error(current_process, "%s must be an integer constant expression\n", what);
     }
     return constant_node(&c);
@@ -2409,6 +2426,8 @@ static void parse_function_body(struct history* history){
 
 // ch73 forward decl - definition is below.
 static struct vector* parse_function_arguments(struct history* history);
+// Set when the last list parse_function_arguments read ended in `...`.
+static bool parser_arguments_variadic;
 
 // Consume exactly `amount` "." operators (for `...` variadics).
 static void token_read_dots(size_t amount){
@@ -2986,6 +3005,7 @@ static void parse_union(struct datatype* dtype, struct history* history){
 static struct vector* parse_function_arguments(struct history* history){
     parser_scope_new();
     struct vector* arguments_vec = vector_create(sizeof(struct node*));
+    parser_arguments_variadic = false;
     while(!token_next_is_symbol(')')){
         // `...` variadic - consume the three dots and stop.
         if(token_next_is_operator(".")){

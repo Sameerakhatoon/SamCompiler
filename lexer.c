@@ -176,16 +176,115 @@ static int lexer_digit_value(char c){
 // followed by stray tokens; before, `010` was ten, `0xFF` stopped at
 // the F, and `5u` was 5 followed by an identifier `u`. The value is
 // checked against 64 bits; datatype_for_number_node picks the type.
-static struct token* token_make_number(void){
+extern struct lex_process_functions lexer_string_buffer_functions;
+
+// The character after the next one, read nowhere. A file is read
+// through stdio, which can push one character back; in-memory text
+// (tokens_build_for_string) is looked at directly.
+static char lexer_peek_second(void){
+    if(lex_process->function == &lexer_string_buffer_functions){
+        struct buffer* buf = lex_process_private(lex_process);
+        return buf->rindex + 1 < buf->len ? buf->data[buf->rindex + 1] : 0;
+    }
+    FILE* fp = lex_process->compiler->cfile.fp;
+    int first = fgetc(fp);
+    int second = fgetc(fp);
+    if(second != EOF){
+        ungetc(second, fp);
+    }
+    if(first != EOF){
+        ungetc(first, fp);
+    }
+    return second == EOF ? 0 : (char)second;
+}
+
+static struct token* token_make_integer(const char* text);
+static struct token* token_make_floating(const char* text);
+
+// A preprocessing number (C11 6.4.8): digits, letters, `_` and `.`,
+// and a sign right after an exponent letter (e or E, p or P in hex).
+// `prefix` is a `.` already read (`.5`), or 0. The spelling is a
+// floating constant when it has a `.` or an exponent; an integer
+// otherwise.
+static struct token* token_make_number_with_prefix(char prefix){
     struct buffer* buffer = buffer_create();
-    char c;
-    LEX_GETC_IF(buffer, c, isalnum(c) || c == '_');
+    if(prefix){
+        buffer_write(buffer, prefix);
+    }
+    bool hex = false;
+    bool floating = prefix == '.';
+    for(;;){
+        char c = peekc();
+        int len = buffer->len;
+        const char* sofar = buffer_ptr(buffer);
+        char last = len ? sofar[len - 1] : 0;
+        if(len == 1 && sofar[0] == '0' && (c == 'x' || c == 'X')){
+            hex = true;
+        }
+        bool exponent_sign = (c == '+' || c == '-')
+            && (hex ? (last == 'p' || last == 'P') : (last == 'e' || last == 'E'));
+        if(!(isalnum(c) || c == '_' || c == '.' || exponent_sign)){
+            break;
+        }
+        if(c == '.' || (hex ? (c == 'p' || c == 'P') : (c == 'e' || c == 'E'))){
+            floating = true;
+        }
+        buffer_write(buffer, nextc());
+    }
     buffer_write(buffer, 0x00);
     const char* text = buffer_ptr(buffer);
-    if(peekc() == '.'){
-        compiler_error(lex_process->compiler, "Floating-point constants such as %s. are not supported\n", text);
-    }
+    return floating ? token_make_floating(text) : token_make_integer(text);
+}
 
+static struct token* token_make_number(void){
+    return token_make_number_with_prefix(0);
+}
+
+// A floating constant (C11 6.4.4.2): decimal or hexadecimal (`0x1.8p3`),
+// then f or F for float or nothing for double (l or L, long double, is
+// rejected). The value is read by the C library, strtof for
+// a float so it is rounded once, and kept as the bits of the double in
+// llnum, which holds a float's value exactly too.
+static struct token* token_make_floating(const char* text){
+    size_t len = strlen(text);
+    char* digits = malloc(len + 1);
+    strcpy(digits, text);
+    int flags = NUMBER_FLAG_FLOATING;
+    int number_type = NUMBER_TYPE_DOUBLE;
+    char last = len ? digits[len - 1] : 0;
+    bool hex = digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X');
+    if(last == 'f' || last == 'F'){
+        flags |= NUMBER_FLAG_FLOAT;
+        number_type = NUMBER_TYPE_FLOAT;
+        digits[--len] = 0;
+    } else if(last == 'l' || last == 'L'){
+        compiler_error(lex_process->compiler, "%s is a long double, which is not supported\n", text);
+    }
+    if(hex && !strpbrk(digits, "pP")){
+        compiler_error(lex_process->compiler, "The hexadecimal floating constant %s needs a p exponent\n", text);
+    }
+    char* end = 0;
+    double value = 0;
+    if(flags & NUMBER_FLAG_FLOAT){
+        value = strtof(digits, &end);
+    } else {
+        value = strtod(digits, &end);
+    }
+    if(len == 0 || *end != 0 || end == digits){
+        compiler_error(lex_process->compiler, "Invalid floating constant %s\n", text);
+    }
+    free(digits);
+    unsigned long long bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return token_create(&(struct token){
+        .type      = TOKEN_TYPE_NUMBER,
+        .llnum     = bits,
+        .num.type  = number_type,
+        .num.flags = flags,
+    });
+}
+
+static struct token* token_make_integer(const char* text){
     int base = 10;
     int flags = 0;
     const char* digits = text;
@@ -222,11 +321,7 @@ static struct token* token_make_number(void){
 
     int number_type = NUMBER_TYPE_NORMAL;
     const char* suffix = p;
-    if(S_EQ(suffix, "f") || S_EQ(suffix, "F")){
-        // ch21 records an f suffix; floating point itself is rejected
-        // where a value would be generated.
-        number_type = NUMBER_TYPE_FLOAT;
-    } else {
+    {
         bool seen_u = false;
         bool seen_l = false;
         while(*p){
@@ -504,6 +599,11 @@ static bool is_keyword(const char* str){
 // a less-than operator. We disambiguate by peeking at the previous token.
 static struct token* token_make_operator_or_string(void){
     char op = peekc();
+    if(op == '.' && isdigit(lexer_peek_second())){
+        // `.5` is a floating constant, not `.` and 5.
+        nextc();
+        return token_make_number_with_prefix('.');
+    }
     if(op == '<'){
         struct token* last_token = lexer_last_token();
         if(token_is_keyword(last_token, "include")){

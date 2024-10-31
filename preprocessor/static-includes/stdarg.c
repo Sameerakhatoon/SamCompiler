@@ -44,9 +44,19 @@ void native_va_start(struct generator* generator, struct native_function* func, 
 void native__builtin_va_arg(struct generator* generator, struct native_function* func, struct vector* arguments)
 {
     struct compile_process* compiler = generator->compiler;
-    if (vector_count(arguments) != 2)
+    if (vector_count(arguments) != 2 && vector_count(arguments) != 3)
     {
         compiler_error(compiler, "va_arg expects two arguments, %i provided", vector_count(arguments));
+    }
+    // A21: the va_arg macro passes `(type*)0` as well. A double comes as
+    // 8 bytes and this reads a dword: rejected, not misread.
+    if (vector_count(arguments) == 3)
+    {
+        struct node* type_argument = *(struct node**)vector_at(arguments, 2);
+        if (type_argument->type == NODE_TYPE_CAST && datatype_is_floating(datatype_pointer_reduce(&type_argument->cast.dtype, 1)))
+        {
+            compiler_error(compiler, "x86: va_arg of a float or double is not supported\n");
+        }
     }
 
     generator->asm_push("; native__builtin_va_arg start");

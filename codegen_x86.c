@@ -385,11 +385,24 @@ static void codegen_generate_structure_push_or_return(struct resolver_entity* en
 static void codegen_generate_structure_push(struct resolver_entity* entity, struct history* history, int start_pos);
 static void codegen_generate_move_struct(struct datatype* dtype, const char* base_address, int offset);
 
+// A21: floating point (the x87 section below).
+static bool x87_wanted(struct node* node);
+static void x87_push(struct node* node, int flags);
+static void x87_effect(struct node* node);
+static void x87_return(struct node* node, struct datatype* rtype);
+static void x87_initialize(struct node* value, struct datatype* type, const char* address);
+
 // ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
 // nested calls so the recursive walk knows it's deeper than the top.
+// A21: an expression with floating point in it goes to the x87 code,
+// unless only its address is wanted.
 static void codegen_generate_expressionable(struct node* node, struct history* history){
     if(node->pos.line){
         current_process->pos = node->pos;
+    }
+    if(!(history->flags & EXPRESSION_GET_ADDRESS) && x87_wanted(node)){
+        x87_push(node, history->flags);
+        return;
     }
     if(codegen_is_exp_root(history)){
         history->flags |= EXPRESSION_IS_NOT_ROOT_NODE;
@@ -498,6 +511,11 @@ void codegen_entity_address(struct generator* generator, struct resolver_entity*
 // onto the stack and store it at the variable's address.
 static void codegen_generate_scope_variable(struct node* node){
     struct resolver_entity* entity = codegen_new_scope_entity(node, node->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
+    if(node->var.val && !datatype_is_struct_or_union_non_pointer(&entity->dtype)
+       && (x87_wanted(node->var.val) || (current_process->uses_floating && datatype_is_floating(&entity->dtype)))){
+        x87_initialize(node->var.val, &entity->dtype, codegen_entity_private(entity)->address);
+        return;
+    }
     if(node->var.val){
         codegen_generate_expressionable(node->var.val,
             codegen_history_begin(EXPRESSION_IS_ASSIGNMENT | IS_RIGHT_OPERAND_OF_ASSIGNMENT));
@@ -1768,6 +1786,964 @@ static void codegen_generate_exp_node(struct node* node, struct history* history
         codegen_history_down(history, codegen_remove_uninheritable_flags(history->flags) | extra));
 }
 
+// ---------------------------------------------------------------
+// A21: floating point, on the x87 FPU.
+// ---------------------------------------------------------------
+//
+// The resolver chains above know integers only. An expression in which
+// floating point takes part (a float or double value, or an operator,
+// cast or call with such an operand) is generated here instead, from
+// its C type as exp64 does it on the 64-bit targets: a floating value
+// ends in st0, any other in eax, and nothing is left on the stack. The
+// integer parts inside it (an index, a pointer, an int operand) go
+// through codegen_generate_expressionable as before, and the address
+// of a float or double object is the value of `&object` there. A
+// program without floating point never comes here
+// (compile_process.uses_floating), so its code is unchanged.
+//
+// cdecl: a float or double argument is 4 or 8 bytes on the stack, a
+// float passed to `...` or without a prototype is a double, and the
+// result comes back in st0. The x87 stack is empty at every call: a
+// value that waits for another operand is spilled to the stack. Each
+// result is rounded to its type (float or double) through memory, as
+// the SSE and FP units of the 64-bit targets round it; gcc -m32 keeps
+// x87 extended precision between operations, so a result can differ
+// in the last bit.
+
+static struct datatype x87_type(struct node* node);
+static struct datatype x87_value(struct node* node);
+static bool            x87_involves(struct node* node);
+static struct datatype x87_call_emit(struct node* node, bool struct_result);
+
+static bool x87_is_floating(struct datatype* t){
+    return datatype_is_floating(t);
+}
+
+static bool x87_is_comparison(const char* op){
+    return S_EQ(op, "==") || S_EQ(op, "!=") || S_EQ(op, "<") || S_EQ(op, ">")
+        || S_EQ(op, "<=") || S_EQ(op, ">=");
+}
+
+// The operands of a call, the comma operators taken apart.
+static void x87_flatten_arguments(struct node* node, struct vector* out){
+    if(!node || node->type == NODE_TYPE_BLANK){
+        return;
+    }
+    if(node->type == NODE_TYPE_EXPRESSION && S_EQ(node->exp.op, ",")){
+        x87_flatten_arguments(node->exp.left, out);
+        x87_flatten_arguments(node->exp.right, out);
+        return;
+    }
+    vector_push(out, &node);
+}
+
+static struct vector* x87_call_arguments(struct node* node){
+    struct vector* args = vector_create(sizeof(struct node*));
+    struct node* right = node->exp.right;
+    if(right->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        right = right->parenthesis.exp;
+    }
+    x87_flatten_arguments(right, args);
+    return args;
+}
+
+static struct node* x87_strip(struct node* node){
+    while(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        node = node->parenthesis.exp;
+    }
+    return node;
+}
+
+// ---- Types: what x87_value will give, worked out without output.
+
+static struct datatype x87_deref(struct datatype* t){
+    if(t->flags & DATATYPE_FLAG_IS_ARRAY){
+        struct datatype e = *t;
+        struct vector* brackets = t->array.brackets ? t->array.brackets->n_brackets : 0;
+        if(!brackets || vector_count(brackets) <= 1){
+            e.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+            e.array.brackets = 0;
+            e.array.size = 0;
+            return e;
+        }
+        e.array.brackets = array_brackets_new();
+        for(int i = 1; i < vector_count(brackets); i++){
+            array_brackets_add(e.array.brackets, *(struct node**)vector_at(brackets, i));
+        }
+        e.array.size = array_brackets_calculate_size(&e, e.array.brackets);
+        return e;
+    }
+    if(t->flags & DATATYPE_FLAG_IS_FUNCTION_POINTER){
+        return *t;
+    }
+    return *datatype_pointer_reduce(t, 1);
+}
+
+// The member `name` of the struct or union t, or NULL when there is
+// none (the integer generator reports that).
+static struct node* x87_member(struct datatype* t, const char* name){
+    if(!datatype_is_struct_or_union(t) || !t->type_str){
+        return 0;
+    }
+    struct symbol* sym = symresolver_get_symbol(current_process, t->type_str);
+    if(!sym || sym->type != SYMBOL_TYPE_NODE){
+        return 0;
+    }
+    struct node* su = sym->data;
+    if(!node_is_struct_or_union(su) || !su->_struct.body_n){
+        return 0;
+    }
+    return struct_member_named(su->_struct.body_n->body.statements, name);
+}
+
+static struct datatype x87_member_type(struct datatype* t, const char* name){
+    struct node* member = x87_member(t, name);
+    return member ? member->var.type : datatype_for_int();
+}
+
+// The function a call names, or NULL for a call through a pointer.
+static struct resolver_entity* x87_called_function(struct node* callee){
+    callee = x87_strip(callee);
+    if(callee->type != NODE_TYPE_IDENTIFIER || resolver_get_variable(0, current_process->resolver, callee->sval)){
+        return 0;
+    }
+    return resolver_get_function(0, current_process->resolver, callee->sval);
+}
+
+static struct datatype x87_call_type(struct node* node){
+    struct resolver_entity* function = x87_called_function(node->exp.left);
+    if(function){
+        return function->dtype;
+    }
+    struct datatype t = x87_type(node->exp.left);
+    if(!(t.flags & DATATYPE_FLAG_IS_FUNCTION_POINTER)){
+        return datatype_for_int();
+    }
+    t = *datatype_pointer_reduce(&t, 1);
+    t.flags &= ~DATATYPE_FLAG_IS_FUNCTION_POINTER;
+    return t;
+}
+
+static struct datatype x87_expression_type(struct node* node){
+    const char* op = node->exp.op;
+    if(is_node_assignment(node)){
+        return x87_type(node->exp.left);
+    }
+    if(S_EQ(op, ",")){
+        return x87_type(node->exp.right);
+    }
+    if(is_logical_operator(op) || x87_is_comparison(op)){
+        return datatype_for_int();
+    }
+    if(S_EQ(op, "?")){
+        struct node* tenary = node->exp.right;
+        if(tenary->type != NODE_TYPE_TENARY){
+            return datatype_for_int();
+        }
+        struct datatype yes = x87_type(tenary->tenary.true_node);
+        struct datatype no  = x87_type(tenary->tenary.false_node);
+        if(x87_is_floating(&yes) || x87_is_floating(&no)){
+            struct datatype_binary types;
+            datatype_binary_types(&yes, &no, "+", &types);
+            return types.result;
+        }
+        return yes;
+    }
+    if(is_parentheses_node(node)){
+        return x87_call_type(node);
+    }
+    if(is_array_node(node)){
+        struct datatype t = x87_type(node->exp.left);
+        return x87_deref(&t);
+    }
+    if(is_access_node(node)){
+        struct datatype t = x87_type(node->exp.left);
+        if(node->exp.right->type != NODE_TYPE_IDENTIFIER){
+            return datatype_for_int();
+        }
+        return x87_member_type(&t, node->exp.right->sval);
+    }
+    struct datatype left = x87_type(node->exp.left);
+    struct datatype right = x87_type(node->exp.right);
+    struct datatype_binary types;
+    datatype_binary_types(&left, &right, op, &types);
+    return types.result;
+}
+
+static struct datatype x87_type(struct node* node){
+    switch(node->type){
+        case NODE_TYPE_NUMBER:
+            return datatype_for_number_node(node);
+        case NODE_TYPE_STRING:
+            return datatype_for_string();
+        case NODE_TYPE_IDENTIFIER: {
+            struct resolver_entity* entity = resolver_get_variable(0, current_process->resolver, node->sval);
+            if(entity){
+                return entity->dtype;
+            }
+            entity = resolver_get_function(0, current_process->resolver, node->sval);
+            if(entity){
+                struct datatype t = entity->dtype;
+                t.flags |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_FUNCTION_POINTER;
+                t.pointer_depth++;
+                return t;
+            }
+            return datatype_for_int();
+        }
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            return x87_type(node->parenthesis.exp);
+        case NODE_TYPE_CAST:
+            return node->cast.dtype;
+        case NODE_TYPE_UNARY: {
+            const char* op = node->unary.op;
+            struct datatype t = x87_type(node->unary.operand);
+            if(op_is_indirection(op)){
+                for(int i = 0; i < node->unary.indirection.depth; i++){
+                    t = x87_deref(&t);
+                }
+                return t;
+            }
+            if(op_is_address(op)){
+                t.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+                t.flags |= DATATYPE_FLAG_IS_POINTER;
+                t.pointer_depth++;
+                return t;
+            }
+            if(S_EQ(op, "!")){
+                return datatype_for_int();
+            }
+            if(is_increment_operator(op)){
+                return t;
+            }
+            return datatype_promote(&t);
+        }
+        case NODE_TYPE_EXPRESSION:
+            return x87_expression_type(node);
+    }
+    return datatype_for_int();
+}
+
+// ---- Which nodes are generated here.
+
+static bool x87_type_is_floating(struct node* node){
+    struct datatype t = x87_type(node);
+    return x87_is_floating(&t);
+}
+
+// Floating point takes part in `node` itself: its value is floating, or
+// an operand of its operator (or an argument or parameter of its call)
+// is. `&x` of a double x is a pointer and stays with the integer code.
+static bool x87_involves(struct node* node){
+    switch(node->type){
+        case NODE_TYPE_NUMBER:
+            return node->num.flags & NUMBER_FLAG_FLOATING;
+        case NODE_TYPE_IDENTIFIER:
+            return x87_type_is_floating(node);
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            return x87_involves(node->parenthesis.exp);
+        case NODE_TYPE_CAST:
+            return x87_is_floating(&node->cast.dtype) || x87_type_is_floating(node->cast.operand);
+        case NODE_TYPE_UNARY:
+            if(op_is_address(node->unary.op)){
+                return false;
+            }
+            return x87_type_is_floating(node) || x87_type_is_floating(node->unary.operand);
+        case NODE_TYPE_EXPRESSION:
+            break;
+        default:
+            return false;
+    }
+    if(x87_type_is_floating(node)){
+        return true;
+    }
+    const char* op = node->exp.op;
+    if(is_parentheses_node(node)){
+        struct vector* args = x87_call_arguments(node);
+        for(int i = 0; i < vector_count(args); i++){
+            if(x87_type_is_floating(*(struct node**)vector_at(args, i))){
+                return true;
+            }
+        }
+        struct resolver_entity* function = x87_called_function(node->exp.left);
+        struct vector* params = function ? function->node->func.args.vector : 0;
+        for(int i = 0; params && i < vector_count(params); i++){
+            if(x87_is_floating(&(*(struct node**)vector_at(params, i))->var.type)){
+                return true;
+            }
+        }
+        return false;
+    }
+    if(S_EQ(op, "?")){
+        struct node* tenary = node->exp.right;
+        return x87_type_is_floating(node->exp.left)
+            || (tenary->type == NODE_TYPE_TENARY
+                && (x87_type_is_floating(tenary->tenary.true_node) || x87_type_is_floating(tenary->tenary.false_node)));
+    }
+    if(S_EQ(op, ",")){
+        return x87_involves(node->exp.left) || x87_involves(node->exp.right);
+    }
+    if(is_array_node(node) || is_access_node(node)){
+        return false;
+    }
+    return x87_type_is_floating(node->exp.left) || x87_type_is_floating(node->exp.right);
+}
+
+static bool x87_wanted(struct node* node){
+    return current_process->uses_floating && x87_involves(node);
+}
+
+// ---- Instructions.
+
+// Two dwords and a qword in .data: the control words of a truncation
+// and a scratch value (a conversion, or rounding to a type).
+static void x87_scratch(void){
+    static bool emitted;
+    if(!emitted){
+        codegen_data_section_add("x87_cw: dw 0, 0");
+        codegen_data_section_add("x87_tmp: dq 0");
+        codegen_data_section_add("x87_one: dd 0x3f800000");
+        emitted = true;
+    }
+}
+
+static const char* x87_size_keyword(int size){
+    return size == DATA_SIZE_DWORD ? "dword" : "qword";
+}
+
+// Room on the stack, in the ledger like every push.
+static void x87_reserve(int bytes){
+    codegen_stack_sub_with_name(bytes, "x87_spill");
+}
+
+static void x87_release(int bytes){
+    codegen_stack_add_with_name(bytes, "x87_spill");
+}
+
+// st0 to a new stack qword (exact for a float too).
+static void x87_spill(void){
+    x87_reserve(DATA_SIZE_DDWORD);
+    asm_push("fstp qword [esp]");
+}
+
+// st0 rounded to a float or double.
+static void x87_round(int size){
+    x87_scratch();
+    asm_push("fstp %s [x87_tmp]", x87_size_keyword(size));
+    asm_push("fld %s [x87_tmp]", x87_size_keyword(size));
+}
+
+// eax = st0 != 0, st0 popped. A NaN is true, -0.0 false.
+static void x87_truth_of_st0(void){
+    asm_push("fldz");
+    asm_push("fucomip st0, st1");
+    asm_push("fstp st0");
+    asm_push("setne al");
+    asm_push("setp dl");
+    asm_push("or al, dl");
+    asm_push("movzx eax, al");
+}
+
+// eax narrowed to an integer type of 1 or 2 bytes, extended back.
+static void x87_reduce(struct datatype* t){
+    size_t size = datatype_element_size(t);
+    if(size == DATA_SIZE_BYTE || size == DATA_SIZE_WORD){
+        codegen_reduce_register("eax", size, t->flags & DATATYPE_FLAG_IS_SIGNED);
+    }
+}
+
+// The value of type `from` (st0 or eax) as type `to` (C11 6.3.1.4,
+// 6.3.1.5). A floating value truncates toward zero into an integer
+// (rounding control set to chop for the fistp), a _Bool is its test
+// against 0. An unsigned int goes through a zero-extended qword.
+static void x87_convert(struct datatype* from, struct datatype* to){
+    bool from_floating = x87_is_floating(from);
+    if(to->type == DATA_TYPE_VOID && !(to->flags & DATATYPE_FLAG_IS_POINTER)){
+        if(from_floating){
+            asm_push("fstp st0");
+        }
+        return;
+    }
+    if(x87_is_floating(to)){
+        if(!from_floating){
+            if(datatype_is_struct_or_union_non_pointer(from) || (from->flags & DATATYPE_FLAG_IS_POINTER)){
+                compiler_error(current_process, "This value cannot become a floating value\n");
+            }
+            x87_scratch();
+            asm_push("mov [x87_tmp], eax");
+            if(!(from->flags & DATATYPE_FLAG_IS_SIGNED) && datatype_element_size(from) == DATA_SIZE_DWORD){
+                asm_push("mov dword [x87_tmp+4], 0");
+                asm_push("fild qword [x87_tmp]");
+            } else {
+                asm_push("fild dword [x87_tmp]");
+            }
+            if(to->size == DATA_SIZE_DWORD){
+                x87_round(DATA_SIZE_DWORD);
+            }
+        } else if(from->size > to->size){
+            x87_round(to->size);
+        }
+        return;
+    }
+    if(!from_floating){
+        x87_reduce(to);
+        return;
+    }
+    if(to->flags & DATATYPE_FLAG_IS_BOOL){
+        x87_truth_of_st0();
+        return;
+    }
+    if((to->flags & DATATYPE_FLAG_IS_POINTER) || datatype_is_struct_or_union_non_pointer(to)){
+        compiler_error(current_process, "A floating value cannot become this type\n");
+    }
+    x87_scratch();
+    asm_push("fnstcw [x87_cw]");
+    asm_push("mov ax, [x87_cw]");
+    asm_push("or ax, 0x0c00");
+    asm_push("mov [x87_cw+2], ax");
+    asm_push("fldcw [x87_cw+2]");
+    asm_push("fistp qword [x87_tmp]");
+    asm_push("fldcw [x87_cw]");
+    asm_push("mov eax, [x87_tmp]");
+    x87_reduce(to);
+}
+
+// ---- Values.
+
+// An integer value from the integer generator, in eax.
+static struct datatype x87_integer(struct node* node){
+    codegen_generate_expressionable(node, codegen_history_begin(EXPRESSION_IS_NOT_ROOT_NODE));
+    struct datatype t = datatype_for_int();
+    asm_datatype_back(&t);
+    if(datatype_is_struct_or_union_non_pointer(&t)){
+        compiler_error(current_process, "x86: a struct value cannot be used with floating point here\n");
+    }
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    return t;
+}
+
+// eax = the address of the object `node` designates. A member and an
+// element are worked out here from the address or pointer under them;
+// a name, or anything else, is `&node` from the integer generator.
+static void x87_address(struct node* node){
+    node = x87_strip(node);
+    if(node->type == NODE_TYPE_UNARY && op_is_indirection(node->unary.op) && node->unary.indirection.depth == 1){
+        x87_value(node->unary.operand);
+        return;
+    }
+    if(is_access_node(node) && node->exp.right->type == NODE_TYPE_IDENTIFIER){
+        struct datatype t = x87_type(node->exp.left);
+        struct node* member = x87_member(&t, node->exp.right->sval);
+        if(!member){
+            compiler_error(current_process, "%s has no member %s\n", t.type_str ? t.type_str : "this", node->exp.right->sval);
+        }
+        if(S_EQ(node->exp.op, "->")){
+            x87_value(node->exp.left);
+        } else {
+            x87_address(node->exp.left);
+        }
+        int offset = t.type == DATA_TYPE_UNION ? 0 : member->var.aoffset;
+        if(offset){
+            asm_push("add eax, %i", offset);
+        }
+        return;
+    }
+    if(is_array_node(node)){
+        struct datatype t = x87_type(node->exp.left);
+        struct datatype element = x87_deref(&t);
+        if(t.flags & DATATYPE_FLAG_IS_ARRAY){
+            x87_address(node->exp.left);
+        } else {
+            x87_value(node->exp.left);
+        }
+        x87_reserve(DATA_SIZE_DWORD);
+        asm_push("mov [esp], eax");
+        struct node* index = node->exp.right->type == NODE_TYPE_BRACKET ? node->exp.right->bracket.inner : node->exp.right;
+        x87_value(index);
+        asm_push("imul eax, %i", (int)datatype_size(&element));
+        asm_push("add eax, [esp]");
+        x87_release(DATA_SIZE_DWORD);
+        return;
+    }
+    struct node* address = calloc(1, sizeof(struct node));
+    address->type          = NODE_TYPE_UNARY;
+    address->unary.op      = "&";
+    address->unary.operand = node;
+    address->binded        = node->binded;
+    address->pos           = node->pos;
+    x87_integer(address);
+}
+
+// st0 or eax = the object of type t at the address in eax.
+static void x87_load(struct datatype* t){
+    if(x87_is_floating(t)){
+        asm_push("fld %s [eax]", x87_size_keyword(t->size));
+        return;
+    }
+    codegen_load_eax("eax", datatype_element_size(t), t->flags & DATATYPE_FLAG_IS_SIGNED);
+}
+
+// The object at the address in ecx = the value of type t (st0, kept as
+// the expression's value, or eax).
+static void x87_store(struct datatype* t){
+    if(x87_is_floating(t)){
+        asm_push("fst %s [ecx]", x87_size_keyword(t->size));
+        return;
+    }
+    const char* reg = "eax";
+    const char* keyword = codegen_byte_word_or_dword_or_ddword(datatype_element_size(t), &reg);
+    asm_push("mov %s [ecx], %s", keyword, reg);
+}
+
+static void x87_constant(struct node* node, struct datatype* t){
+    int id = codegen_label_count();
+    unsigned long long bits = floating_bits(number_node_double(node), t->size);
+    codegen_data_section_add("x87_const_%i: %s %llu", id, t->size == DATA_SIZE_DWORD ? "dd" : "dq", bits);
+    asm_push("fld %s [x87_const_%i]", x87_size_keyword(t->size), id);
+}
+
+// `node` as type t: st0 for a floating t.
+static void x87_operand_as(struct node* node, struct datatype* t){
+    struct datatype v = x87_value(node);
+    x87_convert(&v, t);
+}
+
+// eax = 0 when `node` is false.
+static void x87_truth(struct node* node){
+    struct datatype t = x87_value(node);
+    if(x87_is_floating(&t)){
+        x87_truth_of_st0();
+    }
+}
+
+static bool x87_is_struct_call(struct node* node);
+
+static void x87_effect(struct node* node){
+    if(x87_is_struct_call(node)){
+        struct datatype rtype = x87_call_emit(x87_strip(node), true);
+        codegen_stack_add_with_name(align_value(datatype_size(&rtype), DATA_SIZE_DWORD), "result_value");
+        return;
+    }
+    struct datatype t = x87_value(node);
+    if(x87_is_floating(&t)){
+        asm_push("fstp st0");
+    }
+}
+
+static const char* x87_arith_ins(const char* op){
+    if(S_EQ(op, "+")) return "fadd";
+    if(S_EQ(op, "-")) return "fsub";
+    if(S_EQ(op, "*")) return "fmul";
+    if(S_EQ(op, "/")) return "fdiv";
+    compiler_error(current_process, "The operator %s does not take floating operands\n", op);
+    return 0;
+}
+
+// Both operands in the common type c, spilled: the right one at [esp],
+// the left at [esp+8].
+static void x87_operands(struct node* left, struct node* right, struct datatype* c){
+    x87_operand_as(left, c);
+    x87_spill();
+    x87_operand_as(right, c);
+    x87_spill();
+}
+
+static struct datatype x87_common(struct node* left, struct node* right){
+    struct datatype l = x87_type(left);
+    struct datatype r = x87_type(right);
+    if((l.flags & DATATYPE_FLAG_IS_POINTER) || (r.flags & DATATYPE_FLAG_IS_POINTER)
+       || datatype_is_struct_or_union_non_pointer(&l) || datatype_is_struct_or_union_non_pointer(&r)){
+        compiler_error(current_process, "Invalid operands: a floating value with a pointer or struct\n");
+    }
+    struct datatype_binary types;
+    datatype_binary_types(&l, &r, "+", &types);
+    return types.operation;
+}
+
+static struct datatype x87_arith(struct node* node){
+    struct datatype c = x87_common(node->exp.left, node->exp.right);
+    const char* ins = x87_arith_ins(node->exp.op);
+    x87_operands(node->exp.left, node->exp.right, &c);
+    asm_push("fld qword [esp+8]");
+    asm_push("%s qword [esp]", ins);
+    x87_release(2 * DATA_SIZE_DDWORD);
+    x87_round(c.size);
+    return c;
+}
+
+// fucomip sets ZF, PF and CF like ucomisd: an unordered pair (a NaN)
+// sets all three, so `<` loads the operands the other way round and
+// asks for `above`.
+static struct datatype x87_compare(struct node* node){
+    const char* op = node->exp.op;
+    struct datatype c = x87_common(node->exp.left, node->exp.right);
+    x87_operands(node->exp.left, node->exp.right, &c);
+    bool swap = S_EQ(op, "<") || S_EQ(op, "<=");
+    asm_push("fld qword [esp+%i]", swap ? 8 : 0);
+    asm_push("fld qword [esp+%i]", swap ? 0 : 8);
+    asm_push("fucomip st0, st1");
+    asm_push("fstp st0");
+    if(S_EQ(op, "==") || S_EQ(op, "!=")){
+        bool eq = S_EQ(op, "==");
+        asm_push(eq ? "sete al" : "setne al");
+        asm_push(eq ? "setnp dl" : "setp dl");
+        asm_push(eq ? "and al, dl" : "or al, dl");
+    } else {
+        asm_push((S_EQ(op, "<") || S_EQ(op, ">")) ? "seta al" : "setae al");
+    }
+    asm_push("movzx eax, al");
+    // The flags are read: `add esp` may change them now.
+    x87_release(2 * DATA_SIZE_DDWORD);
+    return datatype_for_int();
+}
+
+// `a = b` and `a op= b`, a or b floating. The address of a is worked
+// out once.
+static struct datatype x87_assign(struct node* node){
+    const char* op = node->exp.op;
+    struct datatype lt = x87_type(node->exp.left);
+    if(S_EQ(op, "=")){
+        x87_operand_as(node->exp.right, &lt);
+        int bytes = x87_is_floating(&lt) ? DATA_SIZE_DDWORD : DATA_SIZE_DWORD;
+        if(x87_is_floating(&lt)){
+            x87_spill();
+        } else {
+            x87_reserve(bytes);
+            asm_push("mov [esp], eax");
+        }
+        x87_address(node->exp.left);
+        asm_push("mov ecx, eax");
+        asm_push(x87_is_floating(&lt) ? "fld qword [esp]" : "mov eax, [esp]");
+        x87_release(bytes);
+        x87_store(&lt);
+        x87_reduce(&lt);
+        return lt;
+    }
+    char arith_op[4] = {0};
+    strncpy(arith_op, op, strlen(op) - 1);
+    const char* ins = x87_arith_ins(arith_op);
+    struct datatype c = x87_common(node->exp.left, node->exp.right);
+    x87_address(node->exp.left);
+    x87_reserve(DATA_SIZE_DWORD);
+    asm_push("mov [esp], eax");
+    x87_operand_as(node->exp.right, &c);
+    x87_spill();
+    asm_push("mov eax, [esp+8]");
+    x87_load(&lt);
+    x87_convert(&lt, &c);
+    asm_push("%s qword [esp]", ins);
+    x87_round(c.size);
+    x87_release(DATA_SIZE_DDWORD);
+    x87_convert(&c, &lt);
+    asm_push("mov ecx, [esp]");
+    x87_release(DATA_SIZE_DWORD);
+    x87_store(&lt);
+    if(!x87_is_floating(&lt)){
+        x87_reduce(&lt);
+    }
+    return lt;
+}
+
+// `++x`, `x++`, `--x`, `x--` of a float or double x: the old value
+// stays on the stack for the postfix forms (x + 1 - 1 need not be x).
+static struct datatype x87_increment(struct node* node){
+    struct datatype lt = x87_type(node->unary.operand);
+    bool postfix = node->unary.flags & UNARY_FLAG_IS_POSTFIX;
+    x87_scratch();
+    x87_address(node->unary.operand);
+    x87_reserve(DATA_SIZE_DWORD);
+    asm_push("mov [esp], eax");
+    x87_load(&lt);
+    if(postfix){
+        asm_push("fld st0");
+        x87_spill();
+    }
+    asm_push("%s dword [x87_one]", S_EQ(node->unary.op, "++") ? "fadd" : "fsub");
+    x87_round(lt.size);
+    asm_push("mov ecx, [esp%s]", postfix ? "+8" : "");
+    x87_store(&lt);
+    if(postfix){
+        asm_push("fstp st0");
+        asm_push("fld qword [esp]");
+        x87_release(DATA_SIZE_DDWORD);
+    }
+    x87_release(DATA_SIZE_DWORD);
+    return lt;
+}
+
+static struct datatype x87_unary(struct node* node, struct datatype* t){
+    const char* op = node->unary.op;
+    if(is_increment_operator(op)){
+        return x87_increment(node);
+    }
+    if(op_is_indirection(op)){
+        x87_address(node);
+        x87_load(t);
+        return *t;
+    }
+    if(S_EQ(op, "!")){
+        x87_truth(node->unary.operand);
+        asm_push("cmp eax, 0");
+        asm_push("sete al");
+        asm_push("movzx eax, al");
+        return datatype_for_int();
+    }
+    struct datatype v = x87_value(node->unary.operand);
+    if(S_EQ(op, "-")){
+        asm_push("fchs");
+    } else if(!S_EQ(op, "+")){
+        compiler_error(current_process, "The operator %s does not take a floating operand\n", op);
+    }
+    return v;
+}
+
+static struct datatype x87_logical(struct node* node){
+    bool is_and = S_EQ(node->exp.op, "&&");
+    int id = codegen_label_count();
+    x87_truth(node->exp.left);
+    asm_push("cmp eax, 0");
+    asm_push("%s .x87_short_%i", is_and ? "je" : "jne", id);
+    x87_truth(node->exp.right);
+    asm_push("cmp eax, 0");
+    asm_push("%s .x87_short_%i", is_and ? "je" : "jne", id);
+    asm_push("mov eax, %i", is_and ? 1 : 0);
+    asm_push("jmp .x87_end_%i", id);
+    asm_push(".x87_short_%i:", id);
+    asm_push("mov eax, %i", is_and ? 0 : 1);
+    asm_push(".x87_end_%i:", id);
+    return datatype_for_int();
+}
+
+static struct datatype x87_ternary(struct node* node, struct datatype* t){
+    struct node* tenary = node->exp.right;
+    int id = codegen_label_count();
+    x87_truth(node->exp.left);
+    asm_push("cmp eax, 0");
+    asm_push("je .x87_no_%i", id);
+    x87_operand_as(tenary->tenary.true_node, t);
+    asm_push("jmp .x87_end_%i", id);
+    asm_push(".x87_no_%i:", id);
+    x87_operand_as(tenary->tenary.false_node, t);
+    asm_push(".x87_end_%i:", id);
+    return *t;
+}
+
+// A call with floating arguments, parameters or result, cdecl: the
+// arguments pushed last first as their types (a double 8 bytes, a
+// struct as its dwords), esp 16-byte aligned at the call, a floating
+// result in st0. A struct result is written through the hidden pointer
+// into room reserved under the arguments, which is left on the stack
+// as the integer generator leaves a struct value (x87_push).
+static struct datatype x87_call_emit(struct node* node, bool struct_result){
+    struct node* callee = x87_strip(node->exp.left);
+    struct resolver_entity* function = x87_called_function(callee);
+    struct datatype rtype = x87_call_type(node);
+    struct vector* params = function ? function->node->func.args.vector : 0;
+    if(callee->type == NODE_TYPE_IDENTIFIER && !function
+       && !resolver_get_variable(0, current_process->resolver, callee->sval)){
+        compiler_error(current_process, "%s is not declared\n", callee->sval);
+    }
+    if(datatype_is_struct_or_union_non_pointer(&rtype) != struct_result){
+        compiler_error(current_process, "x86: a struct call result with floating point arguments can only be assigned or passed on\n");
+    }
+    struct vector* args = x87_call_arguments(node);
+    int count = vector_count(args);
+    struct datatype* types = calloc(count + 1, sizeof(struct datatype));
+    size_t bytes = 0;
+    for(int i = 0; i < count; i++){
+        struct node* arg = *(struct node**)vector_at(args, i);
+        struct datatype t = x87_type(arg);
+        if(params && i < vector_count(params)){
+            t = (*(struct node**)vector_at(params, i))->var.type;
+        } else if(x87_is_floating(&t)){
+            // The default argument promotions: a float is a double.
+            t = datatype_floating(DATA_SIZE_DDWORD);
+        } else if(t.flags & DATATYPE_FLAG_IS_ARRAY){
+            t = datatype_decay(&t);
+        } else {
+            t = datatype_promote(&t);
+        }
+        types[i] = t;
+        if(datatype_is_struct_or_union_non_pointer(&t)){
+            bytes += align_value(datatype_size(&t), DATA_SIZE_DWORD);
+        } else {
+            bytes += x87_is_floating(&t) ? t.size : DATA_SIZE_DWORD;
+        }
+    }
+    int slot = 0;
+    if(!function){
+        slot = codegen_label_count();
+        codegen_data_section_add("function_call_%i: dd 0", slot);
+        x87_value(callee);
+        asm_push("mov dword [function_call_%i], eax", slot);
+    }
+    int room = struct_result ? align_value(datatype_size(&rtype), DATA_SIZE_DWORD) : 0;
+    codegen_stack_sub_with_name(room, "result_value");
+    size_t hidden = struct_result ? DATA_SIZE_DWORD : 0;
+    // ebp is 8 below a multiple of 16, so the bytes below it at the
+    // call must be 8 mod 16 (as codegen_generate_entity_access_for_function_call).
+    size_t below_ebp = (vector_count(current_function->func.frame.elements) - 1) * DATA_SIZE_DWORD + bytes + hidden;
+    size_t pad = (C_STACK_ALIGNMENT + 8 - below_ebp % C_STACK_ALIGNMENT) % C_STACK_ALIGNMENT;
+    codegen_stack_sub_with_name(pad, "call_alignment_pad");
+    for(int i = count - 1; i >= 0; i--){
+        struct node* arg = *(struct node**)vector_at(args, i);
+        if(datatype_is_struct_or_union_non_pointer(&types[i])){
+            codegen_generate_expressionable(arg, codegen_history_begin(EXPRESSION_IS_NOT_ROOT_NODE | EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS));
+            continue;
+        }
+        x87_operand_as(arg, &types[i]);
+        if(x87_is_floating(&types[i])){
+            x87_reserve(types[i].size);
+            asm_push("fstp %s [esp]", x87_size_keyword(types[i].size));
+        } else {
+            x87_reserve(DATA_SIZE_DWORD);
+            asm_push("mov [esp], eax");
+        }
+    }
+    if(struct_result){
+        // The hidden pointer: the room above the arguments and the pad.
+        asm_push("lea eax, [esp+%i]", (int)(bytes + pad));
+        x87_reserve(DATA_SIZE_DWORD);
+        asm_push("mov [esp], eax");
+    }
+    if(function){
+        asm_push("call %s", function->name);
+    } else {
+        asm_push("call [function_call_%i]", slot);
+    }
+    if(struct_result){
+        // The callee removed the hidden pointer with `ret 4`.
+        stackframe_pop(current_function);
+    }
+    x87_release(bytes);
+    codegen_stack_add_with_name(pad, "call_alignment_pad");
+    free(types);
+    if(struct_result){
+        struct vector* elements = current_function->func.frame.elements;
+        for(int i = 0; i < room / DATA_SIZE_DWORD; i++){
+            struct stack_frame_element* el = vector_at(elements, vector_count(elements) - 1 - i);
+            el->type       = STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE;
+            el->flags     |= STACK_FRAME_ELEMENT_FLAG_HAS_DATATYPE;
+            el->data.dtype = rtype;
+        }
+        codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_PUSHED_STRUCTURE});
+        return rtype;
+    }
+    if(x87_is_floating(&rtype)){
+        x87_round(rtype.size);
+    } else if(!(rtype.flags & DATATYPE_FLAG_IS_POINTER)){
+        x87_reduce(&rtype);
+    }
+    return rtype;
+}
+
+static struct datatype x87_expression(struct node* node, struct datatype* t){
+    const char* op = node->exp.op;
+    if(is_node_assignment(node)){
+        return x87_assign(node);
+    }
+    if(S_EQ(op, ",")){
+        x87_effect(node->exp.left);
+        return x87_value(node->exp.right);
+    }
+    if(is_logical_operator(op)){
+        return x87_logical(node);
+    }
+    if(S_EQ(op, "?")){
+        return x87_ternary(node, t);
+    }
+    if(is_parentheses_node(node)){
+        return x87_call_emit(node, false);
+    }
+    if(is_array_node(node) || is_access_node(node)){
+        x87_address(node);
+        x87_load(t);
+        return *t;
+    }
+    if(x87_is_comparison(op)){
+        return x87_compare(node);
+    }
+    return x87_arith(node);
+}
+
+// The value of `node`: st0 when it is floating, else eax.
+static struct datatype x87_value(struct node* node){
+    node = x87_strip(node);
+    if(!x87_involves(node)){
+        return x87_integer(node);
+    }
+    struct datatype t = x87_type(node);
+    switch(node->type){
+        case NODE_TYPE_NUMBER:
+            x87_constant(node, &t);
+            return t;
+        case NODE_TYPE_IDENTIFIER:
+            x87_address(node);
+            x87_load(&t);
+            return t;
+        case NODE_TYPE_CAST: {
+            struct datatype from = x87_value(node->cast.operand);
+            x87_convert(&from, &node->cast.dtype);
+            return node->cast.dtype;
+        }
+        case NODE_TYPE_UNARY:
+            return x87_unary(node, &t);
+        case NODE_TYPE_EXPRESSION:
+            return x87_expression(node, &t);
+    }
+    compiler_error(current_process, "x86: cannot generate this floating point expression\n");
+    return t;
+}
+
+static bool x87_is_struct_call(struct node* node){
+    node = x87_strip(node);
+    if(node->type != NODE_TYPE_EXPRESSION || !is_parentheses_node(node)){
+        return false;
+    }
+    struct datatype t = x87_call_type(node);
+    return datatype_is_struct_or_union_non_pointer(&t);
+}
+
+// codegen_generate_expressionable's way in: the value pushed as the
+// integer generator pushes one, a struct a call returns as its dwords.
+// A floating value reaches an integer operator only as a condition
+// (`if (d)`), so it is pushed as its truth, or as an argument of a call
+// the integer generator makes (one inside a member chain, `f(x).m`),
+// pushed as its bytes, unconverted.
+static void x87_push(struct node* node, int flags){
+    if(x87_is_struct_call(node)){
+        x87_call_emit(x87_strip(node), true);
+        return;
+    }
+    struct datatype t = x87_value(node);
+    if(x87_is_floating(&t) && (flags & EXPRESSION_IN_FUNCTION_CALL_ARGUMENTS)){
+        codegen_stack_sub_with_name(t.size, "result_value");
+        asm_push("fstp %s [esp]", x87_size_keyword(t.size));
+        return;
+    }
+    if(x87_is_floating(&t)){
+        x87_truth_of_st0();
+        t = datatype_for_int();
+    }
+    asm_push_ins_push_with_data("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+        &(struct stack_frame_data){.dtype = t});
+}
+
+// `return e;` from a function returning rtype, either floating: a
+// floating result is left in st0.
+static void x87_return(struct node* node, struct datatype* rtype){
+    x87_operand_as(node, rtype);
+}
+
+// A local's initializer, either side floating: stored at `address`.
+static void x87_initialize(struct node* value, struct datatype* type, const char* address){
+    x87_operand_as(value, type);
+    asm_push("lea ecx, [%s]", address);
+    x87_store(type);
+    if(x87_is_floating(type)){
+        asm_push("fstp st0");
+    }
+}
+
 // ch138 expressionable dispatch was NUMBER-only; ch142 adds the
 // EXPRESSION case routed through codegen_generate_exp_node.
 
@@ -1849,6 +2825,13 @@ static void codegen_discard_unused_stack(void){
 // goes via the hidden caller-allocated slot pointed to by [ebp+8];
 // other types pop into eax.
 static void codegen_generate_statement_return_exp(struct node* node){
+    struct datatype* rtype = &node->binded.function->func.rtype;
+    if(!datatype_is_struct_or_union_non_pointer(rtype)
+       && (x87_wanted(node->stmt.return_stmt.exp) || (current_process->uses_floating && datatype_is_floating(rtype)))){
+        // A21: a float or double result goes back in st0.
+        x87_return(node->stmt.return_stmt.exp, rtype);
+        return;
+    }
     codegen_response_expect();
     codegen_generate_expressionable(node->stmt.return_stmt.exp,
         codegen_history_begin(IS_STATEMENT_RETURN));
@@ -1947,6 +2930,10 @@ static void codegen_generate_statement(struct node* node, struct history* histor
 static void codegen_generate_for_effect(struct node* node){
     if(node->type == NODE_TYPE_VARIABLE || node->type == NODE_TYPE_VARIABLE_LIST){
         codegen_generate_statement(node, codegen_history_begin(0));
+        return;
+    }
+    if(x87_wanted(node)){
+        x87_effect(node);
         return;
     }
     if(is_node_assignment(node)){
@@ -2121,6 +3108,13 @@ static void codegen_generate_statement(struct node* node, struct history* histor
     // A backend error names the statement's line, not the end of the file.
     if(node->pos.line){
         current_process->pos = node->pos;
+    }
+    bool is_expression = node->type == NODE_TYPE_EXPRESSION || node->type == NODE_TYPE_UNARY
+        || node->type == NODE_TYPE_CAST || node->type == NODE_TYPE_EXPRESSION_PARENTHESES;
+    if(is_expression && x87_wanted(node)){
+        x87_effect(node);
+        codegen_discard_unused_stack();
+        return;
     }
     switch(node->type){
         case NODE_TYPE_EXPRESSION:
@@ -2419,11 +3413,12 @@ static void codegen_generate_global_variable_for_primitive(struct node* node){
                 asm_keyword_for_size(variable_size(node), tmp_buf),
                 label);
         } else {
-            // ch111: emit the integer initializer literal.
+            // ch111: emit the integer initializer literal (A21: the
+            // bits of a floating one).
             asm_push("%s: %s %lld",
                 codegen_symbol(node->var.name),
                 asm_keyword_for_size(variable_size(node), tmp_buf),
-                node->var.val->llnum);
+                initializer_number_bits(node->var.val));
         }
     } else {
         asm_push("%s: %s 0",
@@ -2542,6 +3537,8 @@ static void codegen_generate_global_variable(struct node* node){
         case DATA_TYPE_SHORT:
         case DATA_TYPE_INTEGER:
         case DATA_TYPE_LONG:
+        case DATA_TYPE_FLOAT:
+        case DATA_TYPE_DOUBLE:
             codegen_generate_global_variable_for_primitive(node);
             break;
         case DATA_TYPE_STRUCT:
@@ -2550,10 +3547,6 @@ static void codegen_generate_global_variable(struct node* node){
         // ch178: union global.
         case DATA_TYPE_UNION:
             codegen_generate_global_variable_for_union(node);
-            break;
-        case DATA_TYPE_DOUBLE:
-        case DATA_TYPE_FLOAT:
-            compiler_error(current_process, "Doubles and floats are not supported in our subset of C\n");
             break;
     }
     // ch180: every global VAR also registers a scope entity so the

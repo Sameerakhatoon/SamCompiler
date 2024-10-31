@@ -283,6 +283,9 @@ static void codegen_load_register(const char* reg, const char* address, size_t s
 // the instructions exp64.c generates expressions with.
 // ---------------------------------------------------------------
 
+static void x86_64_from_xmm(const char* reg, int n, int size);
+static void x86_64_to_xmm(int n, const char* reg, int size);
+
 static const char* x86_64_reg(int reg){
     return reg ? "rcx" : "rax";
 }
@@ -593,6 +596,12 @@ static int x86_64_call_general(const struct exp64_call* call){
                 }
                 continue;
             }
+            if(a->fp){
+                if(pass == 1){
+                    asm_push("movq xmm%i, [rsp+%i]", a->reg, from);
+                }
+                continue;
+            }
             for(int w = 0; w < a->words; w++){
                 if(w >= a->reg_words && pass == 0){
                     asm_push("mov r11, [rsp+%i]", from + 8 * w);
@@ -626,13 +635,20 @@ static void x86_64_call(const struct exp64_call* call){
     }
     // al = number of vector registers used, for variadic callees
     // such as printf.
-    asm_push("xor eax, eax");
+    if(call->fp_regs){
+        asm_push("mov eax, %i", call->fp_regs);
+    } else {
+        asm_push("xor eax, eax");
+    }
     asm_push("call r11");
     if(above){
         asm_push("add rsp, %i", above);
     }
     if(!call->symbol){
         asm_push_ins_pop("rcx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    }
+    if(call->float_return){
+        x86_64_from_xmm("rax", 0, call->float_return);
     }
     if(call->struct_size){
         if(call->struct_in_regs){
@@ -647,6 +663,120 @@ static void x86_64_call(const struct exp64_call* call){
 
 static void x86_64_asm_text(const char* text){
     asm_push("%s", text);
+}
+
+// ---------------------------------------------------------------
+// Floating point (SSE2). A value travels in rax as its bits and is
+// moved to xmm0 (and the right operand from rcx to xmm1) for each
+// operation. rdx and r11 are scratch; rcx is kept.
+// ---------------------------------------------------------------
+
+static const char* x86_64_fsuffix(int size){
+    return size == DATA_SIZE_DWORD ? "ss" : "sd";
+}
+
+// xmm<n> = the float or double in the 64-bit register reg, and back.
+static void x86_64_to_xmm(int n, const char* reg, int size){
+    if(size == DATA_SIZE_DWORD){
+        asm_push("movd xmm%i, %s", n, codegen_sub_register(reg, DATA_SIZE_DWORD));
+    } else {
+        asm_push("movq xmm%i, %s", n, reg);
+    }
+}
+
+static void x86_64_from_xmm(const char* reg, int n, int size){
+    if(size == DATA_SIZE_DWORD){
+        asm_push("movd %s, xmm%i", codegen_sub_register(reg, DATA_SIZE_DWORD), n);
+    } else {
+        asm_push("movq %s, xmm%i", reg, n);
+    }
+}
+
+static void x86_64_fbinop(const char* op, int size){
+    const char* ins = S_EQ(op, "+") ? "add" : S_EQ(op, "-") ? "sub" : S_EQ(op, "*") ? "mul" : "div";
+    x86_64_to_xmm(0, "rax", size);
+    x86_64_to_xmm(1, "rcx", size);
+    asm_push("%s%s xmm0, xmm1", ins, x86_64_fsuffix(size));
+    x86_64_from_xmm("rax", 0, size);
+}
+
+// ucomis sets ZF, PF and CF; an unordered pair (a NaN) sets all three,
+// so a > b is `seta` with b < a swapped round, and == also wants PF
+// clear.
+static void x86_64_fcompare(const char* op, int size){
+    x86_64_to_xmm(0, "rax", size);
+    x86_64_to_xmm(1, "rcx", size);
+    const char* cmp = size == DATA_SIZE_DWORD ? "ucomiss" : "ucomisd";
+    if(S_EQ(op, "==") || S_EQ(op, "!=")){
+        bool eq = S_EQ(op, "==");
+        asm_push("%s xmm0, xmm1", cmp);
+        asm_push(eq ? "sete al" : "setne al");
+        asm_push(eq ? "setnp dl" : "setp dl");
+        asm_push(eq ? "and al, dl" : "or al, dl");
+    } else {
+        bool swap = S_EQ(op, "<") || S_EQ(op, "<=");
+        asm_push("%s %s", cmp, swap ? "xmm1, xmm0" : "xmm0, xmm1");
+        asm_push((S_EQ(op, "<") || S_EQ(op, ">")) ? "seta al" : "setae al");
+    }
+    asm_push("movzx eax, al");
+}
+
+// cvtsi2s converts a signed 64-bit integer. An unsigned one of 2^63 or
+// more is halved first (keeping the low bit, so it still rounds right)
+// and doubled after.
+static void x86_64_int_to_float(int size, bool from_u64){
+    const char* s = x86_64_fsuffix(size);
+    if(!from_u64){
+        asm_push("cvtsi2%s xmm0, rax", s);
+        x86_64_from_xmm("rax", 0, size);
+        return;
+    }
+    int big = codegen_label_count();
+    int done = codegen_label_count();
+    asm_push("test rax, rax");
+    asm_push("js .fp_%i", big);
+    asm_push("cvtsi2%s xmm0, rax", s);
+    asm_push("jmp .fp_%i", done);
+    asm_push(".fp_%i:", big);
+    asm_push("mov rdx, rax");
+    asm_push("shr rdx, 1");
+    asm_push("and eax, 1");
+    asm_push("or rdx, rax");
+    asm_push("cvtsi2%s xmm0, rdx", s);
+    asm_push("add%s xmm0, xmm0", s);
+    asm_push(".fp_%i:", done);
+    x86_64_from_xmm("rax", 0, size);
+}
+
+// cvtts2si truncates to a signed 64-bit integer. For an unsigned one,
+// a value of 2^63 or more has 2^63 taken off first and its top bit
+// set again after.
+static void x86_64_float_to_int(int size, bool to_u64){
+    const char* s = x86_64_fsuffix(size);
+    x86_64_to_xmm(0, "rax", size);
+    if(!to_u64){
+        asm_push("cvtt%s2si rax, xmm0", s);
+        return;
+    }
+    int big = codegen_label_count();
+    int done = codegen_label_count();
+    asm_push("mov rdx, %s", size == DATA_SIZE_DWORD ? "0x5f000000" : "0x43e0000000000000");
+    x86_64_to_xmm(1, "rdx", size);
+    asm_push("ucomi%s xmm0, xmm1", s);
+    asm_push("jae .fp_%i", big);
+    asm_push("cvtt%s2si rax, xmm0", s);
+    asm_push("jmp .fp_%i", done);
+    asm_push(".fp_%i:", big);
+    asm_push("sub%s xmm0, xmm1", s);
+    asm_push("cvtt%s2si rax, xmm0", s);
+    asm_push("btc rax, 63");
+    asm_push(".fp_%i:", done);
+}
+
+static void x86_64_float_resize(int from, int to){
+    x86_64_to_xmm(0, "rax", from);
+    asm_push("cvt%s2%s xmm0, xmm0", x86_64_fsuffix(from), x86_64_fsuffix(to));
+    x86_64_from_xmm("rax", 0, to);
 }
 
 static const struct exp64_ops x86_64_ops = {
@@ -676,6 +806,11 @@ static const struct exp64_ops x86_64_ops = {
     .drop           = x86_64_drop,
     .call           = x86_64_call,
     .asm_text       = x86_64_asm_text,
+    .fbinop         = x86_64_fbinop,
+    .fcompare       = x86_64_fcompare,
+    .int_to_float   = x86_64_int_to_float,
+    .float_to_int   = x86_64_float_to_int,
+    .float_resize   = x86_64_float_resize,
 };
 
 // ---------------------------------------------------------------
@@ -697,9 +832,10 @@ static void codegen_generate_scope_variable(struct node* node){
     }
 }
 
-// A condition: its value in rax, compared with zero.
+// A condition: its value in rax (a floating one tested against 0.0),
+// compared with zero.
 static void codegen_generate_condition(struct node* node){
-    exp64_generate(node);
+    exp64_test(node);
     asm_push("cmp rax, 0");
 }
 
@@ -734,9 +870,14 @@ static void codegen_discard_unused_stack(void){
 
 // A struct result of more than 16 bytes is copied through the hidden
 // pointer, which arrived in rdi and so is in the first home-area slot;
-// rax returns it. B1: a smaller one goes back in rax:rdx.
+// rax returns it. B1: a smaller one goes back in rax:rdx. A float or
+// double goes back in xmm0.
 static void codegen_generate_statement_return_exp(struct node* node){
-    struct datatype dtype = exp64_generate(node->stmt.return_stmt.exp);
+    struct datatype dtype = exp64_return_value(node->stmt.return_stmt.exp, &current_function->func.rtype);
+    if(datatype_is_floating(&dtype)){
+        x86_64_to_xmm(0, "rax", dtype.size);
+        return;
+    }
     if(!datatype_is_struct_or_union_non_pointer(&dtype)){
         return;
     }
@@ -1058,13 +1199,24 @@ static void codegen_generate_function_with_body(struct node* node){
     asm_push("push r11");
     asm_push_rbp();
     asm_push("mov rbp, rsp");
-    codegen_stack_sub(C_ALIGN(function_node_stack_size(node)));
+    int locals = C_ALIGN(function_node_stack_size(node));
+    codegen_stack_sub(locals);
+    // Float and double parameters arrive in xmm0-7, which go to a home
+    // of their own under the locals; only functions that have some.
+    int fp_registers = exp64_fp_parameter_registers(node);
+    int fp_home_size = fp_registers ? EXP64_FP_ARG_REGISTERS * DATA_SIZE_DDWORD : 0;
+    int fp_home = -(locals + fp_home_size);
+    codegen_stack_sub(fp_home_size);
+    for(int i = 0; i < fp_registers; i++){
+        asm_push("movq [rbp%+i], xmm%i", fp_home + DATA_SIZE_DDWORD * i, i);
+    }
     codegen_new_scope(RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
-    exp64_parameters(node, 16, 16 + codegen_home_area_size());
+    exp64_parameters(node, 16, 16 + codegen_home_area_size(), fp_home);
 
     codegen_generate_body(node->func.body_n, codegen_history_begin(IS_ALONE_STATEMENT));
     codegen_finish_scope();
-    codegen_stack_add(C_ALIGN(function_node_stack_size(node)));
+    codegen_stack_add(fp_home_size);
+    codegen_stack_add(locals);
     asm_pop_rbp();
     stackframe_assert_empty(current_function);
     codegen_generate_epilogue_ret();
@@ -1293,10 +1445,6 @@ static void codegen_generate_global_variable(struct node* node){
                     compiler_error(current_process, "A struct or union global needs a { } initializer\n");
                 }
                 codegen_generate_global_variable_for_primitive(node);
-                break;
-            case DATA_TYPE_DOUBLE:
-            case DATA_TYPE_FLOAT:
-                compiler_error(current_process, "Doubles and floats are not supported in our subset of C\n");
                 break;
             default:
                 codegen_generate_global_variable_for_primitive(node);

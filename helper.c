@@ -117,7 +117,7 @@ struct node* variable_struct_or_union_largest_variable_node(struct node* var_nod
 
 // The member called `name` among a body's statements, looking inside
 // `int a, b;` lists too; NULL if there is none.
-static struct node* struct_member_named(struct vector* statements, const char* name){
+struct node* struct_member_named(struct vector* statements, const char* name){
     vector_set_peek_pointer(statements, 0);
     struct node* statement = vector_peek_ptr(statements);
     while(statement){

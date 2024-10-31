@@ -6,9 +6,16 @@
 // `-1u > 0` and `(char)300` come out as gcc has them. Ordinary
 // expressions are not folded; their code is what the backends emit.
 
+// A floating constant (a float or double type) holds the bits of its
+// value as a double, rounded to float precision for a float; the
+// integer rules below do not apply to it.
+
 // `value` cut to the width of `dtype` and extended back by its
 // signedness: the canonical 64-bit form of a value of that type.
 static unsigned long long constant_convert(unsigned long long value, struct datatype* dtype){
+    if(datatype_is_floating(dtype)){
+        return value;
+    }
     size_t size = datatype_element_size(dtype);
     if(size >= DATA_SIZE_DDWORD || size == 0){
         return value;
@@ -26,13 +33,81 @@ static unsigned long long constant_convert(unsigned long long value, struct data
 // the result its type, so its errors (a division by zero) do not count.
 static bool constant_quiet;
 
+static bool constant_is_floating(struct constant* c){
+    return datatype_is_floating(&c->type);
+}
+
+// The value of any arithmetic constant as a double.
+static double constant_double(struct constant* c){
+    if(constant_is_floating(c)){
+        return floating_value(c->value, DATA_SIZE_DDWORD);
+    }
+    unsigned long long v = constant_convert(c->value, &c->type);
+    if(c->type.flags & DATATYPE_FLAG_IS_SIGNED || datatype_element_size(&c->type) < DATA_SIZE_DDWORD){
+        return (double)(long long)v;
+    }
+    return (double)v;
+}
+
+// `value` as a constant of the floating type dtype: a float is rounded
+// to float precision.
+static void constant_set_double(struct constant* out, double value, struct datatype dtype){
+    if(dtype.size == DATA_SIZE_DWORD){
+        value = (float)value;
+    }
+    out->type  = dtype;
+    out->value = floating_bits(value, DATA_SIZE_DDWORD);
+}
+
 static bool constant_is_true(struct constant* c){
+    if(constant_is_floating(c)){
+        return constant_double(c) != 0;
+    }
     return constant_convert(c->value, &c->type) != 0;
 }
 
 static void constant_set(struct constant* out, unsigned long long value, struct datatype dtype){
     out->type  = dtype;
     out->value = constant_convert(value, &dtype);
+}
+
+// A constant converted to the integer type dtype: a floating value
+// truncates toward zero (C11 6.3.1.4).
+static unsigned long long constant_integer_bits(struct constant* c, struct datatype* dtype){
+    if(!constant_is_floating(c)){
+        return c->value;
+    }
+    double d = constant_double(c);
+    if(!(dtype->flags & DATATYPE_FLAG_IS_SIGNED) && datatype_element_size(dtype) >= DATA_SIZE_DDWORD && d >= 9223372036854775808.0){
+        return (unsigned long long)d;
+    }
+    return (unsigned long long)(long long)d;
+}
+
+// One operator on floating operands, in the common floating type.
+static bool constant_floating_operator(struct compile_process* process, const char* op, struct constant* left,
+                                       struct constant* right, struct datatype* operation, struct constant* out){
+    (void)process;
+    double a = constant_double(left);
+    double b = constant_double(right);
+    if(operation->size == DATA_SIZE_DWORD){
+        a = (float)a;
+        b = (float)b;
+    }
+    int r = 0;
+    if(S_EQ(op, "+"))       { constant_set_double(out, a + b, *operation); return true; }
+    else if(S_EQ(op, "-"))  { constant_set_double(out, a - b, *operation); return true; }
+    else if(S_EQ(op, "*"))  { constant_set_double(out, a * b, *operation); return true; }
+    else if(S_EQ(op, "/"))  { constant_set_double(out, a / b, *operation); return true; }
+    else if(S_EQ(op, "==")) r = a == b;
+    else if(S_EQ(op, "!=")) r = a != b;
+    else if(S_EQ(op, "<"))  r = a < b;
+    else if(S_EQ(op, ">"))  r = a > b;
+    else if(S_EQ(op, "<=")) r = a <= b;
+    else if(S_EQ(op, ">=")) r = a >= b;
+    else return false;
+    constant_set(out, r, datatype_for_int());
+    return true;
 }
 
 static bool constant_unary(struct compile_process* process, struct node* node, struct constant* out){
@@ -44,6 +119,13 @@ static bool constant_unary(struct compile_process* process, struct node* node, s
     }
     if(S_EQ(op, "!")){
         constant_set(out, !constant_is_true(&operand), datatype_for_int());
+        return true;
+    }
+    if(constant_is_floating(&operand)){
+        if(!S_EQ(op, "-")){
+            return false;
+        }
+        constant_set_double(out, -constant_double(&operand), operand.type);
         return true;
     }
     struct datatype type = datatype_promote(&operand.type);
@@ -67,6 +149,9 @@ static bool constant_binary_operator(struct compile_process* process, const char
         return false;
     }
     struct datatype* operation = &types.operation;
+    if(datatype_is_floating(operation)){
+        return constant_floating_operator(process, op, left, right, operation, out);
+    }
     bool is_signed = operation->flags & DATATYPE_FLAG_IS_SIGNED;
     unsigned long long a = constant_convert(left->value, operation);
     unsigned long long b = constant_convert(right->value, operation);
@@ -158,6 +243,10 @@ static bool constant_expression(struct compile_process* process, struct node* no
                 type = common.type;
             }
         }
+        if(datatype_is_floating(&type)){
+            constant_set_double(out, constant_double(&taken), type);
+            return true;
+        }
         constant_set(out, constant_convert(taken.value, &taken.type), type);
         return true;
     }
@@ -193,7 +282,14 @@ bool constant_fold(struct compile_process* process, struct node* node, struct co
             if(!constant_fold(process, node->cast.operand, &operand)){
                 return false;
             }
-            constant_set(out, operand.value, *type);
+            if(datatype_is_floating(type)){
+                constant_set_double(out, constant_double(&operand), *type);
+                return true;
+            }
+            if(constant_is_floating(&operand) && (type->flags & DATATYPE_FLAG_IS_POINTER)){
+                return false;
+            }
+            constant_set(out, constant_integer_bits(&operand, type), *type);
             return true;
         }
         default:
@@ -204,6 +300,15 @@ bool constant_fold(struct compile_process* process, struct node* node, struct co
 // A NODE_TYPE_NUMBER that stands for the constant: its value, and its
 // type promoted to int, unsigned int, long or unsigned long.
 struct node* constant_node(struct constant* c){
+    if(constant_is_floating(c)){
+        // A floating constant, as the lexer makes one.
+        node_create(&(struct node){
+            .type      = NODE_TYPE_NUMBER,
+            .llnum     = c->value,
+            .num.flags = NUMBER_FLAG_FLOATING | (c->type.size == DATA_SIZE_DWORD ? NUMBER_FLAG_FLOAT : 0),
+        });
+        return node_pop();
+    }
     struct datatype type = datatype_promote(&c->type);
     if(type.flags & DATATYPE_FLAG_IS_POINTER){
         type = c->type;
@@ -228,6 +333,23 @@ struct node* constant_node(struct constant* c){
 
 // The constant converted to `dtype`, as storing it in an object of that
 // type does (`char c = 300` holds 44).
+// A floating dtype gets the double bits of the value rounded to it, so
+// the caller's constant (given that type) is a floating constant; an
+// integer dtype gets a floating value truncated, and _Bool its truth.
 unsigned long long constant_value_as(struct constant* c, struct datatype* dtype){
-    return constant_convert(c->value, dtype);
+    if(datatype_is_floating(dtype)){
+        double d = constant_double(c);
+        if(dtype->size == DATA_SIZE_DWORD){
+            d = (float)d;
+        }
+        return floating_bits(d, DATA_SIZE_DDWORD);
+    }
+    if(constant_is_floating(c) && (dtype->flags & DATATYPE_FLAG_IS_BOOL)){
+        return constant_is_true(c);
+    }
+    return constant_convert(constant_integer_bits(c, dtype), dtype);
+}
+
+bool constant_is_integer(struct constant* c){
+    return !constant_is_floating(c);
 }

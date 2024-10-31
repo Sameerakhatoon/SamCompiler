@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Ch21: number tokens record their L / f / d suffix in num.type.
-# `42` -> NORMAL, `42L` -> LONG, `42f` -> FLOAT.
+# `42` -> NORMAL, `42L` -> LONG, `7.0f` -> FLOAT. A21: `7f` is not a
+# constant (gcc rejects it too); a floating one keeps its double bits.
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
 
 scratch=$(mktemp /tmp/sam_ch21_input.XXXXXX)
-printf '42 5837L 7f' > "$scratch"
+printf '42 5837L 7.0f' > "$scratch"
 
 probe=$(mktemp /tmp/sam_ch21_probe.XXXXXX.c)
 bin=$(mktemp /tmp/sam_ch21_bin.XXXXXX)
@@ -40,5 +41,5 @@ got="$("$bin")"
 # NUMBER_TYPE_NORMAL=0, LONG=1, FLOAT=2, DOUBLE=3
 assert_contains "$got" "NUM val=42 nt=0"   "42 -> NORMAL"
 assert_contains "$got" "NUM val=5837 nt=1" "5837L -> LONG"
-assert_contains "$got" "NUM val=7 nt=2"    "7f -> FLOAT"
+assert_contains "$got" "NUM val=4619567317775286272 nt=2" "7.0f -> FLOAT (the bits of 7.0)"
 pass

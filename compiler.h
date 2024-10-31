@@ -113,6 +113,10 @@ enum {
     // int, long or unsigned long as UNSIGNED and LONG say, and llnum
     // holds the value in two's complement.
     NUMBER_FLAG_TYPED       = 0b1000,
+    // A floating constant (`1.5`, `2e3`, `0x1p4`): llnum holds the bits
+    // of its value as a double. FLOAT: the f suffix, the type is float.
+    NUMBER_FLAG_FLOATING    = 0b10000,
+    NUMBER_FLAG_FLOAT       = 0b100000,
 };
 
 enum {
@@ -521,6 +525,10 @@ struct compile_process {
     // ch200: vector of const char* representing include directories.
     struct vector*         include_dirs;
     struct preprocessor*   preprocessor;
+
+    // A21: the program names float or double or has a floating
+    // constant. The x86 backend looks for floating point only then.
+    bool                   uses_floating;
 };
 
 int                     compile_file(const char* filename, const char* out_filename, int flags);
@@ -993,12 +1001,22 @@ struct constant {
 bool               constant_fold(struct compile_process* process, struct node* node, struct constant* out);
 struct node*       constant_node(struct constant* c);
 unsigned long long constant_value_as(struct constant* c, struct datatype* dtype);
+// False for a floating constant (`1.5`, `2.0 * 3`).
+bool               constant_is_integer(struct constant* c);
 // Array-to-pointer decay: `int a[3]` used as a value has type `int*`.
 struct datatype datatype_decay(struct datatype* dtype);
 // C integer typing (C11 6.3.1, 6.4.4.1): the type of a constant, the
 // promoted type of an operand, and how a binary operator runs.
 struct datatype datatype_for_number_node(struct node* node);
 long long       datatype_canonical_value(unsigned long long value, struct datatype* dtype);
+// Floating point: float or double (not a pointer or array of them),
+// the type of `size` bytes, and a number node's value as a double.
+bool            datatype_is_floating(struct datatype* dtype);
+struct datatype datatype_floating(size_t size);
+double          number_node_double(struct node* node);
+// The bits of `value` as the floating type of `size` bytes stores it.
+unsigned long long floating_bits(double value, size_t size);
+double          floating_value(unsigned long long bits, size_t size);
 struct datatype datatype_promote(struct datatype* dtype);
 struct datatype_binary {
     // The type the instruction works in: its width and signedness pick
@@ -1235,6 +1253,9 @@ struct exp64_arg {
     int kind;
     int size;           // bytes of the value
     int words;          // 8-byte words of the value
+    // A float or double in a floating-point argument register: reg is
+    // that register (xmm, v or fa), reg_words 1.
+    bool fp;
     int reg;            // first argument register, or -1
     int reg_words;      // words in registers from reg on
     int stack;          // outgoing stack word of the first word not in a register, or -1
@@ -1262,6 +1283,8 @@ struct exp64_call {
     int               first_reg;
     int               struct_size;      // room for a returned struct under everything (8-aligned), or 0
     bool              struct_in_regs;   // it comes back in the two return registers, not through memory
+    int               fp_regs;          // floating-point argument registers used (al on x86_64)
+    int               float_return;     // a float (4) or double (8) result: from xmm0, d0/s0 or fa0 to R0; else 0
 };
 
 struct exp64_ops {
@@ -1300,9 +1323,29 @@ struct exp64_ops {
     // after the call.
     void (*call)(const struct exp64_call* call);
     void (*asm_text)(const char* text);                         // inline asm
+    // Floating point. A float or double value is its bits in R0: all 64
+    // of a double, the low 32 of a float (the bits above do not count).
+    // size is 4 for float, 8 for double. Only fbinop and fcompare read
+    // R1; the others keep it.
+    void (*fbinop)(const char* op, int size);                   // R0 = R0 op R1: + - * /
+    void (*fcompare)(const char* op, int size);                 // R0 = R0 op R1, 0 or 1 (false if unordered, but !=)
+    // R0, a canonical integer, as a float of `size`; from_u64: it is
+    // an unsigned 64-bit value, else it converts as a signed one.
+    void (*int_to_float)(int size, bool from_u64);
+    // R0, a float of `size`, truncated to a signed 64-bit integer, or
+    // to an unsigned one with to_u64.
+    void (*float_to_int)(int size, bool to_u64);
+    void (*float_resize)(int from, int to);                     // float <-> double
 };
 
-void            exp64_parameters(struct node* function, int register_home, int stack_home);
+// The floating-point argument registers every 64-bit ABI here has:
+// xmm0-7, v0-7, fa0-7.
+#define EXP64_FP_ARG_REGISTERS 8
+
+void            exp64_parameters(struct node* function, int register_home, int stack_home, int fp_home);
+int             exp64_fp_parameter_registers(struct node* function);
+struct datatype exp64_return_value(struct node* node, struct datatype* rtype);
+void            exp64_test(struct node* node);
 bool            exp64_returns_in_memory(struct datatype* dtype);
 
 void            exp64_begin(const struct exp64_ops* ops, struct compile_process* process);
@@ -1371,6 +1414,7 @@ struct node* variable_node_or_list(struct node* node);
 // Brace initializers are leaves (NODE_TYPE_INITIALIZER, written by
 // codegen_emit_initializer).
 void           initializer_value_asm(struct node* value, const char* (*register_string)(const char* str), char* out, size_t len);
+long long      initializer_number_bits(struct node* value);
 
 // ch44: array-bracket helpers.
 struct array_brackets* array_brackets_new(void);
@@ -1556,6 +1600,8 @@ int                      struct_offset(struct compile_process* compiler, const c
 struct node*             body_largest_variable_node(struct node* body_node);
 struct node*             variable_struct_or_union_largest_variable_node(struct node* var_node);
 bool                     node_is_struct_or_union(struct node* node);
+// The member called `name` among a struct body's statements, or NULL.
+struct node*             struct_member_named(struct vector* statements, const char* name);
 
 // ch124: struct_offset flags.
 enum {

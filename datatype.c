@@ -98,10 +98,58 @@ static int datatype_rank(struct datatype* dtype){
 // unsigned long; u limits the list to unsigned types, l starts it at
 // long. long long is the target's long. A value no type holds becomes
 // unsigned long, as gcc does with a warning.
+bool datatype_is_floating(struct datatype* dtype){
+    return !(dtype->flags & (DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_ARRAY))
+        && (dtype->type == DATA_TYPE_FLOAT || dtype->type == DATA_TYPE_DOUBLE);
+}
+
+struct datatype datatype_floating(size_t size){
+    struct datatype dtype = {0};
+    dtype.type     = size == DATA_SIZE_DWORD ? DATA_TYPE_FLOAT : DATA_TYPE_DOUBLE;
+    dtype.type_str = size == DATA_SIZE_DWORD ? "float" : "double";
+    dtype.size     = size;
+    dtype.flags    = DATATYPE_FLAG_IS_SIGNED;
+    return dtype;
+}
+
+double floating_value(unsigned long long bits, size_t size){
+    if(size == DATA_SIZE_DWORD){
+        unsigned int low = (unsigned int)bits;
+        float f;
+        memcpy(&f, &low, sizeof(f));
+        return f;
+    }
+    double d;
+    memcpy(&d, &bits, sizeof(d));
+    return d;
+}
+
+unsigned long long floating_bits(double value, size_t size){
+    if(size == DATA_SIZE_DWORD){
+        float f = (float)value;
+        unsigned int low;
+        memcpy(&low, &f, sizeof(low));
+        return low;
+    }
+    unsigned long long bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+// A floating constant keeps its value as the bits of a double.
+double number_node_double(struct node* node){
+    return floating_value(node->llnum, DATA_SIZE_DDWORD);
+}
+
 struct datatype datatype_for_number_node(struct node* node){
     int flags = node->num.flags;
     unsigned long long value = node->llnum;
     size_t long_size = target_current()->long_size;
+    if(flags & NUMBER_FLAG_FLOATING){
+        struct datatype dtype = datatype_floating((flags & NUMBER_FLAG_FLOAT) ? DATA_SIZE_DWORD : DATA_SIZE_DDWORD);
+        dtype.flags |= DATATYPE_FLAG_IS_LITERAL;
+        return dtype;
+    }
     if(flags & NUMBER_FLAG_TYPED){
         bool is_long = flags & NUMBER_FLAG_LONG;
         struct datatype dtype = datatype_integer(is_long ? long_size : DATA_SIZE_DWORD,
@@ -155,6 +203,9 @@ struct datatype datatype_promote(struct datatype* dtype){
     if((dtype->flags & DATATYPE_FLAG_IS_POINTER) || datatype_is_struct_or_union(dtype)){
         return *dtype;
     }
+    if(datatype_is_floating(dtype)){
+        return datatype_floating(dtype->size);
+    }
     if(datatype_element_size(dtype) < DATA_SIZE_DWORD){
         return datatype_integer(DATA_SIZE_DWORD, true, false);
     }
@@ -166,6 +217,12 @@ struct datatype datatype_promote(struct datatype* dtype){
 // unsigned type wins unless the signed type is wider and so holds all
 // its values; if not, the unsigned version of the signed type.
 static struct datatype datatype_common(struct datatype* left, struct datatype* right){
+    // A floating operand wins: double over float over every integer.
+    if(datatype_is_floating(left) || datatype_is_floating(right)){
+        bool is_double = (datatype_is_floating(left) && left->size == DATA_SIZE_DDWORD)
+                      || (datatype_is_floating(right) && right->size == DATA_SIZE_DDWORD);
+        return datatype_floating(is_double ? DATA_SIZE_DDWORD : DATA_SIZE_DWORD);
+    }
     struct datatype a = datatype_promote(left);
     struct datatype b = datatype_promote(right);
     bool a_signed = a.flags & DATATYPE_FLAG_IS_SIGNED;

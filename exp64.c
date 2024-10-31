@@ -16,6 +16,11 @@
 // chains did not know: they compared, shifted and divided everything
 // as signed int.
 //
+// A float or double value is its bits in R0 (a float's in the low 32),
+// so it is loaded, stored, pushed and passed like an integer; the
+// backend's floating-point ops (fbinop, fcompare and the conversions)
+// move it to a floating-point register for the arithmetic and back.
+//
 // The backend supplies the machine operations (struct exp64_ops):
 // pushes and pops on its expression stack with the frame ledger, loads
 // and stores of 1, 2, 4 and 8 bytes, the arithmetic, and calls. A
@@ -80,8 +85,14 @@ static bool exp64_is_void(struct datatype* t){
     return !exp64_is_array(t) && !exp64_is_pointer(t) && t->type == DATA_TYPE_VOID;
 }
 
+// float or double: its bits in R0, the arithmetic through the
+// backend's floating-point ops.
+static bool exp64_is_floating(struct datatype* t){
+    return !exp64_is_array(t) && !exp64_is_pointer(t) && datatype_is_floating(t);
+}
+
 static bool exp64_is_signed(struct datatype* t){
-    return !exp64_is_pointer(t) && (t->flags & DATATYPE_FLAG_IS_SIGNED);
+    return !exp64_is_pointer(t) && !exp64_is_floating(t) && (t->flags & DATATYPE_FLAG_IS_SIGNED);
 }
 
 // Bytes of a scalar value: 8 for a pointer.
@@ -160,8 +171,14 @@ static struct datatype exp64_promote(struct datatype* t){
     return exp64_int_type(DATA_SIZE_DWORD, true);
 }
 
-// The usual arithmetic conversions of two promoted integer types.
+// The usual arithmetic conversions of two promoted integer types; a
+// floating operand makes it float, or double when either is double.
 static struct datatype exp64_common(struct datatype* a, struct datatype* b){
+    if(exp64_is_floating(a) || exp64_is_floating(b)){
+        bool is_double = (exp64_is_floating(a) && a->size == DATA_SIZE_DDWORD)
+                      || (exp64_is_floating(b) && b->size == DATA_SIZE_DDWORD);
+        return datatype_floating(is_double ? DATA_SIZE_DDWORD : DATA_SIZE_DWORD);
+    }
     struct datatype pa = exp64_promote(a);
     struct datatype pb = exp64_promote(b);
     int sa = exp64_scalar_size(&pa), sb = exp64_scalar_size(&pb);
@@ -176,8 +193,60 @@ static struct datatype exp64_common(struct datatype* a, struct datatype* b){
 // Widening needs nothing (canonical form is already the C
 // conversion); narrowing or a change of sign at 32 bits or less
 // re-extends.
+// R0 held a value of type `from` and one of the two is a float or a
+// double (C11 6.3.1.4, 6.3.1.5): a floating value changes precision,
+// truncates toward zero into an integer (`_Bool` is its test against
+// 0), and an integer or pointer is converted to the floating type.
+static void exp64_convert_floating(struct datatype* from, struct datatype* to){
+    bool from_floating = exp64_is_floating(from);
+    if(from_floating && exp64_is_floating(to)){
+        if(from->size != to->size){
+            ops->float_resize(from->size, to->size);
+        }
+        return;
+    }
+    if(!from_floating){
+        if(exp64_is_struct(from) || exp64_is_void(from)){
+            compiler_error(current_process, "A struct or void value cannot become a floating value\n");
+        }
+        bool from_u64 = exp64_scalar_size(from) == DATA_SIZE_DDWORD && !exp64_is_signed(from);
+        ops->int_to_float(to->size, from_u64);
+        return;
+    }
+    if(to->flags & DATATYPE_FLAG_IS_BOOL){
+        // R1 is kept on the stack meanwhile.
+        struct datatype word = exp64_int_type(DATA_SIZE_DDWORD, false);
+        ops->swap();
+        ops->push(&word);
+        ops->swap();
+        ops->imm(1, 0);
+        ops->fcompare("!=", from->size);
+        ops->pop(1);
+        return;
+    }
+    if(exp64_is_pointer(to)){
+        compiler_error(current_process, "A floating value cannot become a pointer\n");
+    }
+    int size = exp64_scalar_size(to);
+    ops->float_to_int(from->size, size == DATA_SIZE_DDWORD && !exp64_is_signed(to));
+    if(size < DATA_SIZE_DDWORD){
+        ops->extend(0, size, exp64_is_signed(to));
+    }
+}
+
 static void exp64_convert(int reg, struct datatype* from, struct datatype* to){
     if(exp64_is_void(to) || exp64_is_struct(to) || exp64_is_array(to)){
+        return;
+    }
+    if(exp64_is_floating(from) || exp64_is_floating(to)){
+        // The floating ops work on R0 and keep R1.
+        if(reg){
+            ops->swap();
+        }
+        exp64_convert_floating(from, to);
+        if(reg){
+            ops->swap();
+        }
         return;
     }
     int size = exp64_scalar_size(to);
@@ -358,7 +427,30 @@ static bool exp64_is_comparison(const char* op){
 
 // R0 = R0 op R1, the left operand of type lt in R0, the right of type
 // rt in R1.
+// R0 = R0 op R1 when either operand is floating: both are converted to
+// the common floating type, and a comparison gives an int.
+static struct datatype exp64_arith_floating(const char* op, struct datatype* lt, struct datatype* rt){
+    if(exp64_is_pointer(lt) || exp64_is_pointer(rt) || exp64_is_struct(lt) || exp64_is_struct(rt)){
+        compiler_error(current_process, "Invalid operands to %s: a floating value with a pointer or struct\n", op);
+    }
+    struct datatype c = exp64_common(lt, rt);
+    exp64_convert(0, lt, &c);
+    exp64_convert(1, rt, &c);
+    if(exp64_is_comparison(op)){
+        ops->fcompare(op, c.size);
+        return exp64_int_type(DATA_SIZE_DWORD, true);
+    }
+    if(!(S_EQ(op, "+") || S_EQ(op, "-") || S_EQ(op, "*") || S_EQ(op, "/"))){
+        compiler_error(current_process, "The operator %s does not take floating operands\n", op);
+    }
+    ops->fbinop(op, c.size);
+    return c;
+}
+
 static struct datatype exp64_arith(const char* op, struct datatype* lt, struct datatype* rt){
+    if(exp64_is_floating(lt) || exp64_is_floating(rt)){
+        return exp64_arith_floating(op, lt, rt);
+    }
     bool lp = exp64_is_pointer(lt), rp = exp64_is_pointer(rt);
     if(exp64_is_comparison(op)){
         if(lp || rp){
@@ -489,13 +581,29 @@ static struct datatype exp64_assignment(struct node* node){
     return lt;
 }
 
+// A condition's value in R0, zero when it is false. A floating value is
+// compared with 0.0, so -0.0 is false and a NaN true.
+static struct datatype exp64_truth(struct node* node){
+    struct datatype t = exp64_value(node);
+    if(exp64_is_floating(&t)){
+        ops->imm(1, 0);
+        ops->fcompare("!=", t.size);
+        return exp64_int_type(DATA_SIZE_DWORD, true);
+    }
+    return t;
+}
+
+void exp64_test(struct node* node){
+    exp64_truth(node);
+}
+
 static struct datatype exp64_logical(struct node* node){
     bool is_and = S_EQ(node->exp.op, "&&");
     int short_label = exp64_new_label();
     int end_label = exp64_new_label();
-    exp64_value(node->exp.left);
+    exp64_truth(node->exp.left);
     ops->branch(short_label, is_and ? EXP64_BRANCH_IF_ZERO : EXP64_BRANCH_IF_NOT_ZERO);
-    exp64_value(node->exp.right);
+    exp64_truth(node->exp.right);
     ops->branch(short_label, is_and ? EXP64_BRANCH_IF_ZERO : EXP64_BRANCH_IF_NOT_ZERO);
     ops->imm(0, is_and ? 1 : 0);
     ops->branch(end_label, EXP64_BRANCH_ALWAYS);
@@ -522,7 +630,7 @@ static struct datatype exp64_ternary(struct node* node){
     }
     int no_label = exp64_new_label();
     int end_label = exp64_new_label();
-    exp64_value(node->exp.left);
+    exp64_truth(node->exp.left);
     ops->branch(no_label, EXP64_BRANCH_IF_ZERO);
     exp64_value(yes);
     exp64_convert(0, &yt, &t);
@@ -570,6 +678,26 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
         ops->imm(0, 0);
         return exp64_int_type(DATA_SIZE_DWORD, true);
     }
+    // The va_arg macro passes `(type*)0` as a third argument, which
+    // gives the type. A float or double variadic argument travels in a
+    // floating-point register on x86_64 and aarch64, which the home
+    // area does not hold: rejected there. riscv64 passes it in the
+    // integer registers and on the stack, so its slot has the bits.
+    struct datatype result_type = long_type;
+    if(vector_count(args) == 3 && !S_EQ(name, "va_start")){
+        struct node* type_argument = *(struct node**)vector_at(args, 2);
+        if(type_argument->type == NODE_TYPE_CAST){
+            struct datatype t = *datatype_pointer_reduce(&type_argument->cast.dtype, 1);
+            if(exp64_is_floating(&t)){
+                if(!S_EQ(current_process->target->backend->name, "riscv64")){
+                    compiler_error(current_process, "va_arg of a float or double is not supported on %s\n",
+                        current_process->target->backend->name);
+                }
+                result_type = datatype_floating(DATA_SIZE_DDWORD);
+            }
+        }
+        vector_pop(args);
+    }
     if(vector_count(args) != 2){
         compiler_error(current_process, "%s expects two arguments\n", name);
     }
@@ -594,7 +722,7 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
     ops->pop(1);
     ops->store(DATA_SIZE_DDWORD);
     ops->load(DATA_SIZE_DDWORD, false);
-    return long_type;
+    return result_type;
 }
 
 // B1: a struct result of more than 16 bytes goes through memory (the
@@ -605,8 +733,8 @@ bool exp64_returns_in_memory(struct datatype* dtype){
 }
 
 // B1: where each argument of a call goes, for the caller (exp64_call)
-// and the callee (exp64_parameters) alike. Every value is integer
-// class (there is no floating point here). The psABIs' rules:
+// and the callee (exp64_parameters) alike. The psABIs' rules for
+// integer-class values:
 //   x86_64 SysV: up to 16 bytes in 1 or 2 of rdi..r9 when all of them
 //     are free, else the whole value on the stack, and later scalars
 //     still take the registers left; a bigger struct (class MEMORY) is
@@ -619,13 +747,23 @@ bool exp64_returns_in_memory(struct datatype* dtype){
 //     and the stack when only a7 is left; bigger by reference too.
 // `hidden` is a struct result through memory: its pointer takes the
 // first register on x86_64 (rdi) and riscv64 (a0); aarch64 passes it
-// in x8. Returns the outgoing stack words.
-static int exp64_arg_layout(struct datatype* types, int count, bool hidden, struct exp64_arg* out){
+// in x8.
+//
+// A float or double takes the next floating-point register (xmm0-7,
+// v0-7, fa0-7), counted apart from the integer ones. With those used
+// up it goes on the stack on x86_64 and aarch64, and to an integer
+// register (else the stack) on riscv64 (LP64D), which also passes the
+// variadic arguments, from `named` on, in integer registers. A struct
+// is always INTEGER class here, floating members included: right
+// between SamCompiler functions, not what gcc does with them
+//. Returns the outgoing stack words.
+static int exp64_arg_layout(struct datatype* types, int count, int named, bool hidden, struct exp64_arg* out){
     const char* abi = current_process->target->backend->name;
     bool x86_64  = S_EQ(abi, "x86_64");
     bool aarch64 = S_EQ(abi, "aarch64");
     int max = current_process->target->max_reg_args;
     int next = hidden && !aarch64 ? 1 : 0;
+    int next_fp = 0;
     int stack = 0;
     for(int i = 0; i < count; i++){
         struct exp64_arg* a = &out[i];
@@ -633,11 +771,25 @@ static int exp64_arg_layout(struct datatype* types, int count, bool hidden, stru
         a->kind      = EXP64_ARG_WORDS;
         a->size      = is_struct ? (int)exp64_size(&types[i]) : DATA_SIZE_DDWORD;
         a->words     = align_value(a->size, DATA_SIZE_DDWORD) / DATA_SIZE_DDWORD;
+        a->fp        = false;
         a->reg       = -1;
         a->reg_words = 0;
         a->stack     = -1;
         a->copy      = -1;
         int words = a->words;
+        if(exp64_is_floating(&types[i]) && (i < named || x86_64 || aarch64)){
+            a->size = types[i].size;
+            if(next_fp < EXP64_FP_ARG_REGISTERS){
+                a->fp = true;
+                a->reg = next_fp++;
+                a->reg_words = 1;
+                continue;
+            }
+            if(x86_64 || aarch64){
+                a->stack = stack++;
+                continue;
+            }
+        }
         if(a->size > 2 * DATA_SIZE_DDWORD){
             if(x86_64){
                 a->stack = stack;
@@ -681,7 +833,7 @@ static bool exp64_call_is_simple(struct exp64_call* call){
     int regs = 0;
     for(int i = 0; i < call->count; i++){
         struct exp64_arg* a = &call->args[i];
-        if(a->kind == EXP64_ARG_REF || a->slot != word){
+        if(a->kind == EXP64_ARG_REF || a->fp || a->slot != word){
             return false;
         }
         for(int w = 0; w < a->words; w++, word++){
@@ -703,8 +855,9 @@ static bool exp64_call_is_simple(struct exp64_call* call){
 // gets its frame offset and its entity. The prologue spilled argument
 // register k to register_home + 8*k; the caller's outgoing stack word j
 // is at stack_home + 8*j. A struct passed by reference keeps the
-// address of the caller's copy in its slot.
-void exp64_parameters(struct node* function, int register_home, int stack_home){
+// address of the caller's copy in its slot. The prologue spilled
+// floating-point argument register k to fp_home + 8*k.
+static struct exp64_arg* exp64_parameter_layout(struct node* function, int* count_out){
     struct vector* params = function_node_argument_vec(function);
     int count = vector_count(params);
     struct datatype* types = calloc(count + 1, sizeof(struct datatype));
@@ -712,7 +865,16 @@ void exp64_parameters(struct node* function, int register_home, int stack_home){
     for(int i = 0; i < count; i++){
         types[i] = (*(struct node**)vector_at(params, i))->var.type;
     }
-    exp64_arg_layout(types, count, exp64_returns_in_memory(&function->func.rtype), layout);
+    exp64_arg_layout(types, count, count, exp64_returns_in_memory(&function->func.rtype), layout);
+    free(types);
+    *count_out = count;
+    return layout;
+}
+
+void exp64_parameters(struct node* function, int register_home, int stack_home, int fp_home){
+    struct vector* params = function_node_argument_vec(function);
+    int count = 0;
+    struct exp64_arg* layout = exp64_parameter_layout(function, &count);
     for(int i = 0; i < count; i++){
         struct node* param = *(struct node**)vector_at(params, i);
         struct exp64_arg* a = &layout[i];
@@ -720,12 +882,31 @@ void exp64_parameters(struct node* function, int register_home, int stack_home){
         if(a->kind == EXP64_ARG_REF){
             flags |= RESOLVER_DEFAULT_ENTITY_FLAG_IS_REFERENCE;
         }
-        param->var.aoffset = a->reg >= 0 ? register_home + DATA_SIZE_DDWORD * a->reg
-                                         : stack_home + DATA_SIZE_DDWORD * a->stack;
+        if(a->fp){
+            param->var.aoffset = fp_home + DATA_SIZE_DDWORD * a->reg;
+        } else {
+            param->var.aoffset = a->reg >= 0 ? register_home + DATA_SIZE_DDWORD * a->reg
+                                             : stack_home + DATA_SIZE_DDWORD * a->stack;
+        }
         resolver_default_new_scope_entity(current_process->resolver, param, param->var.aoffset, flags);
     }
-    free(types);
     free(layout);
+}
+
+// The floating-point argument registers the parameters of `function`
+// arrive in: the prologue spills that many (none for most functions,
+// whose code does not change).
+int exp64_fp_parameter_registers(struct node* function){
+    int count = 0;
+    int used = 0;
+    struct exp64_arg* layout = exp64_parameter_layout(function, &count);
+    for(int i = 0; i < count; i++){
+        if(layout[i].fp && layout[i].reg + 1 > used){
+            used = layout[i].reg + 1;
+        }
+    }
+    free(layout);
+    return used;
 }
 
 static struct datatype exp64_call(struct node* node){
@@ -743,10 +924,12 @@ static struct datatype exp64_call(struct node* node){
     struct datatype return_type;
     struct vector* params = 0;
     const char* symbol = 0;
+    bool variadic = false;
     if(exp64_names_function(callee)){
         struct resolver_entity* function = resolver_get_function(0, current_process->resolver, callee->sval);
         return_type = function->dtype;
         params = function->node->func.args.vector;
+        variadic = function->node->func.flags & FUNCTION_NODE_FLAG_IS_VARIADIC;
         symbol = function->name;
     } else {
         struct datatype t = exp64_typeof(callee);
@@ -784,16 +967,36 @@ static struct datatype exp64_call(struct node* node){
             if(params && i < vector_count(params)){
                 struct node* param = *(struct node**)vector_at(params, i);
                 exp64_convert(0, &t, &param->var.type);
+                if(exp64_is_floating(&t) || exp64_is_floating(&param->var.type)){
+                    t = param->var.type;
+                }
+            } else if(exp64_is_floating(&t) && t.size == DATA_SIZE_DWORD){
+                // The default argument promotions: a float passed to
+                // `...` or without a prototype is a double.
+                struct datatype d = datatype_floating(DATA_SIZE_DDWORD);
+                exp64_convert(0, &t, &d);
+                t = d;
             }
             ops->push(&t);
         }
         types[i] = t;
         pushed[i] = vector_count(ledger);
     }
+    // The arguments past the prototype's parameters of a variadic
+    // function are its variadic ones; without a prototype all are named.
+    int named = params && variadic ? vector_count(params) : count;
     call.count = count;
     call.args = calloc(count + 1, sizeof(struct exp64_arg));
     call.first_reg = exp64_first_reg(call.struct_size && !call.struct_in_regs);
-    call.stack_words = exp64_arg_layout(types, count, call.struct_size && !call.struct_in_regs, call.args);
+    call.stack_words = exp64_arg_layout(types, count, named, call.struct_size && !call.struct_in_regs, call.args);
+    for(int i = 0; i < count; i++){
+        if(call.args[i].fp && call.args[i].reg + 1 > call.fp_regs){
+            call.fp_regs = call.args[i].reg + 1;
+        }
+    }
+    if(exp64_is_floating(&return_type)){
+        call.float_return = return_type.size;
+    }
     call.slots = vector_count(ledger) - base;
     call.area = DATA_SIZE_DDWORD * call.stack_words;
     for(int i = 0; i < count; i++){
@@ -810,7 +1013,7 @@ static struct datatype exp64_call(struct node* node){
     free(pushed);
     free(call.args);
     if(!call.struct_size && !exp64_is_void(&return_type) && !exp64_is_pointer(&return_type)
-       && exp64_scalar_size(&return_type) < DATA_SIZE_DDWORD){
+       && !exp64_is_floating(&return_type) && exp64_scalar_size(&return_type) < DATA_SIZE_DDWORD){
         // The ABIs leave the bits above a narrow return value undefined.
         ops->extend(0, exp64_scalar_size(&return_type), exp64_is_signed(&return_type));
     }
@@ -825,13 +1028,20 @@ static struct datatype exp64_call(struct node* node){
 // datatype_for_number_node, which the 32-bit backend uses too.
 static struct datatype exp64_number_type(struct node* node){
     struct datatype t = datatype_for_number_node(node);
+    if(exp64_is_floating(&t)){
+        return datatype_floating(t.size);
+    }
     return exp64_int_type(t.size, t.flags & DATATYPE_FLAG_IS_SIGNED);
 }
 
 // A constant in canonical form for its type: an int -1 folded to
-// 0xFFFFFFFF is sign extended again.
+// 0xFFFFFFFF is sign extended again. A floating constant is the bits
+// of its float or double.
 static long long exp64_number_value(struct node* node){
     struct datatype t = datatype_for_number_node(node);
+    if(exp64_is_floating(&t)){
+        return (long long)floating_bits(number_node_double(node), t.size);
+    }
     return datatype_canonical_value(node->llnum, &t);
 }
 
@@ -851,6 +1061,29 @@ static struct datatype exp64_increment(struct node* node){
     struct datatype lt = exp64_address(node->unary.operand);
     if(exp64_is_struct(&lt) || exp64_is_array(&lt)){
         compiler_error(current_process, "%s needs a scalar operand\n", node->unary.op);
+    }
+    if(exp64_is_floating(&lt)){
+        // x + 1 - 1 need not be x in floating point, so the old value
+        // is kept: on the stack under the address.
+        struct datatype address = exp64_pointer_to(&lt);
+        ops->push(&address);
+        exp64_load(&lt, true);
+        ops->pop(1);
+        ops->push(&lt);
+        ops->swap();
+        ops->push(&address);
+        ops->swap();
+        ops->imm(1, 1);
+        struct datatype result = exp64_arith(step_op, &lt, &one);
+        exp64_convert(0, &result, &lt);
+        ops->pop(1);
+        ops->store(exp64_scalar_size(&lt));
+        if(node->unary.flags & UNARY_FLAG_IS_POSTFIX){
+            ops->pop(0);
+        } else {
+            ops->pop(1);
+        }
+        return lt;
     }
     ops->push(&lt);
     exp64_load(&lt, true);
@@ -876,10 +1109,23 @@ static struct datatype exp64_unary(struct node* node){
         struct datatype t = exp64_address(node->unary.operand);
         return exp64_pointer_to(&t);
     }
-    struct datatype t = exp64_value(node->unary.operand);
     if(S_EQ(op, "!")){
+        exp64_truth(node->unary.operand);
         ops->unop("!", DATA_SIZE_DDWORD);
         return exp64_int_type(DATA_SIZE_DWORD, true);
+    }
+    struct datatype t = exp64_value(node->unary.operand);
+    if(exp64_is_floating(&t)){
+        if(S_EQ(op, "+")){
+            return t;
+        }
+        if(!S_EQ(op, "-")){
+            compiler_error(current_process, "The operator %s does not take a floating operand\n", op);
+        }
+        // Negation flips the sign bit, -0.0 and NaNs included.
+        ops->imm(1, t.size == DATA_SIZE_DWORD ? 0x80000000LL : (long long)0x8000000000000000ULL);
+        ops->binop("^", DATA_SIZE_DDWORD, false);
+        return t;
     }
     struct datatype p = exp64_promote(&t);
     ops->unop(op, exp64_scalar_size(&p));
@@ -1005,6 +1251,19 @@ struct datatype exp64_generate(struct node* node){
     return exp64_value(node);
 }
 
+// A `return` value: converted to the function's return type when either
+// is floating (`return 1;` in a double function), since the result
+// travels in a floating-point register. Integer results are left as
+// they were; the caller extends a narrow one.
+struct datatype exp64_return_value(struct node* node, struct datatype* rtype){
+    struct datatype t = exp64_value(node);
+    if(exp64_is_floating(&t) || exp64_is_floating(rtype)){
+        exp64_convert(0, &t, rtype);
+        return *rtype;
+    }
+    return t;
+}
+
 // A condition: jump to false_label when it is false. A comparison
 // compares and branches; anything else is tested against 0. Saves
 // the 0/1 value and its test in every loop condition.
@@ -1013,7 +1272,7 @@ void exp64_condition(struct node* node, const char* false_label){
         node = node->parenthesis.exp;
     }
     if(node->type != NODE_TYPE_EXPRESSION || !exp64_is_comparison(node->exp.op)){
-        exp64_value(node);
+        exp64_truth(node);
         ops->branch_false(0, false, false_label);
         return;
     }
@@ -1027,6 +1286,12 @@ void exp64_condition(struct node* node, const char* false_label){
         rt = exp64_value(node->exp.right);
         ops->mov_r1();
         ops->pop(0);
+    }
+    if(exp64_is_floating(&lt) || exp64_is_floating(&rt)){
+        // No flags to branch on: the 0/1 of the comparison is tested.
+        exp64_arith_floating(node->exp.op, &lt, &rt);
+        ops->branch_false(0, false, false_label);
+        return;
     }
     bool is_signed = false;
     if(!exp64_is_pointer(&lt) && !exp64_is_pointer(&rt)){

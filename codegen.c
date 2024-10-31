@@ -43,7 +43,7 @@ void codegen_emit_initializer(struct node* var_node, const struct initializer_em
         struct node* value = leaf->value;
         switch(value->type){
             case NODE_TYPE_NUMBER:
-                emitter->value(leaf_size, (long long)value->llnum);
+                emitter->value(leaf_size, initializer_number_bits(value));
                 break;
             case NODE_TYPE_STRING:
                 emitter->symbol(leaf_size, emitter->string_label(value->sval));

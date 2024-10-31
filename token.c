@@ -2,6 +2,7 @@
 #include "helpers/vector.h"
 #include "helpers/buffer.h"
 #include <assert.h>
+#include <string.h>
 
 #define PRIMITIVE_TYPES_TOTAL 7
 static const char* primitive_types[PRIMITIVE_TYPES_TOTAL] = {
@@ -60,6 +61,13 @@ void tokens_join_buffer_write_token(struct buffer* fmt_buf, struct token* token)
             buffer_printf(fmt_buf, "\"%s\"", token->sval);
             break;
         case TOKEN_TYPE_NUMBER:
+            if(token->num.flags & NUMBER_FLAG_FLOATING){
+                // A hexadecimal float reads back exactly.
+                double value;
+                memcpy(&value, &token->llnum, sizeof(value));
+                buffer_printf(fmt_buf, "%a%s", value, (token->num.flags & NUMBER_FLAG_FLOAT) ? "f" : "");
+                break;
+            }
             buffer_printf(fmt_buf, "%lld", token->llnum);
             break;
         case TOKEN_TYPE_NEWLINE:
