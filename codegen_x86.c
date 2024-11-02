@@ -289,7 +289,8 @@ static struct resolver_entity* codegen_register_function(struct node* func_node,
 // is also a register or keyword (`gs`, `eax`, `abs`) works; rdefault.c
 // writes the same prefix into the addresses (backend symbol_prefix).
 static const char* codegen_symbol(const char* name){
-    static char buffers[4][256];
+    // `$`, a name of up to IDENTIFIER_MAX_LENGTH and the NUL.
+    static char buffers[4][IDENTIFIER_MAX_LENGTH + 2];
     static int next;
     char* out = buffers[next++ % 4];
     snprintf(out, sizeof(buffers[0]), "$%s", name);

@@ -1264,7 +1264,7 @@ static void codegen_generate_global_data(const char* name, size_t size, const ch
 }
 
 static void codegen_generate_global_variable_for_primitive(struct node* node){
-    char value[256];
+    char value[RESOLVER_ADDRESS_MAX];
     if(node->var.val){
         initializer_value_asm(node->var.val, codegen_register_string, value, sizeof(value));
     } else {

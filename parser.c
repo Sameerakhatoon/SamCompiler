@@ -1173,9 +1173,12 @@ static size_t size_of_struct(const char* struct_name){
     if(!sym){
         return 0;
     }
-    assert(sym->type == SYMBOL_TYPE_NODE);
     struct node* n = sym->data;
-    assert(n->type == NODE_TYPE_STRUCT);
+    if(sym->type != SYMBOL_TYPE_NODE || n->type != NODE_TYPE_STRUCT){
+        // `struct num` naming a union (or another symbol) is an error, not
+        // an assert (found by tests/322-malformed-fuzz.sh).
+        compiler_error(current_process, "%s is not a struct\n", struct_name);
+    }
     return n->_struct.body_n->body.size;
 }
 
@@ -1185,9 +1188,12 @@ static size_t size_of_union(const char* union_name){
     if(!sym){
         return 0;
     }
-    assert(sym->type == SYMBOL_TYPE_NODE);
     struct node* n = sym->data;
-    assert(n->type == NODE_TYPE_UNION);
+    if(sym->type != SYMBOL_TYPE_NODE || n->type != NODE_TYPE_UNION){
+        // `union num` naming a struct (or another symbol) is an error, not
+        // an assert (found by tests/322-malformed-fuzz.sh).
+        compiler_error(current_process, "%s is not a union\n", union_name);
+    }
     return n->_union.body_n->body.size;
 }
 

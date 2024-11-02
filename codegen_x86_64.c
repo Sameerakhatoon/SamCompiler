@@ -199,7 +199,8 @@ static bool codegen_variable_defined_here(const char* name){
 // a symbol as NASM must see it. `$` marks an identifier, so a C
 // name that is also a NASM keyword or register (abs, sp, si) works.
 static const char* codegen_symbol(const char* name){
-    static char buffers[4][256];
+    // `$`, a name of up to IDENTIFIER_MAX_LENGTH and the NUL.
+    static char buffers[4][IDENTIFIER_MAX_LENGTH + 2];
     static int next;
     char* out = buffers[next++ % 4];
     snprintf(out, sizeof(buffers[0]), "$%s", name);
@@ -1377,7 +1378,7 @@ static void codegen_global_label(struct node* node){
 
 static void codegen_generate_global_variable_for_primitive(struct node* node){
     char tmp_buf[256];
-    char value[256] = "0";
+    char value[RESOLVER_ADDRESS_MAX] = "0";
     if(node->var.val){
         codegen_value_asm(node->var.val, value, sizeof(value));
     }
