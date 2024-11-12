@@ -1,5 +1,6 @@
 // SamCompiler side of the floating-point ABI interop test
 // (tests/331-float-interop.sh); gcc.c is the gcc side.
+#include <stdarg.h>
 int printf(const char* fmt, ...);
 int sprintf(char* out, const char* fmt, ...);
 int strcmp(const char* a, const char* b);
@@ -25,6 +26,22 @@ float sam_floats(float a, float b, float c, float d, float e, float f, float g, 
     return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10;
 }
 long sam_to_long(double x){ return x; }
+
+// A variadic callee called by gcc, reading doubles between longs: more
+// doubles than floating-point argument registers, so the last ones are
+// on the stack (x86_64, aarch64), in the integer registers and on the
+// stack (riscv64), or 8 bytes each on the stack (x86).
+double sam_vsum(int n, ...){
+    va_list ap;
+    va_start(ap, n);
+    double s = 0;
+    for(int i = 0; i < n; i++){
+        s = s * 2 + va_arg(ap, double);
+        s = s + va_arg(ap, long);
+    }
+    va_end(ap);
+    return s;
+}
 double sam_from_int(int x, unsigned u){ return x + (double)u; }
 
 double sam_calls_gcc(void){

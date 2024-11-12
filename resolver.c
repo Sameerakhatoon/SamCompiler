@@ -395,8 +395,10 @@ struct resolver_entity* resolver_create_new_entity_for_function_call(struct reso
     }
     entity->dtype = left_operand_entity->dtype;
     // a call through a function pointer has the pointee's
-    // return type.
-    if(entity->dtype.flags & DATATYPE_FLAG_IS_FUNCTION_POINTER){
+    // return type. A function's own type is its return type already,
+    // a function pointer for `int (*pick(int))(int)`.
+    if((entity->dtype.flags & DATATYPE_FLAG_IS_FUNCTION_POINTER)
+       && left_operand_entity->type != RESOLVER_ENTITY_TYPE_FUNCTION){
         entity->dtype = *datatype_pointer_reduce(&entity->dtype, 1);
         entity->dtype.flags &= ~DATATYPE_FLAG_IS_FUNCTION_POINTER;
     }
@@ -412,6 +414,7 @@ struct resolver_entity* resolver_create_new_entity_for_function_call(struct reso
             compiler_error(process->compiler, "Called object is not a function or function pointer\n");
         }
         entity->func_call_data.through_pointer = true;
+        entity->func_call_data.callee_is_value = left_operand_entity->type == RESOLVER_ENTITY_TYPE_FUNCTION_CALL;
         entity->dtype = *left_operand_entity->dtype.function_return;
     }
     return entity;
@@ -673,6 +676,16 @@ struct resolver_entity* resolver_follow_function_call(struct resolver_process* r
     assert(func_call_entity);
     func_call_entity->flags |= RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_NEXT_ENTITY | RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_LEFT_ENTITY;
     resolver_build_function_call_arguments(resolver, node->exp.right, func_call_entity, &func_call_entity->func_call_data.stack_size);
+    // The function pointer's type says how many arguments it takes.
+    struct function_prototype* prototype = left_entity->dtype.function_params;
+    if(func_call_entity->func_call_data.through_pointer && prototype){
+        int given = vector_count(func_call_entity->func_call_data.arguments);
+        int wanted = vector_count(prototype->types);
+        if(given < wanted || (given > wanted && !prototype->variadic)){
+            compiler_error(resolver->compiler, "The call through a function pointer passes %i arguments, its type has %i parameters\n",
+                given, wanted);
+        }
+    }
     resolver_result_entity_push(result, func_call_entity);
     return func_call_entity;
 }
@@ -682,9 +695,12 @@ struct resolver_entity* resolver_follow_function_call(struct resolver_process* r
 // grouped expression.
 struct resolver_entity* resolver_follow_parentheses(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
     // A call through a function pointer element or member, `t[0](x)`
-    // or `s.fn(x)`, has an array or access expression as its callee.
+    // or `s.fn(x)`, has an array or access expression as its callee,
+    // and a call through the pointer a call returned (`pick(2)(4, 5)`)
+    // a call.
     if(node->exp.left->type == NODE_TYPE_IDENTIFIER
-       || is_array_node(node->exp.left) || is_access_node(node->exp.left)){
+       || is_array_node(node->exp.left) || is_access_node(node->exp.left)
+       || (node->exp.left->type == NODE_TYPE_EXPRESSION && is_parentheses_node(node->exp.left))){
         return resolver_follow_function_call(resolver, result, node);
     }
     return resolver_follow_exp(resolver, node->parenthesis.exp, result);

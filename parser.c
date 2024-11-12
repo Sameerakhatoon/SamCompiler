@@ -102,6 +102,11 @@ static const char*     parser_label_name(const char* label);
 static void            parser_add_leaf(struct vector* leaves, size_t offset, struct datatype* type, struct node* value);
 static struct node*    parser_global_initializer_node(struct token* name_token, struct vector* leaves);
 static void            parse_compound_literal(struct datatype* dtype);
+static void            parser_wide_string_object(struct vector* units, int unit_size, bool is_wchar);
+static void            token_read_dots(size_t amount);
+static void            parser_declare_vla(struct datatype* dtype, struct token* name_token, struct node* size, struct history* history);
+static const char*     parser_vla_size_of(const char* name);
+static struct node*    parser_identifier(const char* name);
 static bool            parse_function_pointer_declarator(struct datatype* dtype, struct token** name_out);
 static struct array_brackets* parse_array_brackets(struct history* history);
 static bool            parser_name_in(struct vector* names, const char* name);
@@ -125,6 +130,41 @@ static int                     parser_loop_depth;
 static int                     parser_breakable_depth;
 // Set by parse_function_arguments when the list ends in `...`.
 static bool                    parser_arguments_variadic;
+// the width of the bit-field member being declared (-1 for
+// none) and whether it has no name; the names of every bit-field
+// declared so far, which expressions are lowered for; and whether the
+// expression being parsed is a whole statement, its value unused.
+static int                     parser_bitfield_width = -1;
+static bool                    parser_bitfield_unnamed;
+static struct vector*          parser_bitfield_names;
+static bool                    parser_expression_is_statement;
+static const struct bitfield*  parser_initializer_bitfield;
+struct parser_vla_block {
+    // The hidden local holding the stack pointer before the block's
+    // first variable-length array, or NULL while it has none.
+    const char* save;
+};
+struct parser_vla_jump {
+    bool is_loop;
+    // The number of blocks open when the loop or switch began.
+    int  depth;
+};
+struct parser_vla {
+    const char* name;
+    // The hidden local holding its size in bytes, for sizeof.
+    const char* size;
+    int         depth;
+};
+// variable-length arrays. parse_array_brackets may leave a
+// runtime size for parse_variable when parser_vla_allowed; the blocks
+// being parsed (struct parser_vla_block), the loops and switches being
+// parsed (struct parser_vla_jump), and the arrays in scope (struct
+// parser_vla).
+static bool                    parser_vla_allowed;
+static struct node*            parser_vla_size;
+static struct vector*          parser_vla_blocks;
+static struct vector*          parser_vla_jumps;
+static struct vector*          parser_vlas;
 // Statements that belong right after the statement being parsed: the
 // stores a local's brace initializer turns into. parse_body takes them.
 static struct vector*          parser_pending_statements;
@@ -356,6 +396,50 @@ static void parser_expect_new_node(size_t count_before, const char* what){
     }
 }
 
+// The code units of the string literal `first` and of the literals
+// right after it, which make one string (C11 5.1.1.2 translation phase
+// 6), the terminating 0 included. *unit_size is 1 for plain strings,
+// else the unit of the wide literal among them; a plain literal next
+// to a wide one is widened (6.4.5p5).
+static struct vector* parser_string_units(struct token* first, int* unit_size, bool* is_wchar){
+    struct vector* tokens = vector_create(sizeof(struct token*));
+    vector_push(tokens, &first);
+    while(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
+        struct token* next = token_next();
+        vector_push(tokens, &next);
+    }
+    *unit_size = DATA_SIZE_BYTE;
+    *is_wchar = false;
+    for(int i = 0; i < vector_count(tokens); i++){
+        struct token* t = *(struct token**)vector_at(tokens, i);
+        if(!t->wide.unit_size){
+            continue;
+        }
+        if(*unit_size != DATA_SIZE_BYTE && (*unit_size != t->wide.unit_size || *is_wchar != t->wide.is_wchar)){
+            compiler_error(current_process, "Adjacent wide string literals of different kinds\n");
+        }
+        *unit_size = t->wide.unit_size;
+        *is_wchar = t->wide.is_wchar;
+    }
+    struct vector* units = vector_create(sizeof(unsigned int));
+    for(int i = 0; i < vector_count(tokens); i++){
+        struct token* t = *(struct token**)vector_at(tokens, i);
+        if(t->wide.unit_size){
+            for(int u = 0; u < t->wide.count; u++){
+                vector_push(units, &t->wide.units[u]);
+            }
+            continue;
+        }
+        for(const char* c = t->sval; *c; c++){
+            unsigned int unit = (unsigned char)*c;
+            vector_push(units, &unit);
+        }
+    }
+    unsigned int zero = 0;
+    vector_push(units, &zero);
+    return units;
+}
+
 static void parse_single_token_to_node(void){
     struct token* token = token_next();
     switch(token->type){
@@ -384,23 +468,19 @@ static void parse_single_token_to_node(void){
             // Adjacent string literals are one string (C11 5.1.1.2
             // translation phase 6): "ab" "cd" is "abcd". The second
             // literal used to end the statement and drop the function.
-            const char* sval = token->sval;
-            struct token* next = token_peek_next();
-            if(next && next->type == TOKEN_TYPE_STRING){
-                struct buffer* joined = buffer_create();
-                for(const char* c = sval; *c; c++){
-                    buffer_write(joined, *c);
-                }
-                while((next = token_peek_next()) && next->type == TOKEN_TYPE_STRING){
-                    token_next();
-                    for(const char* c = next->sval; *c; c++){
-                        buffer_write(joined, *c);
-                    }
-                }
-                buffer_write(joined, 0x00);
-                sval = buffer_ptr(joined);
+            int unit_size;
+            bool is_wchar;
+            struct vector* units = parser_string_units(token, &unit_size, &is_wchar);
+            if(unit_size > DATA_SIZE_BYTE){
+                parser_wide_string_object(units, unit_size, is_wchar);
+                break;
             }
-            node_create(&(struct node){ .type = NODE_TYPE_STRING,     .sval  = sval  });
+            struct buffer* joined = buffer_create();
+            for(int i = 0; i < vector_count(units) - 1; i++){
+                buffer_write(joined, (char)*(unsigned int*)vector_at(units, i));
+            }
+            buffer_write(joined, 0x00);
+            node_create(&(struct node){ .type = NODE_TYPE_STRING,     .sval  = buffer_ptr(joined)  });
             break;
         }
         default:
@@ -989,6 +1069,10 @@ static void parser_scope_new(void){
 static void parser_scope_finish(void){
     scope_finish(current_process);
     parser_enumerators_trim();
+    while(vector_count(parser_vlas)
+          && ((struct parser_vla*)vector_back(parser_vlas))->depth > parser_scope_depth()){
+        vector_pop(parser_vlas);
+    }
 }
 
 // Push a parser_scope_entity (carries node + flags + offset) into
@@ -1261,6 +1345,72 @@ static void parser_datatype_init(struct token* datatype_token,
 // also follow the abstract form, which is what typedef substitution
 // makes of `typedef int (*fn)(int); fn f;`. The type becomes a pointer
 // whose function_return is the base type.
+// Where the parameters of a function declared to return a function
+// pointer start (`int (*f(int))(int)`), for parse_function, or -1.
+static int parser_function_declarator_params = -1;
+// Where parse_function goes on after reading those parameters, or -1.
+static int parser_function_resume = -1;
+
+// A parenthesized parameter list, read and not kept.
+static void parser_skip_parameters(void){
+    expect_op("(");
+    int level = 1;
+    while(level){
+        struct token* token = token_next();
+        if(!token){
+            compiler_error(current_process, "Missing ) after the parameters of a function pointer\n");
+        }
+        if(token_is_operator(token, "(")){
+            level++;
+        } else if(token_is_symbol(token, ')')){
+            level--;
+        }
+    }
+}
+
+// The parameter list of a function pointer's type, `(int, char* s,
+// ...)`: the types, a parameter's array adjusted to a pointer
+// (C11 6.7.6.3p7). `(void)` has none; `()` gives NULL, parameters not
+// specified.
+static struct function_prototype* parser_parameter_types(void){
+    expect_op("(");
+    if(token_next_is_symbol(')')){
+        expect_sym(')');
+        return 0;
+    }
+    struct function_prototype* prototype = calloc(1, sizeof(struct function_prototype));
+    prototype->types = vector_create(sizeof(struct datatype));
+    while(!token_next_is_symbol(')')){
+        if(token_next_is_operator(".")){
+            token_read_dots(3);
+            prototype->variadic = true;
+            break;
+        }
+        struct datatype type;
+        parse_datatype(&type);
+        parser_ignore_int(&type);
+        struct token* name = 0;
+        if(!parse_function_pointer_declarator(&type, &name) && token_is_identifier(token_peek_next())){
+            token_next();
+        }
+        if(token_next_is_operator("[")){
+            parse_array_brackets(history_begin(0));
+            type.flags |= DATATYPE_FLAG_IS_POINTER;
+            type.pointer_depth++;
+        }
+        bool is_void = type.type == DATA_TYPE_VOID && !(type.flags & DATATYPE_FLAG_IS_POINTER);
+        if(!is_void){
+            vector_push(prototype->types, &type);
+        }
+        if(!token_next_is_operator(",")){
+            break;
+        }
+        token_next();
+    }
+    expect_sym(')');
+    return prototype;
+}
+
 static bool parse_function_pointer_declarator(struct datatype* dtype, struct token** name_out){
     if(!token_next_is_operator("(")){
         return false;
@@ -1283,26 +1433,24 @@ static bool parse_function_pointer_declarator(struct datatype* dtype, struct tok
     if(token_next_is_operator("[")){
         brackets = parse_array_brackets(history_begin(0));
     }
-    expect_sym(')');
-    expect_op("(");
-    int level = 1;
-    while(level){
-        struct token* token = token_next();
-        if(!token){
-            compiler_error(current_process, "Missing ) after the parameters of a function pointer\n");
-        }
-        if(token_is_operator(token, "(")){
-            level++;
-        } else if(token_is_symbol(token, ')')){
-            level--;
-        }
+    // `int (*f(int x))(int)`: f is a function, with the parameters
+    // right after its name, returning the function pointer. They are
+    // skipped here and parsed by parse_function.
+    if(name && token_next_is_operator("(")){
+        parser_function_declarator_params = current_process->token_vec->pindex;
+        parser_skip_parameters();
     }
+    expect_sym(')');
+    // A call through the pointer converts its arguments to these
+    // types and checks their number.
+    struct function_prototype* prototype = parser_parameter_types();
 
     struct datatype* function_return = calloc(1, sizeof(struct datatype));
     *function_return = *dtype;
     dtype->flags |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_FUNCTION_POINTER;
     dtype->pointer_depth   = function_return->pointer_depth + depth;
     dtype->function_return = function_return;
+    dtype->function_params = prototype;
     if(brackets){
         dtype->array.brackets = brackets;
         dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
@@ -1521,7 +1669,251 @@ static void parser_convert_bool_assignments(struct node* node){
     node->exp.right = parser_bool_value(node->exp.right);
 }
 
+// ---------------------------------------------------------------
+// bit-field access. A bit-field member is a member of its
+// declared type at the offset of the unit that holds it, so the
+// backends read and write that whole unit; the finished expression is
+// rewritten here so that a read takes the field's bits out of the unit
+// and a store puts them into it. The rewritten member access is marked
+// NODE_FLAG_BITFIELD_UNIT and stands for the unit from then on.
+// ---------------------------------------------------------------
+
+static struct datatype parser_bitfield_int_type(int size, bool is_signed){
+    struct datatype t = {0};
+    t.type     = size == 1 ? DATA_TYPE_CHAR : size == 2 ? DATA_TYPE_SHORT : size == 4 ? DATA_TYPE_INTEGER : DATA_TYPE_LONG;
+    t.type_str = size == 1 ? "char" : size == 2 ? "short" : size == 4 ? "int" : "long";
+    t.size     = size;
+    t.flags    = is_signed ? DATATYPE_FLAG_IS_SIGNED : 0;
+    return t;
+}
+
+static struct node* parser_bitfield_parens(struct node* node){
+    make_exp_parentheses_node(node);
+    return node_pop();
+}
+
+static struct node* parser_bitfield_binary(struct node* left, struct node* right, const char* op){
+    make_exp_node(left, right, op);
+    return parser_bitfield_parens(node_pop());
+}
+
+static struct node* parser_bitfield_cast(struct datatype* type, struct node* operand){
+    make_cast_node(type, operand);
+    return parser_bitfield_parens(node_pop());
+}
+
+static struct node* parser_bitfield_number(unsigned long long value, struct datatype* type){
+    struct constant c = { value, *type };
+    return constant_node(&c);
+}
+
+// The type of a call of a function defined or declared above
+// (`make(1).bits`), which the resolver does not know while parsing.
+static bool parser_call_type(struct node* node, struct datatype* out){
+    while(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        node = node->parenthesis.exp;
+    }
+    if(node->type != NODE_TYPE_EXPRESSION || !S_EQ(node->exp.op, "()") || node->exp.left->type != NODE_TYPE_IDENTIFIER){
+        return false;
+    }
+    struct vector* tree = current_process->node_tree_vec;
+    for(int i = vector_count(tree) - 1; i >= 0; i--){
+        struct node* function = *(struct node**)vector_at(tree, i);
+        if(function->type == NODE_TYPE_FUNCTION && S_EQ(function->func.name, node->exp.left->sval)){
+            *out = function->func.rtype;
+            return true;
+        }
+    }
+    return false;
+}
+
+// The bit-field member `node` accesses, or NULL when it is no bit-field
+// access. Only a member named like some bit-field is looked at.
+static struct node* parser_bitfield_member(struct node* node){
+    if(node->type != NODE_TYPE_EXPRESSION || !is_access_node(node) || (node->flags & NODE_FLAG_BITFIELD_UNIT)
+       || node->exp.right->type != NODE_TYPE_IDENTIFIER || !parser_name_in(parser_bitfield_names, node->exp.right->sval)){
+        return 0;
+    }
+    struct datatype type;
+    if(!parser_call_type(node->exp.left, &type) && !parser_expression_type(node->exp.left, &type)){
+        compiler_error(current_process, "Cannot work out the struct of the bit-field %s\n", node->exp.right->sval);
+    }
+    struct node* su = type.struct_node;
+    if(!datatype_is_struct_or_union(&type) || !su || !su->_struct.body_n){
+        return 0;
+    }
+    struct vector* statements = su->_struct.body_n->body.statements;
+    for(int i = 0; i < vector_count(statements); i++){
+        struct node* statement = *(struct node**)vector_at(statements, i);
+        struct vector* list = statement->type == NODE_TYPE_VARIABLE_LIST ? statement->var_list.list : 0;
+        int count = list ? vector_count(list) : 1;
+        for(int j = 0; j < count; j++){
+            struct node* member = list ? *(struct node**)vector_at(list, j) : statement;
+            if(member->type == NODE_TYPE_VARIABLE && member->var.name && S_EQ(member->var.name, node->exp.right->sval)){
+                return member->var.bitfield.is_bitfield ? member : 0;
+            }
+        }
+    }
+    return 0;
+}
+
+// The unit the bit-field `member` lives in, through the access `node`.
+static struct node* parser_bitfield_unit(struct node* access){
+    struct node* unit = calloc(1, sizeof(struct node));
+    *unit = *access;
+    unit->flags |= NODE_FLAG_BITFIELD_UNIT;
+    return unit;
+}
+
+// The value of the field `member` in the unit value `unit`: shifted up
+// to the top of the unit, then down, arithmetically for a signed field.
+// A field narrower than int is an int (C11 6.3.1.1p2).
+static struct node* parser_bitfield_extract(struct node* unit, struct node* member){
+    struct datatype* type = &member->var.type;
+    int size  = (int)datatype_size(type);
+    int width = member->var.bitfield.width;
+    bool is_signed = (type->flags & DATATYPE_FLAG_IS_SIGNED) && !(type->flags & DATATYPE_FLAG_IS_BOOL);
+    struct datatype utype = parser_bitfield_int_type(size, false);
+    struct datatype stype = parser_bitfield_int_type(size, true);
+    struct datatype itype = datatype_for_int();
+    int up   = size * 8 - member->var.bitfield.bit_offset - width;
+    int down = size * 8 - width;
+    struct node* value = parser_bitfield_cast(&utype, unit);
+    if(up){
+        value = parser_bitfield_cast(&utype, parser_bitfield_binary(value, parser_bitfield_number(up, &itype), "<<"));
+    }
+    if(is_signed){
+        value = parser_bitfield_cast(&stype, value);
+    }
+    if(down){
+        value = parser_bitfield_binary(value, parser_bitfield_number(down, &itype), ">>");
+    }
+    if(width < 32 && size <= DATA_SIZE_DWORD){
+        return parser_bitfield_cast(&itype, value);
+    }
+    return parser_bitfield_cast(type, value);
+}
+
+// `unit = ((value << offset) & mask) | (unit & ~mask)`, in the unit's
+// unsigned type. `read` and `write` are two copies of the unit's access.
+// The value comes first, so the unit is read after anything the value
+// stores (another field of the same unit, `s.y = (s.x = 1) + 1`).
+static struct node* parser_bitfield_store(struct node* read, struct node* write, struct node* member, struct node* value){
+    int size  = (int)datatype_size(&member->var.type);
+    int width = member->var.bitfield.width;
+    int shift = member->var.bitfield.bit_offset;
+    struct datatype utype = parser_bitfield_int_type(size, false);
+    struct datatype itype = datatype_for_int();
+    struct datatype mtype = size > DATA_SIZE_DWORD ? utype : parser_bitfield_int_type(DATA_SIZE_DWORD, false);
+    unsigned long long ones = width >= 64 ? ~0ULL : ((1ULL << width) - 1);
+    unsigned long long mask = ones << shift;
+    unsigned long long all  = size >= 8 ? ~0ULL : ((1ULL << (size * 8)) - 1);
+    struct node* kept = parser_bitfield_binary(parser_bitfield_cast(&utype, read),
+        parser_bitfield_number(all & ~mask, &mtype), "&");
+    struct node* bits = parser_bitfield_cast(&utype, value);
+    if(shift){
+        bits = parser_bitfield_binary(bits, parser_bitfield_number(shift, &itype), "<<");
+    }
+    bits = parser_bitfield_binary(bits, parser_bitfield_number(mask, &mtype), "&");
+    struct node* unit_value = parser_bitfield_cast(&utype, parser_bitfield_binary(bits, kept, "|"));
+    make_exp_node(write, unit_value, "=");
+    return node_pop();
+}
+
+static struct node* parser_lower_bitfields(struct node* node, bool value_used);
+
+// `access op= value`, `++access`, `access--`: a store of the new value,
+// and the expression's value when it is used.
+static struct node* parser_bitfield_assignment(struct node* access, struct node* member, const char* op,
+                                               struct node* value, bool postfix, bool value_used){
+    struct node* new_value = value;
+    if(!S_EQ(op, "=")){
+        char* arith = strdup(op);
+        arith[strlen(arith) - 1] = '\0';
+        struct node* old = parser_bitfield_extract(parser_bitfield_unit(access), member);
+        new_value = parser_bitfield_binary(old, value, arith);
+    }
+    struct node* store = parser_bitfield_store(parser_bitfield_unit(access), parser_bitfield_unit(access), member, new_value);
+    if(!value_used){
+        return store;
+    }
+    // The store's value is the new unit: the field's bits of it.
+    struct node* result = parser_bitfield_extract(parser_bitfield_parens(store), member);
+    if(postfix){
+        // The old value, the new one stepped back in the field's width.
+        struct datatype itype = datatype_for_int();
+        bool up = S_EQ(op, "+=");
+        struct node* back = parser_bitfield_binary(result, parser_bitfield_number(1, &itype), up ? "-" : "+");
+        struct node* wrapped = calloc(1, sizeof(struct node));
+        *wrapped = *member;
+        wrapped->var.bitfield.bit_offset = 0;
+        wrapped->var.type = parser_bitfield_int_type(DATA_SIZE_DWORD, (member->var.type.flags & DATATYPE_FLAG_IS_SIGNED) != 0);
+        if(datatype_size(&member->var.type) > DATA_SIZE_DWORD){
+            wrapped->var.type = member->var.type;
+        }
+        result = parser_bitfield_extract(back, wrapped);
+    }
+    return result;
+}
+
+static struct node* parser_lower_bitfields(struct node* node, bool value_used){
+    if(!node){
+        return node;
+    }
+    switch(node->type){
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            node->parenthesis.exp = parser_lower_bitfields(node->parenthesis.exp, value_used);
+            return node;
+        case NODE_TYPE_CAST:
+            node->cast.operand = parser_lower_bitfields(node->cast.operand, true);
+            return node;
+        case NODE_TYPE_TENARY:
+            node->tenary.true_node  = parser_lower_bitfields(node->tenary.true_node, value_used);
+            node->tenary.false_node = parser_lower_bitfields(node->tenary.false_node, value_used);
+            return node;
+        case NODE_TYPE_BRACKET:
+            node->bracket.inner = parser_lower_bitfields(node->bracket.inner, true);
+            return node;
+        case NODE_TYPE_UNARY: {
+            struct node* member = parser_bitfield_member(node->unary.operand);
+            if(member && is_increment_operator(node->unary.op)){
+                struct datatype itype = datatype_for_int();
+                return parser_bitfield_assignment(node->unary.operand, member, S_EQ(node->unary.op, "++") ? "+=" : "-=",
+                    parser_bitfield_number(1, &itype), node->unary.flags & UNARY_FLAG_IS_POSTFIX, value_used);
+            }
+            if(member && op_is_address(node->unary.op)){
+                compiler_error(current_process, "Cannot take the address of the bit-field %s\n", member->var.name);
+            }
+            node->unary.operand = parser_lower_bitfields(node->unary.operand, true);
+            return node;
+        }
+        case NODE_TYPE_EXPRESSION:
+            break;
+        default:
+            return node;
+    }
+    if(is_node_assignment(node)){
+        struct node* member = parser_bitfield_member(node->exp.left);
+        if(member){
+            struct node* value = parser_lower_bitfields(node->exp.right, true);
+            return parser_bitfield_assignment(node->exp.left, member, node->exp.op, value, false, value_used);
+        }
+    }
+    struct node* member = parser_bitfield_member(node);
+    if(member){
+        return parser_bitfield_extract(parser_bitfield_unit(node), member);
+    }
+    node->exp.left = parser_lower_bitfields(node->exp.left, S_EQ(node->exp.op, ",") ? false : true);
+    if(!is_access_node(node)){
+        node->exp.right = parser_lower_bitfields(node->exp.right, S_EQ(node->exp.op, ",") ? value_used : true);
+    }
+    return node;
+}
+
 static void parse_expressionable_root(struct history* history){
+    // Only the outermost expression of a statement has its value unused.
+    bool is_statement = parser_expression_is_statement;
+    parser_expression_is_statement = false;
     size_t count_before = node_count();
     parse_expressionable(history);
     parser_expect_new_node(count_before, "an expression");
@@ -1529,6 +1921,9 @@ static void parse_expressionable_root(struct history* history){
     // Only a program that declares a _Bool can assign to one.
     if(parser_saw_bool){
         parser_convert_bool_assignments(result_node);
+    }
+    if(vector_count(parser_bitfield_names)){
+        result_node = parser_lower_bitfields(result_node, !is_statement);
     }
     node_push(result_node);
 }
@@ -1651,18 +2046,45 @@ static void parser_scope_offset_for_global(struct node* node, struct history* hi
 // array counts every element), rounded up to its own alignment. This
 // offset is the one member access uses (struct_offset). It used to add
 // the previous member's element size, and to align only scalars.
+// Where a member ends, in bits: a bit-field at its last bit.
+static int parser_member_end_bits(struct node* member){
+    if(member->var.bitfield.is_bitfield){
+        return member->var.aoffset * 8 + member->var.bitfield.bit_offset + member->var.bitfield.width;
+    }
+    return (member->var.aoffset + (int)variable_size(member)) * 8;
+}
+
 static void parser_scope_offset_for_structure(struct node* node, struct history* history){
     (void)history;
-    int offset = 0;
+    int end_bits = 0;
     // the previous member of this struct only. scope_last_entity
     // also searches the enclosing scopes, so the first member came
     // after the last global (`int g; struct s { long a; };` gave the
     // struct 4 bytes of padding plus alignment in its size).
     struct parser_scope_entity* last_entity = vector_back_ptr_or_null(current_process->scope.current->entities);
     if(last_entity){
-        struct node* last = variable_node(last_entity->node);
-        offset = last->var.aoffset + (int)variable_size(last);
+        end_bits = parser_member_end_bits(variable_node(last_entity->node));
     }
+    if(node->var.bitfield.is_bitfield){
+        // The psABIs' rule: the bit-field goes right after the
+        // previous member when it fits in the unit of its own type that
+        // holds that bit, else at the start of the next unit; a width
+        // of 0 only moves to the next unit. aoffset is the unit's
+        // offset, and the unit may hold earlier members too.
+        int unit_bits  = (int)datatype_size(&node->var.type) * 8;
+        int align_bits = (int)datatype_alignment(&node->var.type) * 8;
+        int unit = end_bits / align_bits * align_bits;
+        int start = end_bits;
+        if(node->var.bitfield.width == 0 ? end_bits != unit : end_bits + node->var.bitfield.width > unit + unit_bits){
+            unit  = align_value(end_bits, align_bits);
+            start = unit;
+        }
+        node->var.padding = 0;
+        node->var.aoffset = unit / 8;
+        node->var.bitfield.bit_offset = start - unit;
+        return;
+    }
+    int offset = (end_bits + 7) / 8;
     int aligned = align_value(offset, (int)datatype_alignment(&node->var.type));
     node->var.padding = aligned - offset;
     node->var.aoffset = aligned;
@@ -1697,6 +2119,17 @@ static void make_variable_node_and_register(struct history* history,
     make_variable_node(dtype, name_token, value_node);
     struct node* var_node = node_pop();
     parser_enumerator_hide(name_token ? name_token->sval : 0);
+    if(parser_bitfield_width >= 0){
+        // The width parse_variable read; the layout needs it below.
+        var_node->var.bitfield.is_bitfield = true;
+        var_node->var.bitfield.width       = parser_bitfield_width;
+        var_node->var.bitfield.unnamed     = parser_bitfield_unnamed;
+        if(!parser_bitfield_unnamed){
+            vector_push(parser_bitfield_names, &var_node->var.name);
+        }
+        parser_bitfield_width   = -1;
+        parser_bitfield_unnamed = false;
+    }
 
     // Only assign a stack offset if we're inside some non-global
     // scope (a function body / struct body). Global vars get offset 0
@@ -1780,6 +2213,9 @@ static struct node* parser_bracket_of(size_t n){
 
 static struct array_brackets* parse_array_brackets(struct history* history){
     struct array_brackets* brackets = array_brackets_new();
+    // For this declarator only, not one inside its size expression.
+    bool vla_allowed = parser_vla_allowed;
+    parser_vla_allowed = false;
     while(token_next_is_operator("[")){
         expect_op("[");
         if(token_is_symbol(token_peek_next(), ']')){
@@ -1797,7 +2233,17 @@ static struct array_brackets* parse_array_brackets(struct history* history){
         expect_sym(']');
 
         // The size is a constant expression: `int a[N * 2]`, `char
-        // s[sizeof(int) + 1]`. Variable-length arrays are not supported.
+        // s[sizeof(int) + 1]`. A local may have one runtime size, a
+        // variable-length array, which parse_variable takes.
+        struct constant size;
+        if(vla_allowed && vector_count(brackets->n_brackets) == 0
+           && !constant_fold(current_process, node_peek(), &size)){
+            parser_vla_size = node_pop();
+            if(token_next_is_operator("[")){
+                compiler_error(current_process, "Only a one-dimensional variable-length array is supported\n");
+            }
+            break;
+        }
         struct node* exp_node = parser_fold_required(node_pop(), "An array size");
         make_bracket_node(exp_node);
 
@@ -1860,13 +2306,19 @@ static struct vector* parser_struct_members(struct datatype* type){
         compiler_error(current_process, "Cannot initialize an incomplete struct or union\n");
     }
     struct vector* statements = su->_struct.body_n->body.statements;
+    // An unnamed bit-field is not a member an initializer sets.
     for(int i = 0; i < vector_count(statements); i++){
         struct node* statement = *(struct node**)vector_at(statements, i);
         if(statement->type == NODE_TYPE_VARIABLE){
-            vector_push(members, &statement);
+            if(!statement->var.bitfield.unnamed){
+                vector_push(members, &statement);
+            }
         } else if(statement->type == NODE_TYPE_VARIABLE_LIST){
             for(int j = 0; j < vector_count(statement->var_list.list); j++){
-                vector_push(members, vector_at(statement->var_list.list, j));
+                struct node* member = *(struct node**)vector_at(statement->var_list.list, j);
+                if(!member->var.bitfield.unnamed){
+                    vector_push(members, &member);
+                }
             }
         }
     }
@@ -1876,6 +2328,7 @@ static struct vector* parser_struct_members(struct datatype* type){
 // Element `index` of an aggregate: its type and offset from the start.
 static void parser_aggregate_element(struct datatype* type, struct vector* members, size_t index,
                                      struct datatype* element_out, size_t* offset_out){
+    parser_initializer_bitfield = 0;
     if(type->flags & DATATYPE_FLAG_IS_ARRAY){
         *element_out = parser_array_element_type(type);
         *offset_out  = index * datatype_size(element_out);
@@ -1884,6 +2337,11 @@ static void parser_aggregate_element(struct datatype* type, struct vector* membe
     struct node* member = *(struct node**)vector_at(members, index);
     *element_out = member->var.type;
     *offset_out  = member->var.aoffset;
+    // The value parse_initializer_value reads next sets only the
+    // member's bits of the unit at that offset.
+    if(member->var.bitfield.is_bitfield){
+        parser_initializer_bitfield = &member->var.bitfield;
+    }
 }
 
 static void parser_add_leaf(struct vector* leaves, size_t offset, struct datatype* type, struct node* value){
@@ -1891,37 +2349,56 @@ static void parser_add_leaf(struct vector* leaves, size_t offset, struct datatyp
     vector_push(leaves, &leaf);
 }
 
-// `char s[N] = "abc"`: one leaf per byte, the NUL included when it
-// fits. Returns the number of chars the string needs with its NUL.
+// `char s[N] = "abc"`, `wchar_t w[] = L"abc"`: one leaf per code unit,
+// the terminating 0 included when it fits. Returns the number of units
+// the string needs with its 0.
 static size_t parser_string_initializer(struct datatype* type, size_t offset, struct vector* leaves){
-    struct token* token = token_next();
-    struct buffer* joined = buffer_create();
-    for(const char* c = token->sval; *c; c++){
-        buffer_write(joined, *c);
-    }
-    while(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
-        for(const char* c = token_next()->sval; *c; c++){
-            buffer_write(joined, *c);
+    int unit_size;
+    bool is_wchar;
+    struct vector* units = parser_string_units(token_next(), &unit_size, &is_wchar);
+    size_t needed = vector_count(units);
+    if(unit_size == DATA_SIZE_BYTE){
+        // A plain string ends at its first NUL, as everywhere else.
+        needed = 0;
+        while(*(unsigned int*)vector_at(units, needed)){
+            needed++;
         }
+        needed++;
     }
-    buffer_write(joined, 0x00);
-    const char* str = buffer_ptr(joined);
-    size_t needed = strlen(str) + 1;
     size_t length = parser_array_length(type);
     size_t count  = length ? (needed < length ? needed : length) : needed;
     struct datatype element = parser_array_element_type(type);
     for(size_t i = 0; i < count; i++){
-        struct constant c = { (unsigned char)str[i], datatype_for_int() };
-        parser_add_leaf(leaves, offset + i, &element, constant_node(&c));
+        struct constant c = { *(unsigned int*)vector_at(units, i), datatype_for_int() };
+        parser_add_leaf(leaves, offset + i * unit_size, &element, constant_node(&c));
     }
     return needed;
 }
 
-static bool parser_is_char_array(struct datatype* type){
+// A string literal initializes a one-dimensional array of its code
+// units (C11 6.7.9p14-15): "" a char array, L"" and U"" an array of
+// 4-byte integers (wchar_t, char32_t), u"" one of 2-byte ones.
+static bool parser_is_string_array(struct datatype* type){
+    struct token* next = token_peek_next();
+    if(!next || next->type != TOKEN_TYPE_STRING){
+        return false;
+    }
+    // The first wide literal of the run decides the unit.
+    int unit = DATA_SIZE_BYTE;
+    vector_save(current_process->token_vec);
+    while(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
+        struct token* t = token_next();
+        if(t->wide.unit_size){
+            unit = t->wide.unit_size;
+            break;
+        }
+    }
+    vector_restore(current_process->token_vec);
     return (type->flags & DATATYPE_FLAG_IS_ARRAY) && type->array.brackets
         && vector_count(type->array.brackets->n_brackets) <= 1
-        && datatype_element_size(type) == DATA_SIZE_BYTE
-        && !(type->flags & DATATYPE_FLAG_IS_POINTER);
+        && datatype_element_size(type) == (size_t)unit
+        && !(type->flags & DATATYPE_FLAG_IS_POINTER)
+        && !datatype_is_struct_or_union(type);
 }
 
 static bool parser_next_is_designator(void){
@@ -2041,15 +2518,17 @@ static size_t parse_initializer_elements(struct datatype* type, size_t offset, s
 
 // The initializer of one object of `type` at `offset`.
 static void parse_initializer_value(struct datatype* type, size_t offset, struct vector* leaves){
-    bool next_is_string = token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING;
+    const struct bitfield* bitfield = parser_initializer_bitfield;
+    parser_initializer_bitfield = 0;
     if(token_next_is_symbol('{')){
         expect_sym('{');
-        if(parser_is_char_array(type) && token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
+        if(parser_is_string_array(type)){
             parser_string_initializer(type, offset, leaves);
         } else if(parser_is_aggregate(type)){
             parse_initializer_elements(type, offset, leaves, true);
         } else if(!token_next_is_symbol('}')){
             // `int x = { 5 };`
+            parser_initializer_bitfield = bitfield;
             parse_initializer_value(type, offset, leaves);
         }
         if(token_next_is_operator(",")){
@@ -2058,7 +2537,7 @@ static void parse_initializer_value(struct datatype* type, size_t offset, struct
         expect_sym('}');
         return;
     }
-    if(parser_is_char_array(type) && next_is_string){
+    if(parser_is_string_array(type)){
         parser_string_initializer(type, offset, leaves);
         return;
     }
@@ -2082,6 +2561,11 @@ static void parse_initializer_value(struct datatype* type, size_t offset, struct
         value = parser_bool_value(value);
     }
     parser_add_leaf(leaves, offset, type, value);
+    if(bitfield){
+        struct initializer_leaf* leaf = vector_back(leaves);
+        leaf->bit_offset = bitfield->bit_offset;
+        leaf->bit_width  = bitfield->width;
+    }
 }
 
 // Reads the initializer after `=` for a variable of `type`. An unsized
@@ -2090,12 +2574,11 @@ static struct vector* parse_initializer(struct datatype* type){
     struct vector* leaves = vector_create(sizeof(struct initializer_leaf));
     bool unsized = (type->flags & DATATYPE_FLAG_IS_ARRAY) && parser_array_length(type) == 0;
     size_t length = 0;
-    bool next_is_string = token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING;
-    if(parser_is_char_array(type) && next_is_string){
+    if(parser_is_string_array(type)){
         length = parser_string_initializer(type, 0, leaves);
     } else if(token_next_is_symbol('{') && (type->flags & DATATYPE_FLAG_IS_ARRAY)){
         expect_sym('{');
-        if(parser_is_char_array(type) && token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING){
+        if(parser_is_string_array(type)){
             length = parser_string_initializer(type, 0, leaves);
             if(token_next_is_operator(",")){
                 token_next();
@@ -2127,29 +2610,92 @@ static struct vector* parse_initializer(struct datatype* type){
 
 // Sorted by offset; a later leaf replaces an earlier one it overlaps
 // (`{ [0] = 1, [0] = 2 }` keeps 2).
+// The bits a leaf sets: a bit-field only its own.
+static void parser_leaf_bits(struct initializer_leaf* leaf, size_t* start, size_t* end){
+    *start = leaf->offset * 8 + leaf->bit_offset;
+    *end   = leaf->bit_width ? *start + leaf->bit_width : (leaf->offset + datatype_size(&leaf->type)) * 8;
+}
+
 static struct vector* parser_sorted_leaves(struct vector* leaves){
     struct vector* sorted = vector_create(sizeof(struct initializer_leaf));
     int n = vector_count(leaves);
     for(int i = 0; i < n; i++){
         struct initializer_leaf* leaf = vector_at(leaves, i);
-        size_t start = leaf->offset;
-        size_t end   = start + datatype_size(&leaf->type);
+        size_t start, end;
+        parser_leaf_bits(leaf, &start, &end);
         bool overwritten = false;
         for(int j = i + 1; j < n && !overwritten; j++){
             struct initializer_leaf* later = vector_at(leaves, j);
-            size_t later_end = later->offset + datatype_size(&later->type);
-            overwritten = later->offset < end && start < later_end;
+            size_t later_start, later_end;
+            parser_leaf_bits(later, &later_start, &later_end);
+            overwritten = later_start < end && start < later_end;
         }
         if(overwritten){
             continue;
         }
         int at = vector_count(sorted);
-        while(at > 0 && ((struct initializer_leaf*)vector_at(sorted, at - 1))->offset > start){
+        while(at > 0 && ((struct initializer_leaf*)vector_at(sorted, at - 1))->offset > leaf->offset){
             at--;
         }
         vector_push_at(sorted, at, leaf);
     }
     return sorted;
+}
+
+// The folded bit-field leaves of a global as the bytes they set
+//: fields share bytes, and a field's unit may hold earlier
+// members, so neither can be written as a value of the unit's type.
+// The bytes go in offset order among the other leaves.
+static struct vector* parser_global_bitfield_bytes(struct vector* sorted){
+    struct vector* bytes = vector_create(sizeof(struct initializer_leaf));
+    struct vector* values = vector_create(sizeof(unsigned int));
+    for(int i = 0; i < vector_count(sorted); i++){
+        struct initializer_leaf* leaf = vector_at(sorted, i);
+        if(!leaf->bit_width){
+            continue;
+        }
+        unsigned long long value = leaf->value->llnum;
+        for(int bit = 0; bit < leaf->bit_width; bit++){
+            if(!((value >> bit) & 1)){
+                continue;
+            }
+            size_t position = leaf->offset * 8 + leaf->bit_offset + bit;
+            int found = -1;
+            for(int b = 0; b < vector_count(bytes); b++){
+                if(((struct initializer_leaf*)vector_at(bytes, b))->offset == position / 8){
+                    found = b;
+                }
+            }
+            if(found < 0){
+                struct initializer_leaf byte = { .offset = position / 8,
+                    .type = (struct datatype){ .type = DATA_TYPE_CHAR, .size = DATA_SIZE_BYTE, .type_str = "char" } };
+                unsigned int zero = 0;
+                vector_push(bytes, &byte);
+                vector_push(values, &zero);
+                found = vector_count(bytes) - 1;
+            }
+            *(unsigned int*)vector_at(values, found) |= 1u << (position % 8);
+        }
+    }
+    struct vector* merged = vector_create(sizeof(struct initializer_leaf));
+    for(int i = 0; i < vector_count(sorted); i++){
+        struct initializer_leaf* leaf = vector_at(sorted, i);
+        if(!leaf->bit_width){
+            vector_push(merged, leaf);
+        }
+    }
+    struct datatype char_type = { .type = DATA_TYPE_CHAR, .size = DATA_SIZE_BYTE, .type_str = "char" };
+    for(int b = 0; b < vector_count(bytes); b++){
+        struct initializer_leaf* byte = vector_at(bytes, b);
+        struct constant c = { *(unsigned int*)vector_at(values, b), char_type };
+        byte->value = constant_node(&c);
+        int at = vector_count(merged);
+        while(at > 0 && ((struct initializer_leaf*)vector_at(merged, at - 1))->offset > byte->offset){
+            at--;
+        }
+        vector_push_at(merged, at, byte);
+    }
+    return merged;
 }
 
 // A global's leaves must be constants, string literals for pointers,
@@ -2180,6 +2726,7 @@ static struct node* parser_global_initializer_node(struct token* name_token, str
         c.type  = leaf->type;
         leaf->value = constant_node(&c);
     }
+    sorted = parser_global_bitfield_bytes(sorted);
     node_create(&(struct node){ .type = NODE_TYPE_INITIALIZER, .init.leaves = sorted });
     return node_pop();
 }
@@ -2234,7 +2781,8 @@ static void parser_lower_local_initializer(const char* name, struct datatype* ty
     for(int i = 0; i < vector_count(sorted); i++){
         struct initializer_leaf* leaf = vector_at(sorted, i);
         size_t end = leaf->offset + datatype_size(&leaf->type);
-        for(size_t b = leaf->offset; b < end && b < size; b++){
+        // A bit-field's bytes are zeroed first, then its bits stored.
+        for(size_t b = leaf->offset; b < end && b < size && !leaf->bit_width; b++){
             covered[b] = 1;
         }
     }
@@ -2259,6 +2807,16 @@ static void parser_lower_local_initializer(const char* name, struct datatype* ty
     free(covered);
     for(int i = 0; i < vector_count(sorted); i++){
         struct initializer_leaf* leaf = vector_at(sorted, i);
+        if(leaf->bit_width){
+            // only the field's bits of its unit.
+            struct node member = { .type = NODE_TYPE_VARIABLE };
+            member.var.type = leaf->type;
+            member.var.bitfield = (struct bitfield){ .is_bitfield = true, .width = leaf->bit_width, .bit_offset = leaf->bit_offset };
+            struct node* store = parser_bitfield_store(parser_object_at(name, leaf->offset, &leaf->type),
+                parser_object_at(name, leaf->offset, &leaf->type), &member, leaf->value);
+            vector_push(parser_pending_statements, &store);
+            continue;
+        }
         parser_pending_store(name, leaf->offset, &leaf->type, leaf->value);
     }
 }
@@ -2295,6 +2853,198 @@ static void parse_compound_literal(struct datatype* dtype){
             vector_pop(parser_pending_statements);
         }
     }
+    node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = name });
+}
+
+// ---------------------------------------------------------------
+// variable-length arrays. `T a[n];` in a function becomes a
+// `T* a` pointing at n * sizeof(T) bytes taken off the stack by
+// __builtin_vla_alloc, and sizeof(a) the hidden local those bytes were
+// counted into. The block's first one saves the stack pointer
+// (__builtin_vla_save) and the block gives it back at its end
+// (__builtin_vla_restore), so a loop does not grow the stack; break
+// and continue give back the blocks they leave.
+// ---------------------------------------------------------------
+
+static struct token* parser_hidden_name(const char* format, int number){
+    char* name = malloc(48);
+    sprintf(name, format, number);
+    struct token* token = calloc(1, sizeof(struct token));
+    token->type = TOKEN_TYPE_IDENTIFIER;
+    token->sval = name;
+    token->pos  = current_process->pos;
+    return token;
+}
+
+static struct node* parser_identifier(const char* name){
+    node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = name });
+    return node_pop();
+}
+
+// `name(argument)`, or `name()` without one.
+static struct node* parser_builtin_call(const char* name, struct node* argument){
+    make_exp_parentheses_node(argument ? argument : parser_blank_node);
+    struct node* arguments = node_pop();
+    make_exp_node(parser_identifier(name), arguments, "()");
+    return node_pop();
+}
+
+static void parser_vla_natives(void){
+    static const char* names[] = { "__builtin_vla_save", "__builtin_vla_alloc", "__builtin_vla_restore" };
+    static NATIVE_FUNCTION_CALL calls[] = { codegen_x86_native_vla_save, codegen_x86_native_vla_alloc, codegen_x86_native_vla_restore };
+    for(int i = 0; i < 3; i++){
+        if(!native_function_get(current_process, names[i])){
+            native_create_function(current_process, names[i], &(struct native_function_callbacks){ .call = calls[i] });
+        }
+    }
+}
+
+// A hidden local of `type`, declared before the current statement.
+static void parser_hidden_local(struct token* name, struct datatype* type){
+    make_variable_node_and_register(history_begin(0), type, name, 0);
+    struct node* var_node = node_pop();
+    vector_push(parser_preceding_statements, &var_node);
+}
+
+static void parser_declare_vla(struct datatype* dtype, struct token* name_token, struct node* size, struct history* history){
+    static int count = 0;
+    int number = count++;
+    if(token_next_is_operator("=")){
+        compiler_error(current_process, "The variable-length array %s cannot be initialized\n", name_token->sval);
+    }
+    if(!vector_count(parser_vla_blocks)){
+        compiler_error(current_process, "A variable-length array must be in a block\n");
+    }
+    parser_vla_natives();
+    struct datatype element = *dtype;
+    struct datatype size_type = datatype_for_int();
+    size_type.type = DATA_TYPE_LONG;
+    size_type.type_str = "long";
+    size_type.size = current_process->target->long_size;
+    size_type.flags = 0;
+
+    // __vla_size_N = (unsigned long)(n) * sizeof(T);
+    struct token* size_name = parser_hidden_name("__vla_size_%i", number);
+    parser_hidden_local(size_name, &size_type);
+    struct constant element_size = { datatype_size(&element), size_type };
+    make_cast_node(&size_type, size);
+    make_exp_parentheses_node(node_pop());
+    make_exp_node(node_pop(), constant_node(&element_size), "*");
+    make_exp_node(parser_identifier(size_name->sval), node_pop(), "=");
+    struct node* set_size = node_pop();
+
+    // The block's first: __vla_save_N = __builtin_vla_save();
+    struct parser_vla_block* block = vector_back(parser_vla_blocks);
+    struct node* save = 0;
+    if(!block->save){
+        struct token* save_name = parser_hidden_name("__vla_save_%i", number);
+        parser_hidden_local(save_name, &size_type);
+        block->save = save_name->sval;
+        make_exp_node(parser_identifier(save_name->sval), parser_builtin_call("__builtin_vla_save", 0), "=");
+        save = node_pop();
+    }
+
+    // T* a; a = __builtin_vla_alloc(__vla_size_N);
+    struct datatype pointer = parser_pointer_to(&element);
+    make_variable_node_and_register(history, &pointer, name_token, 0);
+    make_exp_node(parser_identifier(name_token->sval),
+        parser_builtin_call("__builtin_vla_alloc", parser_identifier(size_name->sval)), "=");
+    struct node* allocate = node_pop();
+    vector_push(parser_pending_statements, &set_size);
+    if(save){
+        vector_push(parser_pending_statements, &save);
+    }
+    vector_push(parser_pending_statements, &allocate);
+
+    struct parser_vla vla = { .name = name_token->sval, .size = size_name->sval, .depth = parser_scope_depth() };
+    vector_push(parser_vlas, &vla);
+}
+
+// The hidden local holding sizeof of the variable-length array `name`
+// in scope, or NULL.
+static const char* parser_vla_size_of(const char* name){
+    for(int i = vector_count(parser_vlas) - 1; i >= 0; i--){
+        struct parser_vla* vla = vector_at(parser_vlas, i);
+        if(S_EQ(vla->name, name)){
+            return vla->size;
+        }
+    }
+    return 0;
+}
+
+// Before a break or continue: give back the stack of the blocks it
+// leaves, from the outermost one inside the loop (or switch) that has a
+// variable-length array.
+static void parser_vla_leave(bool is_continue){
+    for(int i = vector_count(parser_vla_jumps) - 1; i >= 0; i--){
+        struct parser_vla_jump* jump = vector_at(parser_vla_jumps, i);
+        if(is_continue && !jump->is_loop){
+            continue;
+        }
+        for(int b = jump->depth; b < vector_count(parser_vla_blocks); b++){
+            struct parser_vla_block* block = vector_at(parser_vla_blocks, b);
+            if(block->save){
+                struct node* restore = parser_builtin_call("__builtin_vla_restore", parser_identifier(block->save));
+                vector_push(parser_preceding_statements, &restore);
+                return;
+            }
+        }
+        return;
+    }
+}
+
+static void parser_vla_jump_begin(bool is_loop){
+    struct parser_vla_jump jump = { .is_loop = is_loop, .depth = vector_count(parser_vla_blocks) };
+    vector_push(parser_vla_jumps, &jump);
+}
+
+static void parser_vla_jump_end(void){
+    vector_pop(parser_vla_jumps);
+}
+
+// A wide string literal (L"", u"", U"") is an array of static storage
+// duration (C11 6.4.5p6): a hidden global `__wide_string_N` of its code
+// units, the 0 included, which the expression names, as a compound
+// literal does. Its element type: wchar_t is int (unsigned int on
+// aarch64), char16_t unsigned short, char32_t unsigned int.
+static void parser_wide_string_object(struct vector* units, int unit_size, bool is_wchar){
+    static int count = 0;
+    char* name = malloc(32);
+    sprintf(name, "__wide_string_%i", count++);
+    struct token* name_token = calloc(1, sizeof(struct token));
+    name_token->type = TOKEN_TYPE_IDENTIFIER;
+    name_token->sval = name;
+    name_token->pos  = current_process->pos;
+
+    struct datatype element = {0};
+    if(unit_size == DATA_SIZE_WORD){
+        element.type     = DATA_TYPE_SHORT;
+        element.type_str = "short";
+    } else {
+        element.type     = DATA_TYPE_INTEGER;
+        element.type_str = "int";
+        if(is_wchar && !target_wchar_unsigned(current_process->target)){
+            element.flags = DATATYPE_FLAG_IS_SIGNED;
+        }
+    }
+    element.size = unit_size;
+    struct datatype type = element;
+    type.flags |= DATATYPE_FLAG_IS_ARRAY;
+    type.array.brackets = array_brackets_new();
+    array_brackets_add(type.array.brackets, parser_bracket_of(vector_count(units)));
+    type.array.size = array_brackets_calculate_size(&type, type.array.brackets);
+
+    struct vector* leaves = vector_create(sizeof(struct initializer_leaf));
+    for(int i = 0; i < vector_count(units); i++){
+        struct constant c = { *(unsigned int*)vector_at(units, i), datatype_for_int() };
+        parser_add_leaf(leaves, i * unit_size, &element, constant_node(&c));
+    }
+    make_variable_node(&type, name_token, parser_global_initializer_node(name_token, leaves));
+    struct node* var_node = node_pop();
+    vector_push(current_process->node_tree_vec, &var_node);
+    // sizeof(L"ab") and the type of the expression come from the
+    // resolver, as for a static local.
+    resolver_default_new_scope_entity(current_process->resolver, var_node, 0, 0);
     node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = name });
 }
 
@@ -2350,10 +3100,40 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
 
     // ch44: array brackets, e.g. `int x[4][3];`
     if(token_next_is_operator("[")){
+        parser_vla_allowed = parser_current_function && name_token
+            && current_process->scope.current != current_process->scope.root
+            && !(dtype->flags & (DATATYPE_FLAG_IS_STATIC | DATATYPE_FLAG_IS_EXTERN))
+            && !(history->flags & (HISTORY_FLAG_IS_UPWARD_STACK | HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION));
         struct array_brackets* brackets = parse_array_brackets(history);
+        parser_vla_allowed = false;
+        if(parser_vla_size){
+            struct node* size = parser_vla_size;
+            parser_vla_size = 0;
+            parser_declare_vla(dtype, name_token, size, history);
+            return;
+        }
         dtype->array.brackets = brackets;
         dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
         dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
+    }
+
+    // a bit-field member, `int x : 3;` or `unsigned : 0;`.
+    if((history->flags & (HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION)) && token_next_is_symbol(':')){
+        token_next();
+        parse_expressionable_root(history_begin(HISTORY_FLAG_NO_COMMA_OPERATOR));
+        struct node* width = parser_fold_required(node_pop(), "A bit-field width");
+        long long bits = (long long)width->llnum;
+        if((dtype->flags & (DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_ARRAY)) || datatype_is_struct_or_union(dtype)
+           || dtype->type == DATA_TYPE_VOID){
+            compiler_error(current_process, "A bit-field must have an integer type\n");
+        }
+        if(bits < 0 || bits > (long long)datatype_size(dtype) * 8){
+            compiler_error(current_process, "The bit-field width %lld does not fit its type\n", bits);
+        }
+        if(bits == 0 && !parser_bitfield_unnamed){
+            compiler_error(current_process, "A bit-field of width 0 must have no name\n");
+        }
+        parser_bitfield_width = (int)bits;
     }
 
     bool is_global = current_process->scope.current == current_process->scope.root;
@@ -2366,8 +3146,7 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
     struct vector* leaves = 0;
     if(token_next_is_operator("=")){
         token_next();
-        bool string_for_array = parser_is_char_array(dtype)
-            && token_peek_next() && token_peek_next()->type == TOKEN_TYPE_STRING;
+        bool string_for_array = parser_is_string_array(dtype);
         if(token_next_is_symbol('{') || string_for_array){
             // A brace initializer, or `char s[] = "hi"`, which stored the
             // low byte of the string's address.
@@ -2488,6 +3267,108 @@ static void parser_check_gotos(const char* function){
     }
 }
 
+// After a function's `(`: an identifier list (`f(a, b)`), the
+// parameters of an old-style definition. A type name here is a keyword
+// (typedefs are substituted), so an identifier followed by `,` or `)`
+// is a parameter name.
+static bool parser_next_is_identifier_list(void){
+    if(!token_is_identifier(token_peek_next())){
+        return false;
+    }
+    vector_save(current_process->token_vec);
+    token_next();
+    bool list = token_next_is_operator(",") || token_next_is_symbol(')');
+    vector_restore(current_process->token_vec);
+    return list;
+}
+
+// An old-style (K&R) definition, C11 6.9.1p6: `int f(a, b) char* b;
+// { ... }`. The names, then the declarations before the body give
+// their types, in any order; a name with no declaration is an int, and
+// an array parameter is a pointer. The parameters are made in the
+// order of the names, as parse_function_arguments makes them, and
+// called the same way: the callers' arguments are converted to their
+// types.
+static struct vector* parse_identifier_list_parameters(struct history* history){
+    struct vector* names = vector_create(sizeof(struct token*));
+    while(true){
+        struct token* name = token_next();
+        if(!token_is_identifier(name)){
+            compiler_error(current_process, "Expected a parameter name but found %s\n", parser_token_text(name));
+        }
+        vector_push(names, &name);
+        if(!token_next_is_operator(",")){
+            break;
+        }
+        token_next();
+    }
+    expect_sym(')');
+
+    int count = vector_count(names);
+    struct datatype* types = calloc(count, sizeof(struct datatype));
+    bool* declared = calloc(count, sizeof(bool));
+    while(!token_next_is_symbol('{') && !token_next_is_symbol(';')){
+        struct datatype base;
+        parse_datatype(&base);
+        parser_ignore_int(&base);
+        bool first = true;
+        while(true){
+            struct datatype type = base;
+            if(!first){
+                type.flags &= ~DATATYPE_FLAG_IS_POINTER;
+                type.pointer_depth = parser_get_pointer_depth();
+                if(type.pointer_depth > 0){
+                    type.flags |= DATATYPE_FLAG_IS_POINTER;
+                }
+            }
+            first = false;
+            struct token* name = 0;
+            if(!parse_function_pointer_declarator(&type, &name)){
+                name = token_next();
+            }
+            if(!token_is_identifier(name)){
+                compiler_error(current_process, "Expected a parameter name in the declarations but found %s\n", parser_token_text(name));
+            }
+            if(token_next_is_operator("[")){
+                parse_array_brackets(history);
+                type.flags |= DATATYPE_FLAG_IS_POINTER;
+                type.pointer_depth++;
+            }
+            int index = -1;
+            for(int i = 0; i < count; i++){
+                if(S_EQ((*(struct token**)vector_at(names, i))->sval, name->sval)){
+                    index = i;
+                }
+            }
+            if(index < 0){
+                compiler_error(current_process, "%s is declared but is not a parameter\n", name->sval);
+            }
+            if(declared[index]){
+                compiler_error(current_process, "The parameter %s is declared twice\n", name->sval);
+            }
+            types[index] = type;
+            declared[index] = true;
+            if(!token_next_is_operator(",")){
+                break;
+            }
+            token_next();
+        }
+        expect_sym(';');
+    }
+
+    parser_scope_new();
+    struct vector* arguments_vec = vector_create(sizeof(struct node*));
+    for(int i = 0; i < count; i++){
+        struct datatype type = declared[i] ? types[i] : datatype_for_int();
+        parse_variable(&type, *(struct token**)vector_at(names, i),
+            history_down(history, history->flags | HISTORY_FLAG_IS_UPWARD_STACK));
+        struct node* argument_node = node_pop();
+        vector_push(arguments_vec, &argument_node);
+    }
+    parser_scope_finish();
+    return arguments_vec;
+}
+
 static void parse_function(struct datatype* ret_type, struct token* name_token, struct history* history){
     struct vector* arguments_vector = 0;
     // A function inside a function body, defined (a GNU extension) or
@@ -2514,8 +3395,17 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
     }
 
     expect_op("(");
-    arguments_vector = parse_function_arguments(history_begin(0));
-    expect_sym(')');
+    if(parser_next_is_identifier_list()){
+        arguments_vector = parse_identifier_list_parameters(history_begin(0));
+    } else {
+        arguments_vector = parse_function_arguments(history_begin(0));
+        expect_sym(')');
+    }
+    if(parser_function_resume >= 0){
+        // After the declarator the parameters were taken from.
+        vector_set_peek_pointer(current_process->token_vec, parser_function_resume);
+        parser_function_resume = -1;
+    }
 
     function_node->func.args.vector = arguments_vector;
     if(parser_arguments_variadic){
@@ -2649,6 +3539,7 @@ static void parse_statement(struct history* history){
         return;
     }
 
+    parser_expression_is_statement = true;
     parse_expressionable_root(history);
     if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_SYMBOL
        && !token_is_symbol(token_peek_next(), ';')){
@@ -2705,6 +3596,14 @@ static void parser_append_size_for_node(struct history* history, size_t* _variab
 static void parser_struct_member_extent(struct node* member, size_t* end, size_t* align){
     size_t member_end = member->var.aoffset + variable_size(member);
     size_t member_align = datatype_alignment(&member->var.type);
+    if(member->var.bitfield.is_bitfield){
+        // A bit-field ends at the byte of its last bit; an unnamed one
+        // does not align the struct (the psABIs).
+        member_end = (parser_member_end_bits(member) + 7) / 8;
+        if(member->var.bitfield.unnamed){
+            member_align = 1;
+        }
+    }
     if(member_end > *end){
         *end = member_end;
     }
@@ -2833,6 +3732,8 @@ static void parse_body_multiple_statements(size_t* variable_size,
     struct node* largest_align_eligible_var_node = 0;
 
     expect_sym('{');
+    struct parser_vla_block vla_block = { 0 };
+    vector_push(parser_vla_blocks, &vla_block);
 
     while(!token_next_is_symbol('}')){
         parse_statement(history_down(history, history->flags));
@@ -2857,6 +3758,15 @@ static void parse_body_multiple_statements(size_t* variable_size,
         parser_take_pending_statements(body_vec);
     }
 
+    // the block gives back what its variable-length arrays
+    // took off the stack.
+    struct parser_vla_block* block = vector_back(parser_vla_blocks);
+    if(block->save){
+        struct node* restore = parser_builtin_call("__builtin_vla_restore", parser_identifier(block->save));
+        vector_push(body_vec, &restore);
+    }
+    vector_pop(parser_vla_blocks);
+
     expect_sym('}');
 
     parser_finalize_body(history, body_node, body_vec, variable_size,
@@ -2872,7 +3782,9 @@ static void parse_body(size_t* variable_size, struct history* history);
 static void parse_loop_body(size_t* variable_size, struct history* history, bool is_loop){
     parser_breakable_depth++;
     parser_loop_depth += is_loop;
+    parser_vla_jump_begin(is_loop);
     parse_body(variable_size, history);
+    parser_vla_jump_end();
     parser_loop_depth -= is_loop;
     parser_breakable_depth--;
 }
@@ -3107,12 +4019,34 @@ static void parse_variable_function_or_struct_union(struct history* history){
     // ch42: `int abc;` - the next token must be the variable name, or
     // a function pointer declarator `(*name)(...)` holds it.
     struct token* name_token = 0;
-    if(!parse_function_pointer_declarator(&dtype, &name_token)){
+    parser_function_declarator_params = -1;
+    if((history->flags & (HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION)) && token_next_is_symbol(':')){
+        // An unnamed bit-field (`int : 3;`) takes room under a hidden
+        // name nothing can refer to.
+        static int unnamed_count = 0;
+        char* name = malloc(32);
+        sprintf(name, "__unnamed_bitfield_%i", unnamed_count++);
+        name_token = calloc(1, sizeof(struct token));
+        name_token->type = TOKEN_TYPE_IDENTIFIER;
+        name_token->sval = name;
+        name_token->pos  = current_process->pos;
+        parser_bitfield_unnamed = true;
+    } else if(!parse_function_pointer_declarator(&dtype, &name_token)){
         name_token = token_next();
     }
     if(!name_token || name_token->type != TOKEN_TYPE_IDENTIFIER){
         compiler_error(current_process,
             "Expecting a valid name for the given variable declaration\n");
+    }
+
+    // A function returning a function pointer: its parameters were
+    // inside the declarator.
+    if(parser_function_declarator_params >= 0){
+        parser_function_resume = current_process->token_vec->pindex;
+        vector_set_peek_pointer(current_process->token_vec, parser_function_declarator_params);
+        parser_function_declarator_params = -1;
+        parse_function(&dtype, name_token, history);
+        return;
     }
 
     // ch72: if next is `(`, this is a function declaration.
@@ -3262,6 +4196,7 @@ static void parse_break(struct history* history){
         compiler_error(current_process, "'break' is only valid inside a loop or switch\n");
     }
     expect_sym(';');
+    parser_vla_leave(false);
     make_break_node();
 }
 
@@ -3272,6 +4207,7 @@ static void parse_continue(struct history* history){
         compiler_error(current_process, "'continue' is only valid inside a loop\n");
     }
     expect_sym(';');
+    parser_vla_leave(true);
     make_continue_node();
 }
 
@@ -3558,6 +4494,16 @@ static void parse_sizeof(struct history* history){
         }
         parser_expect_new_node(count_before, "an operand after sizeof");
         operand = node_pop();
+        struct node* inner = operand;
+        while(inner->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            inner = inner->parenthesis.exp;
+        }
+        // The size of a variable-length array is known when it runs.
+        const char* vla_size = inner->type == NODE_TYPE_IDENTIFIER ? parser_vla_size_of(inner->sval) : 0;
+        if(vla_size){
+            node_push(parser_identifier(vla_size));
+            return;
+        }
         if(!parser_expression_type(operand, &dtype)){
             compiler_error(current_process, "Cannot work out the size of this sizeof operand\n");
         }
@@ -3768,6 +4714,11 @@ int parse(struct compile_process* process){
     parser_last_token = 0;
     parser_previous_token = 0;
     parser_saw_bool = false;
+    parser_bitfield_width = -1;
+    parser_bitfield_names = vector_create(sizeof(const char*));
+    parser_vla_blocks = vector_create(sizeof(struct parser_vla_block));
+    parser_vla_jumps  = vector_create(sizeof(struct parser_vla_jump));
+    parser_vlas       = vector_create(sizeof(struct parser_vla));
     parser_enumerators = vector_create(sizeof(struct parser_enumerator));
     parser_pending_statements = vector_create(sizeof(struct node*));
     parser_preceding_statements = vector_create(sizeof(struct node*));

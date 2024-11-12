@@ -26,7 +26,7 @@ void codegen_gen_exp(struct generator* generator, struct node* node, int flags);
 void codegen_end_exp(struct generator* generator);
 void codegen_entity_address(struct generator* generator, struct resolver_entity* entity, struct generator_entity_address* address_out);
 void asm_push_ins_with_datatype(struct datatype* dtype, const char* fmt, ...);
-static void codegen_x86_va_start_store(struct generator* generator, const char* list_address);
+static void codegen_x86_va_start_store(struct generator* generator, const char* list_address, int last_size);
 static void codegen_x86_va_arg_fetch(struct generator* generator, int size);
 
 struct history;
@@ -648,10 +648,17 @@ static void codegen_generate_entity_access_for_unsupported(struct resolver_resul
 }
 
 // ch174: cast on the access chain - just a comment marker (the
-// resolver entity carries the dtype, no extra emit needed).
+// resolver entity carries the dtype, no extra emit needed). A pointer
+// on the stack takes the cast's type, so an indirection after it reads
+// that type: `*(struct s*)p` with a `void* p` read a void and never
+// pushed the struct (va_arg of a struct type).
 static void codegen_generate_entity_access_for_cast(struct resolver_result* result, struct resolver_entity* entity){
-    (void)result; (void)entity;
+    (void)result;
     asm_push("; CAST");
+    struct stack_frame_element* top = stackframe_back(current_function);
+    if(top && (top->flags & STACK_FRAME_ELEMENT_FLAG_HAS_DATATYPE) && (entity->dtype.flags & DATATYPE_FLAG_IS_POINTER)){
+        top->data.dtype = entity->dtype;
+    }
 }
 
 // ch174: pointer-array bracket access. Pop the base into ebx,
@@ -1262,11 +1269,18 @@ static void codegen_generate_entity_access_for_unary_indirection(struct resolver
     if(resolver_entity_is_pointer_array_element(entity->prev)){
         asm_push("mov ebx, [ebx]");
     }
-    codegen_apply_unary_access(depth);
     // The pushed value has the pointed-to type, so a following `+ 1`
     // is not scaled as pointer arithmetic.
     struct datatype result_dtype = *datatype_pointer_reduce(&operand_datatype, depth);
     result_dtype.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    // A struct (`s = *p`, `(*p).m`, `*(struct s*)p`) is wanted by its
+    // address, which the caller pushes the pieces from or adds the
+    // member's offset to; the last load read the struct's first dword
+    // as that address.
+    if(datatype_is_struct_or_union_non_pointer(&result_dtype)){
+        depth--;
+    }
+    codegen_apply_unary_access(depth);
     asm_push_ins_push_with_data("ebx",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value",
         STACK_FRAME_ELEMENT_FLAG_IS_PUSHED_ADDRESS,
@@ -1364,7 +1378,7 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
     asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     // A call through a function pointer: the chain left the pointer's
     // address, so load the pointer itself.
-    if(entity->func_call_data.through_pointer){
+    if(entity->func_call_data.through_pointer && !entity->func_call_data.callee_is_value){
         asm_push("mov ebx, [ebx]");
     }
     asm_push("mov dword [function_call_%i], ebx", function_call_label_id);
@@ -1524,9 +1538,14 @@ static bool codegen_resolve_node_for_value(struct node* node, struct history* hi
         // The chain left the struct's address (`t[1]`, `o.inner`); a
         // call already pushed the pieces. Pushing from ebx without
         // popping read whatever it held and left the address behind.
+        // The pushed type says how big: through a cast
+        // (`*(struct s*)p`, va_arg of a struct) the last entity is the
+        // indirection, whose own type is not the struct's.
         if(result->last_entity->type != RESOLVER_ENTITY_TYPE_FUNCTION_CALL){
             asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-            codegen_generate_structure_push(result->last_entity, history, 0);
+            struct resolver_entity pushed = *result->last_entity;
+            pushed.dtype = dtype;
+            codegen_generate_structure_push(&pushed, history, 0);
         }
     } else if(!(dtype.flags & DATATYPE_FLAG_IS_POINTER) && dtype.type != DATA_TYPE_VOID){
         // a void result (va_start, va_end, a void call) has no
@@ -1911,6 +1930,28 @@ static struct resolver_entity* x87_called_function(struct node* callee){
     return resolver_get_function(0, current_process->resolver, callee->sval);
 }
 
+// The type of parameter i of the function a call names, or of the
+// prototype of the function pointer it calls through; false
+// past the parameters or without a prototype.
+static bool x87_param_type(struct node* callee, int i, struct datatype* out){
+    struct resolver_entity* function = x87_called_function(callee);
+    if(function){
+        struct vector* params = function->node->func.args.vector;
+        if(!params || i >= vector_count(params)){
+            return false;
+        }
+        *out = (*(struct node**)vector_at(params, i))->var.type;
+        return true;
+    }
+    struct datatype t = x87_type(callee);
+    struct function_prototype* prototype = (t.flags & DATATYPE_FLAG_IS_FUNCTION_POINTER) ? t.function_params : 0;
+    if(!prototype || i >= vector_count(prototype->types)){
+        return false;
+    }
+    *out = *(struct datatype*)vector_at(prototype->types, i);
+    return true;
+}
+
 static struct datatype x87_call_type(struct node* node){
     struct resolver_entity* function = x87_called_function(node->exp.left);
     if(function){
@@ -2065,10 +2106,9 @@ static bool x87_involves(struct node* node){
                 return true;
             }
         }
-        struct resolver_entity* function = x87_called_function(node->exp.left);
-        struct vector* params = function ? function->node->func.args.vector : 0;
-        for(int i = 0; params && i < vector_count(params); i++){
-            if(x87_is_floating(&(*(struct node**)vector_at(params, i))->var.type)){
+        struct datatype param;
+        for(int i = 0; x87_param_type(node->exp.left, i, &param); i++){
+            if(x87_is_floating(&param)){
                 return true;
             }
         }
@@ -2538,7 +2578,6 @@ static struct datatype x87_call_emit(struct node* node, bool struct_result){
     struct node* callee = x87_strip(node->exp.left);
     struct resolver_entity* function = x87_called_function(callee);
     struct datatype rtype = x87_call_type(node);
-    struct vector* params = function ? function->node->func.args.vector : 0;
     if(callee->type == NODE_TYPE_IDENTIFIER && !function
        && !resolver_get_variable(0, current_process->resolver, callee->sval)){
         compiler_error(current_process, "%s is not declared\n", callee->sval);
@@ -2553,8 +2592,9 @@ static struct datatype x87_call_emit(struct node* node, bool struct_result){
     for(int i = 0; i < count; i++){
         struct node* arg = *(struct node**)vector_at(args, i);
         struct datatype t = x87_type(arg);
-        if(params && i < vector_count(params)){
-            t = (*(struct node**)vector_at(params, i))->var.type;
+        struct datatype param;
+        if(x87_param_type(callee, i, &param)){
+            t = param;
         } else if(x87_is_floating(&t)){
             // The default argument promotions: a float is a double.
             t = datatype_floating(DATA_SIZE_DDWORD);
@@ -3753,20 +3793,68 @@ void asm_push_ins_with_datatype(struct datatype* dtype, const char* fmt, ...){
 }
 
 // the target-specific halves of the stdarg natives (see
-// preprocessor/static-includes/stdarg.c). The lines are the ones the
-// natives used to emit themselves, so the output is unchanged.
-static void codegen_x86_va_start_store(struct generator* generator, const char* list_address){
+// preprocessor/static-includes/stdarg.c).
+// cdecl arguments are 4-byte slots in order, a struct its size rounded
+// up, so the list is the address of the next one: va_start starts it
+// past the last named parameter, and va_arg gives the address it holds
+// (the va_arg macro reads the type from there) and steps it past the
+// argument. va_arg used to step first and read after, which skipped
+// into the middle of an argument wider than the last named one, and
+// it left the va_list's address on the stack under its result, where
+// the `+` of `total + va_arg(...)` took it as its left operand.
+static void codegen_x86_va_start_store(struct generator* generator, const char* list_address, int last_size){
+    generator->asm_push("add ebx, %i", (int)align_value(last_size, DATA_SIZE_DWORD));
     generator->asm_push("mov dword [%s], ebx", list_address);
 }
 
 static void codegen_x86_va_arg_fetch(struct generator* generator, int size){
-    generator->asm_push("add dword [ebx], %i", size);
+    asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     generator->asm_push("mov dword eax, [ebx]");
+    generator->asm_push("add dword [ebx], %i", (int)align_value(size, DATA_SIZE_DWORD));
     struct datatype void_dtype;
     datatype_set_void(&void_dtype);
     void_dtype.pointer_depth++;
     void_dtype.flags |= DATATYPE_FLAG_IS_POINTER;
-    generator->ret(&void_dtype, "dword [eax]");
+    generator->ret(&void_dtype, "eax");
+}
+
+// the stack-pointer builtins behind variable-length arrays.
+// The parser puts each in a statement of its own, `save = ...`, `a =
+// ...` or a call, so nothing of the expression stack is under esp when
+// it moves. The stack stays 16-byte aligned.
+void codegen_x86_native_vla_save(struct generator* generator, struct native_function* func, struct vector* arguments){
+    (void)func; (void)arguments;
+    struct datatype dtype = datatype_for_int();
+    dtype.flags &= ~DATATYPE_FLAG_IS_SIGNED;
+    generator->asm_push("mov eax, esp");
+    generator->ret(&dtype, "eax");
+}
+
+void codegen_x86_native_vla_alloc(struct generator* generator, struct native_function* func, struct vector* arguments){
+    (void)func;
+    vector_set_peek_pointer(arguments, 0);
+    generator->gen_exp(generator, vector_peek_ptr(arguments), 0);
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    generator->asm_push("add eax, 15");
+    generator->asm_push("and eax, -16");
+    generator->asm_push("sub esp, eax");
+    generator->asm_push("mov eax, esp");
+    struct datatype dtype;
+    datatype_set_void(&dtype);
+    dtype.pointer_depth++;
+    dtype.flags |= DATATYPE_FLAG_IS_POINTER;
+    generator->ret(&dtype, "eax");
+}
+
+void codegen_x86_native_vla_restore(struct generator* generator, struct native_function* func, struct vector* arguments){
+    (void)func;
+    vector_set_peek_pointer(arguments, 0);
+    generator->gen_exp(generator, vector_peek_ptr(arguments), 0);
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    generator->asm_push("mov esp, eax");
+    struct datatype dtype;
+    datatype_set_void(&dtype);
+    generator->ret(&dtype, "0");
 }
 
 void codegen_gen_exp(struct generator* generator, struct node* node, int flags){

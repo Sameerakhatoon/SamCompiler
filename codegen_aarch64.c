@@ -660,6 +660,15 @@ static void aarch64_float_resize(int from, int to){
     aarch64_from_freg(0, to);
 }
 
+// the stack pointer, for variable-length arrays.
+static void aarch64_sp_get(void){
+    asm_push("mov x0, sp");
+}
+
+static void aarch64_sp_set(void){
+    asm_push("mov sp, x0");
+}
+
 static const struct exp64_ops aarch64_ops = {
     .push           = aarch64_push,
     .push_struct    = aarch64_push_struct,
@@ -692,6 +701,8 @@ static const struct exp64_ops aarch64_ops = {
     .int_to_float   = aarch64_int_to_float,
     .float_to_int   = aarch64_float_to_int,
     .float_resize   = aarch64_float_resize,
+    .sp_get         = aarch64_sp_get,
+    .sp_set         = aarch64_sp_set,
 };
 
 // ---------------------------------------------------------------

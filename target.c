@@ -290,3 +290,9 @@ const struct target* target_current(void){
 void target_set_current(const struct target* target){
     target_current_desc = target;
 }
+
+// wchar_t is a 4-byte int on the Linux targets, an unsigned int on
+// aarch64 (AAPCS64).
+bool target_wchar_unsigned(const struct target* target){
+    return S_EQ(target->backend->name, "aarch64");
+}

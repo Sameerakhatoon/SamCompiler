@@ -3,8 +3,8 @@
 #include <assert.h>
 
 // ch238: va_start(list, final_argument_in_function). Emits the asm
-// that loads the address-of `final_argument_in_function` (which sits
-// at the top of the varargs region of the stack) into `list`.
+// that stores the address just past `final_argument_in_function`
+// (the first variadic argument) into `list`.
 void native_va_start(struct generator* generator, struct native_function* func, struct vector* arguments)
 {
     struct compile_process* compiler = generator->compiler;
@@ -28,8 +28,11 @@ void native_va_start(struct generator* generator, struct native_function* func, 
     struct resolver_entity* list_arg_entity = resolver_result_entity_root(result);
     struct generator_entity_address address_out;
     generator->entity_address(generator, list_arg_entity, &address_out);
+    struct resolver_result* last = resolver_follow(compiler->resolver, stack_arg);
+    assert(resolver_result_ok(last));
+    int last_size = datatype_size(&resolver_result_entity_root(last)->dtype);
     // the store itself is target-specific.
-    generator->va_start_store(generator, address_out.address);
+    generator->va_start_store(generator, address_out.address, last_size);
     generator->asm_push("; va_start end for variable %s", stack_arg->sval);
 
     struct datatype void_datatype;
@@ -37,10 +40,10 @@ void native_va_start(struct generator* generator, struct native_function* func, 
     generator->ret(&void_datatype, "0");
 }
 
-// ch239: __builtin_va_arg(list, size) - bump the stashed pointer
-// by `size` and return the dereferenced value at the new address.
-// The user-facing va_arg macro in pc_includes/stdarg.h plugs the
-// sizeof() in for `size`.
+// ch239: __builtin_va_arg(list, size) - return the address the list
+// holds and step it past an argument of `size` bytes. The user-facing
+// va_arg macro in pc_includes/stdarg.h plugs the sizeof() in for
+// `size` and reads the type at the address.
 void native__builtin_va_arg(struct generator* generator, struct native_function* func, struct vector* arguments)
 {
     struct compile_process* compiler = generator->compiler;
@@ -48,21 +51,41 @@ void native__builtin_va_arg(struct generator* generator, struct native_function*
     {
         compiler_error(compiler, "va_arg expects two arguments, %i provided", vector_count(arguments));
     }
-    // A21: the va_arg macro passes `(type*)0` as well. A double comes as
-    // 8 bytes and this reads a dword: rejected, not misread.
+    // A21: the va_arg macro passes `(type*)0` as well, for its type. A
+    // double is 8 bytes of the stack (4-aligned in cdecl), which the
+    // address and the step of `size` cover. A float passed to `...` was
+    // promoted to double, so there is no float to read.
     if (vector_count(arguments) == 3)
     {
         struct node* type_argument = *(struct node**)vector_at(arguments, 2);
-        if (type_argument->type == NODE_TYPE_CAST && datatype_is_floating(datatype_pointer_reduce(&type_argument->cast.dtype, 1)))
+        if (type_argument->type == NODE_TYPE_CAST)
         {
-            compiler_error(compiler, "x86: va_arg of a float or double is not supported\n");
+            struct datatype* type = datatype_pointer_reduce(&type_argument->cast.dtype, 1);
+            if (datatype_is_floating(type) && type->size != DATA_SIZE_DDWORD)
+            {
+                compiler_error(compiler, "va_arg of a float: a float passed to `...` is promoted to double, read a double\n");
+            }
         }
     }
 
     generator->asm_push("; native__builtin_va_arg start");
     vector_set_peek_pointer(arguments, 0);
     struct node* list_arg = vector_peek_ptr(arguments);
-    generator->gen_exp(generator, list_arg, EXPRESSION_GET_ADDRESS);
+    while (list_arg->type == NODE_TYPE_EXPRESSION_PARENTHESES)
+    {
+        list_arg = list_arg->parenthesis.exp;
+    }
+    // `va_arg(*ap, type)` with a `va_list* ap`: the list's address is
+    // the pointer's value. The address of an indirection loaded through
+    // it once more and stepped the argument instead of the list.
+    if (list_arg->type == NODE_TYPE_UNARY && S_EQ(list_arg->unary.op, "*"))
+    {
+        generator->gen_exp(generator, list_arg->unary.operand, 0);
+    }
+    else
+    {
+        generator->gen_exp(generator, list_arg, EXPRESSION_GET_ADDRESS);
+    }
     struct node* size_argument = vector_peek_ptr(arguments);
     if (size_argument->type != NODE_TYPE_NUMBER)
     {

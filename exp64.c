@@ -35,6 +35,16 @@ static struct compile_process* current_process;
 static struct node*            current_function;
 static bool                    exp64_muted;
 static int                     exp64_label_count;
+// The current function's first variadic argument (exp64_parameters):
+// frame offsets of its register home slot (or of its stack slot when
+// the registers are used up), of the end of the register slots, and of
+// the first stack argument no named parameter took; and of the home
+// slot of its floating-point register and the end of those slots.
+static int                     exp64_va_gp;
+static int                     exp64_va_gp_end;
+static int                     exp64_va_overflow;
+static int                     exp64_va_fp;
+static int                     exp64_va_fp_end;
 
 static struct datatype exp64_value(struct node* node);
 static struct datatype exp64_rvalue(struct node* node, bool decay);
@@ -668,10 +678,95 @@ static struct vector* exp64_call_arguments(struct node* node){
     return args;
 }
 
-// va_start(list, last): list = the address of last's argument slot.
-// __builtin_va_arg(list, size): step list one slot (or more for a
-// bigger type) and read the slot's 8 bytes, a long that the caller
-// converts to the argument's type.
+// The va_list (pc_includes/stdarg.h) is five addresses, at these
+// offsets.
+#define EXP64_VA_GP       0
+#define EXP64_VA_GP_END   8
+#define EXP64_VA_OVERFLOW 16
+#define EXP64_VA_FP       24
+#define EXP64_VA_FP_END   32
+#define EXP64_VA_FIELDS   5
+
+// R0 = the va_list field at `field`.
+static void exp64_va_field(struct node* list, int field){
+    exp64_address(list);
+    ops->add_imm(field);
+    ops->load(DATA_SIZE_DDWORD, false);
+}
+
+// The va_list field at `field` = R0.
+static void exp64_va_set(struct node* list, int field){
+    struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
+    ops->push(&long_type);
+    exp64_address(list);
+    ops->add_imm(field);
+    ops->mov_r1();
+    ops->pop(0);
+    ops->store(DATA_SIZE_DDWORD);
+}
+
+// R0 = the va_list field at `field`, which then moves on `step` bytes.
+static void exp64_va_take(struct node* list, int field, int step){
+    exp64_va_field(list, field);
+    ops->add_imm(step);
+    exp64_va_set(list, field);
+    exp64_va_field(list, field);
+    ops->add_imm(-step);
+}
+
+// Jump to `label` when `field_a op field_b + step` holds, unsigned.
+static void exp64_va_compare(struct node* list, int field_a, int step, const char* op, int field_b, int label){
+    struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
+    exp64_va_field(list, field_a);
+    ops->add_imm(step);
+    ops->push(&long_type);
+    exp64_va_field(list, field_b);
+    ops->mov_r1();
+    ops->pop(0);
+    ops->compare(op, false);
+    ops->branch(label, EXP64_BRANCH_IF_NOT_ZERO);
+}
+
+// R0 = the address of the next `bytes` from `field` when `field + bytes
+// <= end`, else from the stack (overflow), where `field` is first set
+// to `end` with `close` (aarch64: once a value does not fit no register
+// is used again).
+static void exp64_va_take_or_overflow(struct node* list, int field, int bytes, int end, bool close){
+    int stack_label = exp64_new_label();
+    int end_label = exp64_new_label();
+    exp64_va_compare(list, field, bytes, ">", end, stack_label);
+    exp64_va_take(list, field, bytes);
+    ops->branch(end_label, EXP64_BRANCH_ALWAYS);
+    ops->label(stack_label);
+    if(close){
+        exp64_va_field(list, end);
+        exp64_va_set(list, field);
+    }
+    exp64_va_take(list, EXP64_VA_OVERFLOW, bytes);
+    ops->label(end_label);
+}
+
+// va_start(list, last): the five addresses of the first variadic
+// argument, from the layout of the named parameters (exp64_parameters),
+// so a named struct that went to the stack while later named scalars
+// took registers is counted where it went.
+// __builtin_va_arg(list, size, (type*)0): the address of the next
+// argument, and the list stepped past it; va_arg reads the type from
+// there. Where it is, by each psABI's rule for variadic arguments (the
+// caller placed them with exp64_arg_layout):
+//   x86_64: up to 16 bytes from the registers when all its words fit
+//     in the ones left, else from the stack; later arguments still
+//     take registers. A bigger struct is on the stack. A double from
+//     the next xmm register's home slot, else from the stack.
+//   aarch64: the same, but once a value does not fit no register is
+//     used again (NGRN = 8); a bigger struct is passed by reference.
+//     A double from the next v register's home slot (NSRN), else from
+//     the stack.
+//   riscv64: every word in order, a double too, the register slots
+//     running on into the stack arguments; a bigger struct by
+//     reference.
+// The prologue of a variadic function spills all the floating-point
+// argument registers on x86_64 and aarch64 (exp64_fp_parameter_registers).
 static struct datatype exp64_stdarg(const char* name, struct vector* args){
     struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
     if(S_EQ(name, "va_end")){
@@ -679,21 +774,19 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
         return exp64_int_type(DATA_SIZE_DWORD, true);
     }
     // The va_arg macro passes `(type*)0` as a third argument, which
-    // gives the type. A float or double variadic argument travels in a
-    // floating-point register on x86_64 and aarch64, which the home
-    // area does not hold: rejected there. riscv64 passes it in the
-    // integer registers and on the stack, so its slot has the bits.
-    struct datatype result_type = long_type;
+    // gives the type: a double is read where floating-point arguments
+    // went. A float passed to `...` was promoted to double, so there is
+    // no float to read (gcc makes it a trap).
+    bool floating = false;
     if(vector_count(args) == 3 && !S_EQ(name, "va_start")){
         struct node* type_argument = *(struct node**)vector_at(args, 2);
         if(type_argument->type == NODE_TYPE_CAST){
             struct datatype t = *datatype_pointer_reduce(&type_argument->cast.dtype, 1);
             if(exp64_is_floating(&t)){
-                if(!S_EQ(current_process->target->backend->name, "riscv64")){
-                    compiler_error(current_process, "va_arg of a float or double is not supported on %s\n",
-                        current_process->target->backend->name);
+                if(t.size != DATA_SIZE_DDWORD){
+                    compiler_error(current_process, "va_arg of a float: a float passed to `...` is promoted to double, read a double\n");
                 }
-                result_type = datatype_floating(DATA_SIZE_DDWORD);
+                floating = true;
             }
         }
         vector_pop(args);
@@ -704,25 +797,79 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
     struct node* list = *(struct node**)vector_at(args, 0);
     struct node* second = *(struct node**)vector_at(args, 1);
     if(S_EQ(name, "va_start")){
-        exp64_address(second);
-        ops->push(&long_type);
-        exp64_address(list);
-        ops->mov_r1();
-        ops->pop(0);
-        ops->store(DATA_SIZE_DDWORD);
+        if(second->type != NODE_TYPE_IDENTIFIER || !resolver_get_variable(0, current_process->resolver, second->sval)){
+            compiler_error(current_process, "va_start expects the last named parameter\n");
+        }
+        int fields[]  = { EXP64_VA_GP, EXP64_VA_GP_END, EXP64_VA_OVERFLOW, EXP64_VA_FP, EXP64_VA_FP_END };
+        int offsets[] = { exp64_va_gp, exp64_va_gp_end, exp64_va_overflow, exp64_va_fp, exp64_va_fp_end };
+        for(int i = 0; i < EXP64_VA_FIELDS; i++){
+            ops->frame_address(offsets[i]);
+            exp64_va_set(list, fields[i]);
+        }
         return exp64_int_type(DATA_SIZE_DWORD, true);
     }
     if(second->type != NODE_TYPE_NUMBER){
         compiler_error(current_process, "__builtin_va_arg expects a constant size\n");
     }
-    exp64_address(list);
-    ops->push(&long_type);
-    ops->load(DATA_SIZE_DDWORD, false);
-    ops->add_imm(align_value(second->llnum, DATA_SIZE_DDWORD));
-    ops->pop(1);
-    ops->store(DATA_SIZE_DDWORD);
-    ops->load(DATA_SIZE_DDWORD, false);
-    return result_type;
+    const char* abi = current_process->target->backend->name;
+    bool x86_64  = S_EQ(abi, "x86_64");
+    bool aarch64 = S_EQ(abi, "aarch64");
+    bool big = second->llnum > 2 * DATA_SIZE_DDWORD;
+    int bytes = align_value(second->llnum, DATA_SIZE_DDWORD);
+    struct datatype result = exp64_pointer_to(&long_type);
+    if(floating && (x86_64 || aarch64)){
+        exp64_va_take_or_overflow(list, EXP64_VA_FP, DATA_SIZE_DDWORD, EXP64_VA_FP_END, false);
+        return result;
+    }
+    if(x86_64 && big){
+        exp64_va_take(list, EXP64_VA_OVERFLOW, bytes);
+        return result;
+    }
+    if(big){
+        bytes = DATA_SIZE_DDWORD;
+    }
+    if(x86_64 || aarch64){
+        exp64_va_take_or_overflow(list, EXP64_VA_GP, bytes, EXP64_VA_GP_END, aarch64);
+    } else {
+        exp64_va_take(list, EXP64_VA_GP, bytes);
+    }
+    if(big){
+        ops->load(DATA_SIZE_DDWORD, false);
+    }
+    return result;
+}
+
+// the stack-pointer builtins behind variable-length arrays,
+// each in a statement of its own (the parser's lowering), so nothing
+// of the expression stack is under the stack pointer when it moves.
+//   __builtin_vla_save():        the stack pointer
+//   __builtin_vla_alloc(bytes):  the stack pointer moved down by bytes
+//                                rounded up to 16, which is the result
+//   __builtin_vla_restore(sp):   the stack pointer set back to sp
+static struct datatype exp64_vla(const char* name, struct vector* args){
+    struct datatype ulong = exp64_int_type(DATA_SIZE_DDWORD, false);
+    if(S_EQ(name, "__builtin_vla_save")){
+        ops->sp_get();
+        return ulong;
+    }
+    if(vector_count(args) != 1){
+        compiler_error(current_process, "%s expects one argument\n", name);
+    }
+    struct datatype t = exp64_value(*(struct node**)vector_at(args, 0));
+    exp64_convert(0, &t, &ulong);
+    if(S_EQ(name, "__builtin_vla_restore")){
+        ops->sp_set();
+        return exp64_int_type(DATA_SIZE_DWORD, true);
+    }
+    ops->add_imm(15);
+    ops->imm(1, -16);
+    ops->binop("&", DATA_SIZE_DDWORD, false);
+    ops->mov_r1();
+    ops->sp_get();
+    ops->binop("-", DATA_SIZE_DDWORD, false);
+    ops->sp_set();
+    struct datatype byte = exp64_int_type(DATA_SIZE_BYTE, false);
+    return exp64_pointer_to(&byte);
 }
 
 // B1: a struct result of more than 16 bytes goes through memory (the
@@ -756,8 +903,11 @@ bool exp64_returns_in_memory(struct datatype* dtype){
 // variadic arguments, from `named` on, in integer registers. A struct
 // is always INTEGER class here, floating members included: right
 // between SamCompiler functions, not what gcc does with them
-//. Returns the outgoing stack words.
-static int exp64_arg_layout(struct datatype* types, int count, int named, bool hidden, struct exp64_arg* out){
+//. Returns the outgoing stack words;
+// *next_reg and *next_fp_out (when given) are the first integer and
+// floating-point registers no argument took.
+static int exp64_arg_layout(struct datatype* types, int count, int named, bool hidden, struct exp64_arg* out,
+                            int* next_reg, int* next_fp_out){
     const char* abi = current_process->target->backend->name;
     bool x86_64  = S_EQ(abi, "x86_64");
     bool aarch64 = S_EQ(abi, "aarch64");
@@ -815,6 +965,12 @@ static int exp64_arg_layout(struct datatype* types, int count, int named, bool h
         a->stack = stack;
         stack += words - a->reg_words;
     }
+    if(next_reg){
+        *next_reg = next;
+    }
+    if(next_fp_out){
+        *next_fp_out = next_fp;
+    }
     return stack;
 }
 
@@ -857,7 +1013,10 @@ static bool exp64_call_is_simple(struct exp64_call* call){
 // is at stack_home + 8*j. A struct passed by reference keeps the
 // address of the caller's copy in its slot. The prologue spilled
 // floating-point argument register k to fp_home + 8*k.
-static struct exp64_arg* exp64_parameter_layout(struct node* function, int* count_out){
+// *next_reg, *next_fp and *stack_words (when given) are where the
+// variadic arguments of a variadic function begin.
+static struct exp64_arg* exp64_parameter_layout(struct node* function, int* count_out,
+                                                int* next_reg, int* next_fp, int* stack_words){
     struct vector* params = function_node_argument_vec(function);
     int count = vector_count(params);
     struct datatype* types = calloc(count + 1, sizeof(struct datatype));
@@ -865,7 +1024,11 @@ static struct exp64_arg* exp64_parameter_layout(struct node* function, int* coun
     for(int i = 0; i < count; i++){
         types[i] = (*(struct node**)vector_at(params, i))->var.type;
     }
-    exp64_arg_layout(types, count, count, exp64_returns_in_memory(&function->func.rtype), layout);
+    int words = exp64_arg_layout(types, count, count, exp64_returns_in_memory(&function->func.rtype), layout,
+                                 next_reg, next_fp);
+    if(stack_words){
+        *stack_words = words;
+    }
     free(types);
     *count_out = count;
     return layout;
@@ -874,7 +1037,17 @@ static struct exp64_arg* exp64_parameter_layout(struct node* function, int* coun
 void exp64_parameters(struct node* function, int register_home, int stack_home, int fp_home){
     struct vector* params = function_node_argument_vec(function);
     int count = 0;
-    struct exp64_arg* layout = exp64_parameter_layout(function, &count);
+    int next_reg = 0;
+    int next_fp = 0;
+    int stack_words = 0;
+    struct exp64_arg* layout = exp64_parameter_layout(function, &count, &next_reg, &next_fp, &stack_words);
+    // Where va_start finds the first variadic argument.
+    int max = current_process->target->max_reg_args;
+    exp64_va_gp_end   = register_home + DATA_SIZE_DDWORD * max;
+    exp64_va_overflow = stack_home + DATA_SIZE_DDWORD * stack_words;
+    exp64_va_gp       = next_reg < max ? register_home + DATA_SIZE_DDWORD * next_reg : exp64_va_overflow;
+    exp64_va_fp_end   = fp_home + DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS;
+    exp64_va_fp       = next_fp < EXP64_FP_ARG_REGISTERS ? fp_home + DATA_SIZE_DDWORD * next_fp : exp64_va_fp_end;
     for(int i = 0; i < count; i++){
         struct node* param = *(struct node**)vector_at(params, i);
         struct exp64_arg* a = &layout[i];
@@ -895,11 +1068,16 @@ void exp64_parameters(struct node* function, int register_home, int stack_home, 
 
 // The floating-point argument registers the parameters of `function`
 // arrive in: the prologue spills that many (none for most functions,
-// whose code does not change).
+// whose code does not change). A variadic function on x86_64 and
+// aarch64 spills all of them: va_arg reads its doubles from there.
 int exp64_fp_parameter_registers(struct node* function){
+    const char* abi = current_process->target->backend->name;
+    if((function->func.flags & FUNCTION_NODE_FLAG_IS_VARIADIC) && (S_EQ(abi, "x86_64") || S_EQ(abi, "aarch64"))){
+        return EXP64_FP_ARG_REGISTERS;
+    }
     int count = 0;
     int used = 0;
-    struct exp64_arg* layout = exp64_parameter_layout(function, &count);
+    struct exp64_arg* layout = exp64_parameter_layout(function, &count, 0, 0, 0);
     for(int i = 0; i < count; i++){
         if(layout[i].fp && layout[i].reg + 1 > used){
             used = layout[i].reg + 1;
@@ -918,18 +1096,33 @@ static struct datatype exp64_call(struct node* node){
     if(callee->type == NODE_TYPE_IDENTIFIER && !resolver_get_variable(0, current_process->resolver, callee->sval)
        && !resolver_get_function(0, current_process->resolver, callee->sval)
        && symresolver_get_symbol_for_native_function(current_process, callee->sval)){
+        if(!strncmp(callee->sval, "__builtin_vla_", 14)){
+            return exp64_vla(callee->sval, args);
+        }
         return exp64_stdarg(callee->sval, args);
     }
 
     struct datatype return_type;
-    struct vector* params = 0;
-    const char* symbol = 0;
+    // The parameter types the arguments are converted to: a named
+    // function's parameters, or those of the function pointer's type.
+    struct datatype* param_types = 0;
+    int param_count = 0;
+    // A variadic prototype: the arguments past its parameters are the
+    // variadic ones.
     bool variadic = false;
+    bool own_param_types = false;
+    const char* symbol = 0;
     if(exp64_names_function(callee)){
         struct resolver_entity* function = resolver_get_function(0, current_process->resolver, callee->sval);
         return_type = function->dtype;
-        params = function->node->func.args.vector;
+        struct vector* params = function->node->func.args.vector;
         variadic = function->node->func.flags & FUNCTION_NODE_FLAG_IS_VARIADIC;
+        param_count = params ? vector_count(params) : 0;
+        param_types = calloc(param_count + 1, sizeof(struct datatype));
+        own_param_types = true;
+        for(int i = 0; i < param_count; i++){
+            param_types[i] = (*(struct node**)vector_at(params, i))->var.type;
+        }
         symbol = function->name;
     } else {
         struct datatype t = exp64_typeof(callee);
@@ -939,6 +1132,17 @@ static struct datatype exp64_call(struct node* node){
         }
         return_type = *datatype_pointer_reduce(&t, 1);
         return_type.flags &= ~DATATYPE_FLAG_IS_FUNCTION_POINTER;
+        struct function_prototype* prototype = t.function_params;
+        if(prototype){
+            param_count = vector_count(prototype->types);
+            int given = vector_count(args);
+            if(given < param_count || (given > param_count && !prototype->variadic)){
+                compiler_error(current_process, "The call through a function pointer passes %i arguments, its type has %i parameters\n",
+                    given, param_count);
+            }
+            param_types = vector_data_ptr(prototype->types);
+            variadic = prototype->variadic;
+        }
     }
 
     struct exp64_call call = { .symbol = symbol };
@@ -961,14 +1165,17 @@ static struct datatype exp64_call(struct node* node){
     for(int i = count - 1; i >= 0; i--){
         struct node* arg = *(struct node**)vector_at(args, i);
         struct datatype t = exp64_value(arg);
+        if(i < param_count && exp64_is_struct(&param_types[i]) != exp64_is_struct(&t)){
+            compiler_error(current_process, "Argument %i of the call is %s struct, the parameter %s\n",
+                i + 1, exp64_is_struct(&t) ? "a" : "not a", exp64_is_struct(&t) ? "is not" : "is one");
+        }
         if(exp64_is_struct(&t)){
             ops->push_struct(exp64_size(&t));
         } else {
-            if(params && i < vector_count(params)){
-                struct node* param = *(struct node**)vector_at(params, i);
-                exp64_convert(0, &t, &param->var.type);
-                if(exp64_is_floating(&t) || exp64_is_floating(&param->var.type)){
-                    t = param->var.type;
+            if(i < param_count){
+                exp64_convert(0, &t, &param_types[i]);
+                if(exp64_is_floating(&t) || exp64_is_floating(&param_types[i])){
+                    t = param_types[i];
                 }
             } else if(exp64_is_floating(&t) && t.size == DATA_SIZE_DWORD){
                 // The default argument promotions: a float passed to
@@ -984,11 +1191,11 @@ static struct datatype exp64_call(struct node* node){
     }
     // The arguments past the prototype's parameters of a variadic
     // function are its variadic ones; without a prototype all are named.
-    int named = params && variadic ? vector_count(params) : count;
+    int named = variadic ? param_count : count;
     call.count = count;
     call.args = calloc(count + 1, sizeof(struct exp64_arg));
     call.first_reg = exp64_first_reg(call.struct_size && !call.struct_in_regs);
-    call.stack_words = exp64_arg_layout(types, count, named, call.struct_size && !call.struct_in_regs, call.args);
+    call.stack_words = exp64_arg_layout(types, count, named, call.struct_size && !call.struct_in_regs, call.args, 0, 0);
     for(int i = 0; i < count; i++){
         if(call.args[i].fp && call.args[i].reg + 1 > call.fp_regs){
             call.fp_regs = call.args[i].reg + 1;
@@ -1012,6 +1219,9 @@ static struct datatype exp64_call(struct node* node){
     free(types);
     free(pushed);
     free(call.args);
+    if(own_param_types){
+        free(param_types);
+    }
     if(!call.struct_size && !exp64_is_void(&return_type) && !exp64_is_pointer(&return_type)
        && !exp64_is_floating(&return_type) && exp64_scalar_size(&return_type) < DATA_SIZE_DDWORD){
         // The ABIs leave the bits above a narrow return value undefined.

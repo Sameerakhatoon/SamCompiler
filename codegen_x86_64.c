@@ -780,6 +780,15 @@ static void x86_64_float_resize(int from, int to){
     x86_64_from_xmm("rax", 0, to);
 }
 
+// the stack pointer, for variable-length arrays.
+static void x86_64_sp_get(void){
+    asm_push("mov rax, rsp");
+}
+
+static void x86_64_sp_set(void){
+    asm_push("mov rsp, rax");
+}
+
 static const struct exp64_ops x86_64_ops = {
     .push           = x86_64_push,
     .push_struct    = x86_64_push_struct,
@@ -812,6 +821,8 @@ static const struct exp64_ops x86_64_ops = {
     .int_to_float   = x86_64_int_to_float,
     .float_to_int   = x86_64_float_to_int,
     .float_resize   = x86_64_float_resize,
+    .sp_get         = x86_64_sp_get,
+    .sp_set         = x86_64_sp_set,
 };
 
 // ---------------------------------------------------------------

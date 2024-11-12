@@ -5,9 +5,8 @@
 #     output, built by SamCompiler and linked with -lm on all four
 #     targets, against the output of the same program built by gcc;
 #   - what is rejected instead of miscompiled: long double, % on a
-#     double, va_arg of a double where it travels in a floating-point
-#     register (x86_64, aarch64; x86 reads dwords);
-#   - va_arg of a double on riscv64, where it is in the integer slots.
+#     double, va_arg of a float (it was promoted to double);
+#   - va_arg of a double on all four targets.
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
@@ -52,14 +51,24 @@ done
 vasrc='#include <stdarg.h>
 double sum(int n, ...){ va_list ap; double s = 0; va_start(ap, n); for(int i = 0; i < n; i++) s += va_arg(ap, double); va_end(ap); return s; }
 int main(void){ return sum(3, 1.5, 2.25, 0.25) == 4.0 ? 7 : 1; }'
-reject x86 "va_arg(ap, double)" "$vasrc" "va_arg of a float or double is not supported"
-reject x86_64 "va_arg(ap, double)" "$vasrc" "va_arg of a float or double is not supported"
-reject aarch64 "va_arg(ap, double)" "$vasrc" "va_arg of a float or double is not supported"
+fsrc='#include <stdarg.h>
+float first(int n, ...){ va_list ap; va_start(ap, n); float f = va_arg(ap, float); va_end(ap); return f; }
+int main(void){ return first(1, 1.5f) == 1.5f; }'
 
 printf '%s\n' "$vasrc" > "$tmp/va.c"
-./main -target=riscv64 "$tmp/va.c" "$tmp/va" >"$tmp/log" 2>&1 || fail "riscv64: va_arg(ap, double) did not build: $(tail -2 "$tmp/log")"
-rc=0
-qemu-riscv64 "$tmp/va" || rc=$?
-assert_eq 7 "$rc" "riscv64: va_arg(ap, double)"
+for target in x86 x86_64 aarch64 riscv64; do
+    # A float passed to `...` is a double: there is no float to read.
+    reject $target "va_arg(ap, float)" "$fsrc" "va_arg of a float"
+    case $target in
+        aarch64) run="qemu-aarch64" ;;
+        riscv64) run="qemu-riscv64" ;;
+        *)       run="" ;;
+    esac
+    ./main -target=$target "$tmp/va.c" "$tmp/va_$target" >"$tmp/log" 2>&1 \
+        || fail "$target: va_arg(ap, double) did not build: $(tail -2 "$tmp/log")"
+    rc=0
+    $run "$tmp/va_$target" || rc=$?
+    assert_eq 7 "$rc" "$target: va_arg(ap, double)"
+done
 
 pass

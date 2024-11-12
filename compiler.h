@@ -146,6 +146,18 @@ struct token {
         int flags;
     } num;
 
+    // Set on a u"", U"" or L"" TOKEN_TYPE_STRING: the bytes of one code
+    // unit (2 or 4) and the units, the terminating 0 not included.
+    // unit_size is 0 for a plain or u8"" string, which keeps its bytes
+    // in sval.
+    struct token_wide {
+        int           unit_size;
+        unsigned int* units;
+        int           count;
+        // L"": wchar_t, as opposed to char16_t / char32_t.
+        bool          is_wchar;
+    } wide;
+
     // True if there is whitespace between this token and the next token.
     // i.e. for input "* a", whitespace is set on the operator token "*".
     bool whitespace;
@@ -259,12 +271,14 @@ typedef void (*GENERATOR_ENTITY_ADDRESS)(struct generator* generator, struct res
 typedef void (*GENERATOR_END_EXPRESSION)(struct generator* generator);
 typedef void (*GENERATOR_FUNCTION_RETURN)(struct datatype* dtype, const char* fmt, ...);
 // per-target halves of the stdarg natives.
-//   va_start_store: the address of the last named parameter is in the
-//                   backend's address register; store it at list_address.
-//   va_arg_fetch:   the address of the va_list is in the address
-//                   register; step it past one argument of `size`
-//                   bytes and push that argument through ret.
-typedef void (*GENERATOR_VA_START_STORE)(struct generator* generator, const char* list_address);
+//   va_start_store: the address of the last named parameter, of
+//                   `last_size` bytes, is in the backend's address
+//                   register; store the address after it (the first
+//                   variadic argument) at list_address.
+//   va_arg_fetch:   the address of the va_list is pushed; step the
+//                   list past one argument of `size` bytes and push
+//                   that argument's address through ret.
+typedef void (*GENERATOR_VA_START_STORE)(struct generator* generator, const char* list_address, int last_size);
 typedef void (*GENERATOR_VA_ARG_FETCH)(struct generator* generator, int size);
 
 struct generator {
@@ -293,6 +307,11 @@ struct native_function {
 
 struct symbol* native_create_function(struct compile_process* compiler, const char* name,
                                       struct native_function_callbacks* callbacks);
+// the i386 halves of the variable-length array builtins
+// (exp64_vla is the 64-bit one).
+void codegen_x86_native_vla_save(struct generator* generator, struct native_function* func, struct vector* arguments);
+void codegen_x86_native_vla_alloc(struct generator* generator, struct native_function* func, struct vector* arguments);
+void codegen_x86_native_vla_restore(struct generator* generator, struct native_function* func, struct vector* arguments);
 struct native_function* native_function_get(struct compile_process* compiler, const char* name);
 
 // ch200: preprocessor scaffolding. Definitions, included files, the
@@ -474,6 +493,7 @@ const struct target* target_x86(void);
 const struct target* target_for_name(const char* name);
 const struct target* target_current(void);
 void                 target_set_current(const struct target* target);
+bool                 target_wchar_unsigned(const struct target* target);
 
 struct compile_process {
     // Flags controlling how this file should be compiled.
@@ -652,6 +672,9 @@ enum {
     NODE_FLAG_HAS_VARIABLE_COMBINED  = 0b00000100,
     // On a variable: the validator saw a name refer to it.
     NODE_FLAG_IS_REFERENCED          = 0b00001000,
+    // A bit-field access the parser has lowered: it stands for the
+    // whole unit the bit-field lives in.
+    NODE_FLAG_BITFIELD_UNIT          = 0b00010000,
 };
 
 // Datatype shape is needed before struct node because var nodes embed
@@ -683,6 +706,16 @@ struct datatype {
 
     // With DATATYPE_FLAG_IS_FUNCTION_POINTER: what the function returns.
     struct datatype* function_return;
+    // With DATATYPE_FLAG_IS_FUNCTION_POINTER: the parameter types, or
+    // NULL when the declarator names none (`int (*f)()`).
+    struct function_prototype* function_params;
+};
+
+// The parameters of a function pointer's type: a vector of struct
+// datatype, and whether `...` follows them.
+struct function_prototype {
+    struct vector* types;
+    bool           variadic;
 };
 
 // ch44: array-bracket list. A vector of NODE_TYPE_BRACKET nodes, one
@@ -699,6 +732,10 @@ struct initializer_leaf {
     size_t          offset;
     struct datatype type;
     struct node*    value;
+    // A bit-field: bit_width bits from bit_offset of the unit of `type`
+    // at `offset`; 0 for any other object.
+    int             bit_offset;
+    int             bit_width;
 };
 
 // ch115: per-function stack frame model. Every push (local variable,
@@ -792,6 +829,15 @@ struct node {
             int             aoffset;
             const char*     name;
             struct node*    val;
+            // A bit-field member: `width` bits from bit
+            // `bit_offset` of the unit of the member's type at aoffset.
+            // An unnamed one only takes room.
+            struct bitfield {
+                bool is_bitfield;
+                bool unnamed;
+                int  width;
+                int  bit_offset;
+            } bitfield;
         } var;
 
         struct varlist {
@@ -1336,6 +1382,9 @@ struct exp64_ops {
     // to an unsigned one with to_u64.
     void (*float_to_int)(int size, bool to_u64);
     void (*float_resize)(int from, int to);                     // float <-> double
+    // R0 = the stack pointer, and the stack pointer = R0.
+    void (*sp_get)(void);
+    void (*sp_set)(void);
 };
 
 // The floating-point argument registers every 64-bit ABI here has:
@@ -1763,6 +1812,9 @@ struct resolver_entity {
             // element or member): the access chain leaves its address,
             // and the call loads the pointer stored there.
             bool           through_pointer;
+            // The callee is the pointer another call returned
+            // (`pick(2)(4, 5)`): it is already the value.
+            bool           callee_is_value;
         } func_call_data;
 
         struct resolver_entity_rule {

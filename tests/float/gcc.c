@@ -12,6 +12,7 @@ long sam_to_long(double x);
 double sam_from_int(int x, unsigned u);
 double sam_calls_gcc(void);
 int sam_printf_check(void);
+double sam_vsum(int n, ...);
 
 /* Called by SamCompiler. */
 double gcc_add(double a, double b) { return a + b; }
@@ -47,5 +48,9 @@ int main(void) {
     if (sam_from_int(-3, 4000000000u) != 3999999997.0) fail |= 64;
     if (sam_calls_gcc() != 0) fail |= 128;
     if (sam_printf_check() != 0) fail |= 256;
+    double want = 0;
+    for (int i = 1; i <= 10; i++) want = (want * 2 + i + 0.5) + i * 3;
+    if (sam_vsum(10, 1.5, 3L, 2.5, 6L, 3.5, 9L, 4.5, 12L, 5.5, 15L, 6.5, 18L, 7.5, 21L, 8.5, 24L,
+                 9.5, 27L, 10.5, 30L) != want) fail |= 512;
     return fail ? 1 + (fail & 0x7f) + ((fail >> 7) ? 0x80 : 0) : 0;
 }

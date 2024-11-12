@@ -27,4 +27,15 @@ typedef long ptrdiff_t;
 #endif
 
 #define NULL 0
+
+// The type of L"" and L'x': an int, unsigned on aarch64.
+#ifndef SAMCC_WCHAR_T
+#define SAMCC_WCHAR_T
+#ifndef __aarch64__
+typedef int wchar_t;
+#endif
+#ifdef __aarch64__
+typedef unsigned int wchar_t;
+#endif
+#endif
 #endif

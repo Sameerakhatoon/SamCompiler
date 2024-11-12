@@ -19,7 +19,7 @@ expect_error global_var   'int h = 1; int g = h; int main(void){ return g; }' 'T
 expect_error dup_case     'int main(void){ switch (1) { case 2: case 1 + 1: return 0; } return 1; }' 'Duplicate case value 2'
 expect_error stray_case   'int main(void){ case 1: return 0; }' 'case label outside a switch statement'
 expect_error div_zero     'int g = 1 / 0; int main(void){ return g; }' 'Division by zero in a constant expression'
-expect_error array_size   'int main(void){ int n = 3; int a[n]; return 0; }' 'An array size must be an integer constant expression'
+expect_error array_size   'int n = 3; int a[n]; int main(void){ return 0; }' 'An array size must be an integer constant expression'
 expect_error enum_value   'int x; enum { A = x }; int main(void){ return A; }' 'The value of A must be an integer constant expression'
 
 pass

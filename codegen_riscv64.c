@@ -661,6 +661,15 @@ static void riscv64_float_resize(int from, int to){
     riscv64_from_freg("ft0", to);
 }
 
+// the stack pointer, for variable-length arrays.
+static void riscv64_sp_get(void){
+    asm_push("mv a0, sp");
+}
+
+static void riscv64_sp_set(void){
+    asm_push("mv sp, a0");
+}
+
 static const struct exp64_ops riscv64_ops = {
     .push           = riscv64_push,
     .push_struct    = riscv64_push_struct,
@@ -693,6 +702,8 @@ static const struct exp64_ops riscv64_ops = {
     .int_to_float   = riscv64_int_to_float,
     .float_to_int   = riscv64_float_to_int,
     .float_resize   = riscv64_float_resize,
+    .sp_get         = riscv64_sp_get,
+    .sp_set         = riscv64_sp_set,
 };
 
 // ---------------------------------------------------------------

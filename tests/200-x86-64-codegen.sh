@@ -69,8 +69,10 @@ assert_contains "$out" "mov rdi, [rsp+56]" "small struct argument in rdi"
 assert_contains "$out" $'lea rax, [rbp+64]\nadd rax, 16' "callee finds the stack struct above the home area"
 
 out=$(asm_for tests/golden/inputs/31_varargs.c)
-assert_contains "$out" $'lea rax, [rbp+16]\npush rax\nlea rax, [rbp-8]\nmov rcx, rax\npop rax\nmov qword [rcx], rax' "va_start stores an 8-byte pointer"
-assert_contains "$out" $'mov rax, qword [rax]\nadd rax, 8\npop rcx\nmov qword [rcx], rax\nmov rax, qword [rax]' "va_arg steps one 8-byte slot"
+assert_contains "$out" $'lea rax, [rbp+24]\npush rax\nlea rax, [rbp-40]\nmov rcx, rax\npop rax\nmov qword [rcx], rax' "va_start points gp past the named argument"
+assert_contains "$out" $'lea rax, [rbp+64]\npush rax\nlea rax, [rbp-40]\nadd rax, 16' "va_start points overflow at the stack arguments"
+assert_contains "$out" $'cmp rax, rcx\nseta al' "va_arg goes to the stack when the registers run out"
+assert_contains "$out" $'mov rax, qword [rax]\nadd rax, -8' "va_arg gives the slot it stepped past"
 
 out=$(asm_for tests/golden/inputs/39_pointer_size.c)
 # sizeof is folded per operand at parse time: 8 for int* and for long

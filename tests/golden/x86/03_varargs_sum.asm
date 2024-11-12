@@ -11,6 +11,7 @@ push ebx
 ; va_start on variable num
 lea ebx, [ebp+8]
 push ebx
+add ebx, 4
 mov dword [ebp-4], ebx
 ; va_start end for variable num
 push 0
@@ -19,24 +20,38 @@ add esp, 8
 ; native__builtin_va_arg start
 lea ebx, [ebp-4]
 push ebx
-add dword [ebx], 4
+pop ebx
 mov dword eax, [ebx]
-push dword [eax]
+add dword [ebx], 4
+push eax
 ; native__builtin_va_arg end
+; CAST
+; INDIRECTION
+pop ebx
+mov ebx, [ebx]
+push ebx
+pop eax
+push eax
 pop eax
 mov dword [ebp-8], eax
-add esp, 4
 ; NATIVE FUNCTION __builtin_va_arg
 ; native__builtin_va_arg start
 lea ebx, [ebp-4]
 push ebx
-add dword [ebx], 4
+pop ebx
 mov dword eax, [ebx]
-push dword [eax]
+add dword [ebx], 4
+push eax
 ; native__builtin_va_arg end
+; CAST
+; INDIRECTION
+pop ebx
+mov ebx, [ebx]
+push ebx
+pop eax
+push eax
 pop eax
 mov dword [ebp-12], eax
-add esp, 4
 push dword 0
 pop eax
 mov ebx, [ebp-20]

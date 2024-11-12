@@ -87,6 +87,7 @@ assert_contains "$out" $'add x0, sp, #0\nldr x1, [sp, #80]' "big struct by refer
 assert_contains "$out" $'add x0, x29, #16\nldr x0, [x0]\nadd x0, x0, #16' "callee reaches the big struct through its pointer"
 
 out=$(asm_for tests/golden/inputs/31_varargs.c)
-assert_contains "$out" $'add x0, x29, #16\nstr x0, [sp, #-16]!\nsub x0, x29, #8\nmov x1, x0\nldr x0, [sp], #16\nstr x0, [x1]' "va_start stores an 8-byte pointer"
-assert_contains "$out" $'ldr x0, [x0]\nadd x0, x0, #8\nldr x1, [sp], #16\nstr x0, [x1]\nldr x0, [x0]' "va_arg steps one 8-byte slot"
+assert_contains "$out" $'add x0, x29, #24\nstr x0, [sp, #-16]!\nsub x0, x29, #40\nmov x1, x0\nldr x0, [sp], #16\nstr x0, [x1]' "va_start points gp past the named argument"
+assert_contains "$out" $'cmp x0, x1\ncset w0, hi\ncbnz x0, .Lexp_3' "va_arg goes to the stack when the value does not fit in the registers left"
+assert_contains "$out" $'ldr x0, [x0]\nsub x0, x0, #8' "va_arg gives the slot it stepped past"
 pass

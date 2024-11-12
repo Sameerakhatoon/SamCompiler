@@ -361,7 +361,10 @@ static struct token* token_make_integer(const char* text){
 // simple escapes, one to three octal digits, or \x and hex digits. Only
 // \n \\ \t \' were known before; anything else became 0 (so "a\"b"
 // ended at the a), and \101 was read as decimal.
-static char lex_read_escape(void){
+// The value of the escape, at most `max`: 255 in a plain string or char
+// constant, the largest code unit in a wide one. \u and \U name a code
+// point, which only a wide literal holds here.
+static unsigned long lex_read_escape_value(unsigned long max){
     char c = nextc();
     switch(c){
         case 'n':  return '\n';
@@ -377,32 +380,37 @@ static char lex_read_escape(void){
         case '?':  return '?';
     }
     if(c >= '0' && c <= '7'){
-        int value = c - '0';
+        unsigned long value = c - '0';
         for(int i = 0; i < 2 && peekc() >= '0' && peekc() <= '7'; i++){
             value = value * 8 + (nextc() - '0');
         }
-        if(value > 255){
-            compiler_error(lex_process->compiler, "The octal escape \\%o does not fit in a char\n", value);
+        if(value > max){
+            compiler_error(lex_process->compiler, "The octal escape \\%lo does not fit in a char\n", value);
         }
-        return (char)value;
+        return value;
     }
-    if(c == 'x'){
-        int value = 0;
+    if(c == 'x' || ((c == 'u' || c == 'U') && max > 255)){
+        unsigned long value = 0;
         int digits = 0;
-        while(isxdigit(peekc())){
+        int wanted = c == 'u' ? 4 : c == 'U' ? 8 : 0;
+        while(isxdigit(peekc()) && (!wanted || digits < wanted)){
             value = value * 16 + lexer_digit_value(nextc());
             digits++;
-            if(value > 255){
+            if(value > max && c == 'x'){
                 compiler_error(lex_process->compiler, "The hex escape does not fit in a char\n");
             }
         }
-        if(digits == 0){
-            compiler_error(lex_process->compiler, "\\x needs at least one hex digit\n");
+        if(digits == 0 || (wanted && digits != wanted)){
+            compiler_error(lex_process->compiler, "\\%c needs %s hex digits\n", c, wanted == 4 ? "four" : wanted == 8 ? "eight" : "at least one");
         }
-        return (char)value;
+        return value;
     }
     compiler_error(lex_process->compiler, "Unknown escape sequence \\%c\n", c);
     return 0;
+}
+
+static char lex_read_escape(void){
+    return (char)lex_read_escape_value(255);
 }
 
 static struct token* token_make_string(char start_delim, char end_delim){
@@ -424,6 +432,96 @@ static struct token* token_make_string(char start_delim, char end_delim){
 
     buffer_write(buf, 0x00);
     return token_create(&(struct token){ .type = TOKEN_TYPE_STRING, .sval = buffer_ptr(buf) });
+}
+
+// One character of a wide literal: an escape, or a source character,
+// which is UTF-8 (C11 5.2.1.2), decoded to its code point.
+static unsigned long lex_read_wide_char(char first, unsigned long max){
+    if(first == '\\'){
+        return lex_read_escape_value(max);
+    }
+    unsigned char c = (unsigned char)first;
+    if(c < 0x80){
+        return c;
+    }
+    int more = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+    unsigned long value = c & (0x3F >> more);
+    for(int i = 0; i < more; i++){
+        unsigned char next = (unsigned char)peekc();
+        if((next & 0xC0) != 0x80){
+            break;
+        }
+        nextc();
+        value = (value << 6) | (next & 0x3F);
+    }
+    return value;
+}
+
+// Appends the code point as code units of `unit_size` bytes: UTF-16
+// for char16_t, so one beyond U+FFFF takes a surrogate pair.
+static void lex_push_unit(struct vector* units, unsigned long value, int unit_size){
+    if(unit_size == DATA_SIZE_WORD && value > 0xFFFF && value <= 0x10FFFF){
+        unsigned int high = 0xD800 + ((value - 0x10000) >> 10);
+        unsigned int low  = 0xDC00 + ((value - 0x10000) & 0x3FF);
+        vector_push(units, &high);
+        vector_push(units, &low);
+        return;
+    }
+    unsigned int unit = (unsigned int)value;
+    vector_push(units, &unit);
+}
+
+// Wide literals (C11 6.4.4.4, 6.4.5): L"..." of wchar_t (4 bytes on
+// the Linux targets), u"..." of char16_t, U"..." of char32_t, and
+// u8"..." of char, which is a plain string. The prefix is already read;
+// a string keeps its code units for the parser, a character constant
+// is a number like 'x'.
+static struct token* token_make_prefixed_literal(const char* prefix){
+    char delim = nextc();
+    if(S_EQ(prefix, "u8")){
+        if(delim == '\''){
+            compiler_error(lex_process->compiler, "u8 character constants are not supported\n");
+        }
+        pushc(delim);
+        return token_make_string('"', '"');
+    }
+    int unit_size = S_EQ(prefix, "u") ? DATA_SIZE_WORD : DATA_SIZE_DWORD;
+    unsigned long max = unit_size == DATA_SIZE_WORD ? 0xFFFF : 0xFFFFFFFFul;
+    struct vector* units = vector_create(sizeof(unsigned int));
+    for(char c = nextc(); c != delim; c = nextc()){
+        if(c == EOF || c == '\n'){
+            compiler_error(lex_process->compiler, "Missing the closing %c of a string\n", delim);
+        }
+        unsigned long value = lex_read_wide_char(c, max);
+        lex_push_unit(units, value, unit_size);
+    }
+    if(delim == '\''){
+        if(vector_count(units) != 1){
+            compiler_error(lex_process->compiler, "A %s character constant holds one character\n", prefix);
+        }
+        unsigned int unit = *(unsigned int*)vector_at(units, 0);
+        // L'x' has type wchar_t, which is int except on aarch64; u'x' and
+        // U'x' are unsigned. A value past INT_MAX is unsigned int.
+        long long value = unit;
+        bool wchar_signed = S_EQ(prefix, "L") && !target_wchar_unsigned(target_current());
+        if(wchar_signed){
+            value = (int)unit;
+        }
+        return token_create(&(struct token){
+            .type      = TOKEN_TYPE_NUMBER,
+            .llnum     = (unsigned long long)value,
+            .num.flags = value > 0x7FFFFFFF ? NUMBER_FLAG_UNSIGNED : 0,
+        });
+    }
+    unsigned int* data = calloc(vector_count(units) + 1, sizeof(unsigned int));
+    for(int i = 0; i < vector_count(units); i++){
+        data[i] = *(unsigned int*)vector_at(units, i);
+    }
+    return token_create(&(struct token){
+        .type = TOKEN_TYPE_STRING,
+        .sval = "",
+        .wide = { .unit_size = unit_size, .units = data, .count = vector_count(units), .is_wchar = S_EQ(prefix, "L") },
+    });
 }
 
 // "Treated as one" operators never combine with the next char into a
@@ -709,6 +807,12 @@ static struct token* token_make_identifier_or_keyword(void){
     if(len > IDENTIFIER_MAX_LENGTH){
         compiler_error(lex_process->compiler, "Identifier %.32s... is %zu characters long, the limit is %i",
             buffer_ptr(buffer), len, IDENTIFIER_MAX_LENGTH);
+    }
+
+    const char* text = buffer_ptr(buffer);
+    if((S_EQ(text, "L") || S_EQ(text, "u") || S_EQ(text, "U") || S_EQ(text, "u8"))
+       && (peekc() == '"' || peekc() == '\'')){
+        return token_make_prefixed_literal(text);
     }
 
     if(is_keyword(buffer_ptr(buffer))){
