@@ -167,8 +167,28 @@ static struct token* token_make_number(void){
 
 // Reads a string literal delimited by start_delim/end_delim. Consumes the
 // opening delimiter (asserted), then everything up to but not including
-// the closing delimiter. ch9 just skips backslashes; real escape handling
-// arrives later.
+// the closing delimiter. ch9 stubs out escapes; ch182 wires the real
+// handler.
+static void lex_handle_escape_number(struct buffer* buf){
+    long long number = read_number();
+    if(number > 255){
+        compiler_error(lex_process->compiler,
+            "Characters must be 0-255 wide chars are not yet supported\n");
+    }
+    buffer_write(buf, (char)number);
+}
+
+static void lex_handle_escape(struct buffer* buf){
+    char c = peekc();
+    if(isdigit(c)){
+        lex_handle_escape_number(buf);
+        return;
+    }
+    char co = lex_get_escaped_char(c);
+    buffer_write(buf, co);
+    nextc();
+}
+
 static struct token* token_make_string(char start_delim, char end_delim){
     struct buffer* buf = buffer_create();
     assert(nextc() == start_delim);
@@ -176,7 +196,8 @@ static struct token* token_make_string(char start_delim, char end_delim){
     char c;
     for(c = nextc(); c != end_delim && c != EOF; c = nextc()){
         if(c == '\\'){
-            // TODO(ch-later): real escape-sequence handling.
+            // ch182: real escape-sequence handling.
+            lex_handle_escape(buf);
             continue;
         }
         buffer_write(buf, c);
