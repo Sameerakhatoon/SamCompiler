@@ -372,6 +372,7 @@ static struct datatype exp64_indirection_address(struct node* node){
 }
 
 static struct datatype exp64_address(struct node* node){
+    compiler_check_stack(current_process);
     if(node->pos.line){
         current_process->pos = node->pos;
     }
@@ -518,7 +519,9 @@ static struct datatype exp64_arith(const char* op, struct datatype* lt, struct d
 // (`n < 20000000ul`, `i + 1`). The loops SamOS's tests time ran ten
 // times slower than gcc -O0's.
 static struct datatype exp64_binary(struct node* node){
-    struct datatype lt = exp64_value(node->exp.left);
+    // exp64_rvalue rather than exp64_value: the left operands of a long
+    // chain nest, and each frame counts.
+    struct datatype lt = exp64_rvalue(node->exp.left, true);
     if(node->exp.right->type == NODE_TYPE_NUMBER){
         struct datatype rt = exp64_number_type(node->exp.right);
         ops->imm(1, exp64_number_value(node->exp.right));
@@ -1377,9 +1380,21 @@ static struct datatype exp64_rvalue_of(struct node* node, bool decay);
 // value in R0 the room is dropped, so whatever was pushed before is
 // on top again.
 static struct datatype exp64_rvalue(struct node* node, bool decay){
+    compiler_check_stack(current_process);
     struct vector* ledger = current_function->func.frame.elements;
     int mark = vector_count(ledger);
-    struct datatype t = exp64_rvalue_of(node, decay);
+    // An operator goes straight to exp64_expression: one frame less for
+    // each level of a long `a + b + ...`, whose left operands nest (the
+    // stack limit).
+    struct datatype t;
+    if(node->type == NODE_TYPE_EXPRESSION){
+        if(node->pos.line){
+            current_process->pos = node->pos;
+        }
+        t = exp64_expression(node, decay);
+    } else {
+        t = exp64_rvalue_of(node, decay);
+    }
     if(vector_count(ledger) > mark && !exp64_is_struct(&t)){
         ops->drop(vector_count(ledger) - mark);
     }

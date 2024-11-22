@@ -1,6 +1,10 @@
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
 #include "compiler.h"
 #include "helpers/vector.h"
 #include "helpers/buffer.h"
@@ -15,6 +19,11 @@ void compiler_add_cli_macro_line(const char* line){
         compiler_cli_macro_lines = vector_create(sizeof(const char*));
     }
     vector_push(compiler_cli_macro_lines, &line);
+}
+
+// The arena frees the lines with the compile (compiler_teardown).
+void compiler_clear_cli_macro_lines(void){
+    compiler_cli_macro_lines = 0;
 }
 
 // The -D / -U lines are lexed from a memory FILE*. The string-buffer
@@ -285,7 +294,10 @@ static struct compile_process* compile_include_path(const char* path, struct com
         return NULL;
     }
 
-    if(lex(lex_process) != LEXICAL_ANALYSIS_ALL_OK){
+    // The header is fully read into tokens after lex; close it either way.
+    int lex_res = lex(lex_process);
+    compile_process_close_files(process);
+    if(lex_res != LEXICAL_ANALYSIS_ALL_OK){
         return NULL;
     }
 
@@ -353,11 +365,58 @@ struct compile_process* compile_include_search(const char* filename, struct comp
     return NULL;
 }
 
+// The parser, resolver and code generators recurse over the source's
+// nesting, so 50,000 nested parentheses (or a 15,000-term expression)
+// overflowed the stack and crashed. The deepest
+// recursive steps call compiler_check_stack(), which stops the compile
+// with an error once this compile has used all but an eighth (at most
+// 1 MB) of the stack limit. That headroom covers the frames between two
+// checks and printing the error. C only requires 63 levels of nesting.
+static uintptr_t compiler_stack_base;
+static size_t    compiler_stack_limit;
+static size_t    compiler_stack_budget;
+
+static void compiler_stack_start(void){
+    char here;
+    size_t limit = 8 * 1024 * 1024;
+#ifndef _WIN32
+    struct rlimit rl;
+    if(getrlimit(RLIMIT_STACK, &rl) == 0){
+        // No limit: the stack can still run into other mappings.
+        limit = rl.rlim_cur == RLIM_INFINITY ? (size_t)64 * 1024 * 1024 : (size_t)rl.rlim_cur;
+    }
+#else
+    limit = 1024 * 1024;
+#endif
+    size_t headroom = limit / 8;
+    if(headroom > 1024 * 1024){
+        headroom = 1024 * 1024;
+    }
+    compiler_stack_base   = (uintptr_t)&here;
+    compiler_stack_limit  = limit;
+    compiler_stack_budget = limit - headroom;
+}
+
+void compiler_check_stack(struct compile_process* compiler){
+    char here;
+    uintptr_t now = (uintptr_t)&here;
+    if(!compiler_stack_base){
+        return;
+    }
+    size_t used = now < compiler_stack_base ? compiler_stack_base - now : now - compiler_stack_base;
+    if(used > compiler_stack_budget){
+        compiler_error(compiler, "The program is nested too deeply to compile (expressions, parentheses or blocks); "
+            "this compiler ran out of its %zu KB stack. Split the expression or raise the stack limit (ulimit -s)",
+            compiler_stack_limit / 1024);
+    }
+}
+
 int compile_file(const char* filename, const char* out_filename, int flags){
     int                     res         = COMPILER_FILE_COMPILED_OK;
     struct compile_process* process     = 0;
     struct lex_process*     lex_process = 0;
 
+    compiler_stack_start();
     process = compile_process_create(filename, out_filename, flags, NULL);
     if(!process){
         res = COMPILER_FAILED_WITH_ERRORS;
@@ -374,6 +433,14 @@ int compile_file(const char* filename, const char* out_filename, int flags){
     if(lex(lex_process) != LEXICAL_ANALYSIS_ALL_OK){
         res = COMPILER_FAILED_WITH_ERRORS;
         goto out;
+    }
+    // The source file is fully read into tokens; close it now (but not
+    // standard input, the `-` source of the driver).
+    if(process->cfile.fp){
+        if(process->cfile.fp != stdin){
+            fclose(process->cfile.fp);
+        }
+        process->cfile.fp = 0;
     }
 
     // ch200: stash the raw lexer output as token_vec_original; the
@@ -429,5 +496,11 @@ int compile_file(const char* filename, const char* out_filename, int flags){
     }
 
 out:
+    // Close whatever is still open (a failed compile leaves both files
+    // open) and free everything the compile allocated.
+    if(process){
+        compile_process_close_files(process);
+    }
+    compiler_teardown();
     return res;
 }

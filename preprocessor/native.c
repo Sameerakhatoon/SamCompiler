@@ -71,8 +71,29 @@ static void preprocessor_create_target_definitions(struct preprocessor* preproce
     }
 }
 
+// GNU spellings that system headers and code written for gcc use. None
+// of them changes what this compiler generates, so they expand to
+// nothing: __attribute__((...)) with whatever it holds, __extension__,
+// and the reserved spellings of restrict and inline.
+static void preprocessor_create_gnu_definitions(struct preprocessor* preprocessor)
+{
+    static const char* empty[] = { "__extension__", "__restrict", "__restrict__", "__inline", "__inline__", 0 };
+    for (int i = 0; empty[i]; i++)
+    {
+        preprocessor_definition_create(empty[i], vector_create(sizeof(struct token)), NULL, preprocessor);
+    }
+    // Variadic, so the commas in __attribute__((format(printf, 1, 2)))
+    // are fine.
+    struct vector* arguments = vector_create(sizeof(const char*));
+    const char* argument = "__VA_ARGS__";
+    vector_push(arguments, &argument);
+    struct preprocessor_definition* attribute = preprocessor_definition_create("__attribute__", vector_create(sizeof(struct token)), arguments, preprocessor);
+    attribute->standard.variadic = true;
+}
+
 void preprocessor_create_definitions(struct preprocessor* preprocessor)
 {
+    preprocessor_create_gnu_definitions(preprocessor);
     preprocessor_definition_create_native("__LINE__", preprocessor_line_macro_evaluate, preprocessor_line_macro_value, preprocessor);
     preprocessor_definition_create_native("__FILE__", preprocessor_file_macro_evaluate, preprocessor_file_macro_value, preprocessor);
     // C11 6.10.8.1. __STDC_VERSION__ says C99: the language this

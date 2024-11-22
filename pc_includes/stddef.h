@@ -26,6 +26,13 @@ typedef int ptrdiff_t;
 typedef long ptrdiff_t;
 #endif
 
+// C11 max_align_t, aligned like the most aligned scalar SamCompiler has
+// (long double is not supported). helpers/arena.c uses it.
+#ifndef SAMCC_MAX_ALIGN_T
+#define SAMCC_MAX_ALIGN_T
+typedef struct { long __sam_l; double __sam_d; } max_align_t;
+#endif
+
 #define NULL 0
 
 // The type of L"" and L'x': an int, unsigned on aarch64.

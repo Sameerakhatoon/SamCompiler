@@ -61,8 +61,8 @@ int main(void){
     int has_orig = p->token_vec_original != NULL;
     int has_tok  = p->token_vec != NULL;
     // ch227 lands the __LINE__ native built-in so a fresh
-    // preprocessor's definitions vector holds the 5 built-in macros.
-    int defs_one  = p->preprocessor && vector_count(p->preprocessor->definitions) == 5;
+    // preprocessor's definitions vector holds the 11 built-in macros (six GNU no-ops).
+    int defs_one  = p->preprocessor && vector_count(p->preprocessor->definitions) == 11;
     int inc_empty = p->preprocessor && vector_count(p->preprocessor->includes) == 0;
     printf("pp=%d dirs=%d orig=%d tok=%d defs1=%d inc0=%d\n",
         has_pp, has_dirs, has_orig, has_tok, defs_one, inc_empty);

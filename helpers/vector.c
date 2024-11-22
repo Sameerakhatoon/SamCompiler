@@ -1,4 +1,5 @@
 #include "vector.h"
+#include "arena.h"
 #include <memory.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -49,21 +50,34 @@ struct vector *vector_clone(struct vector *vector)
     struct vector *new_vec = calloc(sizeof(struct vector), 1);
     memcpy(new_vec, vector, sizeof(struct vector));
     new_vec->data = new_data_address;
+    // The clone's allocation holds count + VECTOR_ELEMENT_INCREMENT
+    // elements; the copied mindex described the original's.
+    new_vec->mindex = vector->count;
 
-    // Saves are not cloned with vector_clone yet.
-    // assert(vector->saves == NULL);
+    // Saves are not cloned. Sharing the original's save stack made
+    // vector_free unable to free it; the clone makes its own on demand.
+    new_vec->saves = NULL;
     return new_vec;
 }
 
 struct vector *vector_create(size_t esize)
 {
-    struct vector *vec = vector_create_no_saves(esize);
-    vec->saves = vector_create_no_saves(sizeof(struct vector));
-    return vec;
+    // The save stack is created by the first vector_save. Creating it
+    // here cost every vector another 20 * sizeof(struct vector) bytes,
+    // and only the token vectors are ever saved.
+    return vector_create_no_saves(esize);
 }
 
 void vector_free(struct vector *vector)
 {
+    if (!vector)
+    {
+        return;
+    }
+    if (vector->saves)
+    {
+        vector_free(vector->saves);
+    }
     free(vector->data);
     free(vector);
 }
@@ -81,9 +95,19 @@ void vector_resize_for_index(struct vector *vector, int start_index, int total_e
         return;
     }
 
-    vector->data = realloc(vector->data, ((start_index + total_elements + VECTOR_ELEMENT_INCREMENT) * vector->esize));
+    // Grow geometrically. Growing by a fixed 20 elements set mindex to the
+    // current index, so every push past the first 20 called realloc and a
+    // run of n pushes copied O(n^2) bytes. Doubling makes it O(n). The
+    // allocation keeps VECTOR_ELEMENT_INCREMENT spare elements past mindex.
+    size_t needed = (size_t)start_index + total_elements + VECTOR_ELEMENT_INCREMENT;
+    size_t capacity = ((size_t)vector->mindex + VECTOR_ELEMENT_INCREMENT) * 2;
+    if (capacity < needed)
+    {
+        capacity = needed;
+    }
+    vector->data = realloc(vector->data, capacity * vector->esize);
     assert(vector->data);
-    vector->mindex = start_index + total_elements;
+    vector->mindex = (int)(capacity - VECTOR_ELEMENT_INCREMENT);
 }
 
 void vector_resize_for(struct vector *vector, int total_elements)
@@ -210,6 +234,10 @@ void vector_save(struct vector *vector)
     // We not allowed to modify the saves so set it to NULL
     // when we push it to the save stack.
     tmp_vec.saves = NULL;
+    if (!vector->saves)
+    {
+        vector->saves = vector_create_no_saves(sizeof(struct vector));
+    }
     vector_push(vector->saves, &tmp_vec);
 }
 
@@ -217,6 +245,10 @@ void vector_restore(struct vector *vector)
 {
     struct vector save_vec = *((struct vector *)(vector_back(vector->saves)));
     save_vec.saves = vector->saves;
+    // Data is not restored: keep the current allocation, which a push
+    // since the save may have moved.
+    save_vec.data = vector->data;
+    save_vec.mindex = vector->mindex;
     *vector = save_vec;
     vector_pop(vector->saves);
 }
@@ -280,7 +312,9 @@ int vector_elements_until_end(struct vector *vector, int index)
 
 void vector_shift_right_in_bounds_no_increment(struct vector *vector, int index, int amount)
 {
-    vector_resize_for_index(vector, index, amount);
+    // Room for every element after the shift, not just index + amount,
+    // and memmove because the two ranges overlap.
+    vector_resize_for_index(vector, vector->count, amount);
     int eindex = (index + amount);
     size_t bytes_to_move = vector_elements_until_end(vector, index) * vector->esize;
     // The ranges overlap whenever more than `amount` elements move.

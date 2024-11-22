@@ -8,8 +8,56 @@ static void symresolver_build_for_function_node(struct compile_process* process,
 static void symresolver_build_for_structure_node(struct compile_process* process, struct node* node);
 static void symresolver_build_for_union_node(struct compile_process* process, struct node* node);
 
+// Lookups used to strcmp every symbol of the table in order, so a file
+// with n functions took O(n^2) to compile. Every registered symbol is
+// also chained into a hash keyed by name; an entry remembers the table
+// (vector) it belongs to, because each function body gets its own.
+#define SYMRESOLVER_HASH_SIZE 4096
+
+struct symresolver_entry {
+    struct vector*            table;
+    struct symbol*            sym;
+    struct symresolver_entry* next;
+};
+
+static struct symresolver_entry* symresolver_hash[SYMRESOLVER_HASH_SIZE];
+
+// FNV-1a. A NULL name (never found by S_EQ) lands in bucket 0.
+static unsigned symresolver_hash_name(const char* name){
+    unsigned hash = 2166136261u;
+    if(!name){
+        return 0;
+    }
+    for(const unsigned char* c = (const unsigned char*)name; *c; c++){
+        hash = (hash ^ *c) * 16777619u;
+    }
+    return hash % SYMRESOLVER_HASH_SIZE;
+}
+
 static void symresolver_push_symbol(struct compile_process* process, struct symbol* sym){
     vector_push(process->symbols.table, &sym);
+    // A table holds one symbol per name, so the chain order only
+    // matters between tables.
+    struct symresolver_entry* entry = calloc(1, sizeof(struct symresolver_entry));
+    unsigned bucket = symresolver_hash_name(sym->name);
+    entry->table = process->symbols.table;
+    entry->sym   = sym;
+    entry->next  = symresolver_hash[bucket];
+    symresolver_hash[bucket] = entry;
+}
+
+// Free every symbol and the hash. Called once the compile is over.
+void symresolver_free_all(void){
+    for(int i = 0; i < SYMRESOLVER_HASH_SIZE; i++){
+        struct symresolver_entry* entry = symresolver_hash[i];
+        while(entry){
+            struct symresolver_entry* next = entry->next;
+            free(entry->sym);
+            free(entry);
+            entry = next;
+        }
+        symresolver_hash[i] = 0;
+    }
 }
 
 void symresolver_initialize(struct compile_process* process){
@@ -31,15 +79,16 @@ void symresolver_end_table(struct compile_process* process){
 }
 
 struct symbol* symresolver_get_symbol(struct compile_process* process, const char* name){
-    vector_set_peek_pointer(process->symbols.table, 0);
-    struct symbol* symbol = vector_peek_ptr(process->symbols.table);
-    while(symbol){
-        if(S_EQ(symbol->name, name)){
-            break;
-        }
-        symbol = vector_peek_ptr(process->symbols.table);
+    if(!name){
+        return 0;
     }
-    return symbol;
+    struct symresolver_entry* entry = symresolver_hash[symresolver_hash_name(name)];
+    for(; entry; entry = entry->next){
+        if(entry->table == process->symbols.table && S_EQ(entry->sym->name, name)){
+            return entry->sym;
+        }
+    }
+    return 0;
 }
 
 // The symbol in the current table or, failing that, in the saved ones,

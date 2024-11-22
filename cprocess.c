@@ -134,8 +134,8 @@ struct compile_process* compile_process_create(const char* filename, const char*
     char* path = malloc(PATH_MAX);
     if(from_stdin){
         strcpy(path, "<stdin>");
-    } else {
-        realpath(filename, path);
+    } else if(!compiler_real_path(filename, path)){
+        snprintf(path, PATH_MAX, "%s", filename);
     }
     process->cfile.abs_path = path;
     // The path given may be a caller's stack buffer (compile_include).
@@ -152,6 +152,37 @@ out_err:
         fclose(file);
     }
     return 0;
+}
+
+// Standard input (the driver's `-` source) and standard output are not
+// closed, only let go.
+void compile_process_close_files(struct compile_process* process){
+    if(process->cfile.fp){
+        if(process->cfile.fp != stdin){
+            fclose(process->cfile.fp);
+        }
+        process->cfile.fp = 0;
+    }
+    if(process->ofile){
+        if(process->ofile != stdout){
+            fclose(process->ofile);
+        }
+        process->ofile = 0;
+    }
+}
+
+// End of a compile: drop the lookup tables that point into compiler
+// memory, then free every block the compile allocated (helpers/arena.c).
+// The include directories and -D/-U lines the driver added were
+// allocated too.
+void compiler_teardown(void){
+    symresolver_free_all();
+    resolver_free_lookup();
+    node_set_vector(0, 0);
+    node_defined_forget();
+    compiler_extra_include_dirs = 0;
+    compiler_clear_cli_macro_lines();
+    arena_free_all();
 }
 
 char compile_process_next_char(struct lex_process* lex_process){

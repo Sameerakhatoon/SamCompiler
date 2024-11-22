@@ -1448,8 +1448,11 @@ void preprocessor_handle_typedef_token(struct compile_process *compiler, struct 
     // `*`s in the first parentheses. It comes out, and fn stands for
     // the rest, `int (*)(int)`; the parser takes a name after that
     // abstract declarator (parse_function_pointer_declarator).
+    // The same with a struct return type and no body,
+    // `typedef struct r* (*fn)(int);`, which compiler.h itself uses.
     const char *function_pointer_name = NULL;
-    if (td.type == TYPEDEF_TYPE_STANDARD)
+    if (td.type == TYPEDEF_TYPE_STANDARD
+        || (td.type == TYPEDEF_TYPE_STRUCTURE_TYPEDEF && td.structure.no_body))
     {
         int count = vector_count(token_vec);
         for (int i = 0; i < count; i++)
@@ -2090,7 +2093,11 @@ struct token *preprocessor_handle_identifier_macro_call_argument_parse_parenthes
     {
         if (token_is_operator(next_token, "("))
         {
+            // The token after the inner group may itself be ( or ):
+            // look at it again rather than copying it, or
+            // F((g(x))) ended the argument at the wrong ).
             next_token = preprocessor_handle_identifier_macro_call_argument_parse_parentheses(compiler, src_vec, value_vec, arguments, next_token);
+            continue;
         }
         vector_push(value_vec, next_token);
         next_token = vector_peek(src_vec);

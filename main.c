@@ -87,7 +87,7 @@ static void main_error(const char* fmt, ...){
 static bool main_same_file(const char* a, const char* b){
     char real_a[PATH_MAX];
     char real_b[PATH_MAX];
-    if(!realpath(a, real_a) || !realpath(b, real_b)){
+    if(!compiler_real_path(a, real_a) || !compiler_real_path(b, real_b)){
         return false;
     }
     return strcmp(real_a, real_b) == 0;

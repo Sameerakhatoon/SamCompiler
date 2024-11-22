@@ -497,12 +497,29 @@ static void parse_expressionable_for_op(struct history* history, const char* op)
 // *group_out. Returns -1 if the operator isn't in any group.
 static int parser_get_precedence_for_operator(const char* op,
                                               struct expressionable_op_precedence_group** group_out){
+    // The reorder asks about the same few operators over and over (twice
+    // per rotation); remember the last answer instead of scanning the
+    // table with strcmp each time.
+    static char cached_op[8];
+    static int  cached_index = -1;
     *group_out = 0;
+    if(op && cached_op[0] && strcmp(cached_op, op) == 0){
+        if(cached_index >= 0){
+            *group_out = &op_precedence[cached_index];
+        }
+        return cached_index;
+    }
+    cached_op[0] = 0;
+    if(op && strlen(op) < sizeof(cached_op)){
+        strcpy(cached_op, op);
+    }
+    cached_index = -1;
     for(int i = 0; i < TOTAL_OPERATOR_GROUPS; i++){
         for(int b = 0; op_precedence[i].operators[b]; b++){
             const char* _op = op_precedence[i].operators[b];
             if(S_EQ(op, _op)){
-                *group_out = &op_precedence[i];
+                *group_out   = &op_precedence[i];
+                cached_index = i;
                 return i;
             }
         }
@@ -564,13 +581,25 @@ static void parser_node_shift_children_left(struct node* node){
     assert(node->type == NODE_TYPE_EXPRESSION);
     assert(node->exp.right->type == NODE_TYPE_EXPRESSION);
 
-    const char*  right_op           = node->exp.right->exp.op;
+    struct node* right              = node->exp.right;
+    const char*  right_op           = right->exp.op;
     struct node* new_exp_left_node  = node->exp.left;
-    struct node* new_exp_right_node = node->exp.right->exp.left;
-    make_exp_node(new_exp_left_node, new_exp_right_node, node->exp.op);
+    struct node* new_exp_right_node = right->exp.left;
+    struct node* new_right_operand  = right->exp.right;
 
-    struct node* new_left_operand  = node_pop();
-    struct node* new_right_operand = node->exp.right->exp.right;
+    // The old right node leaves the tree here, so it becomes the new
+    // left node, rebuilt as make_exp_node would build a fresh one. A
+    // new node per shift made a chain of n same-precedence terms
+    // allocate O(n^2) nodes: 4,000 terms took 1.7 GB.
+    *right = (struct node){
+        .type      = NODE_TYPE_EXPRESSION,
+        .exp.left  = new_exp_left_node,
+        .exp.right = new_exp_right_node,
+        .exp.op    = node->exp.op,
+    };
+    right->binded.owner    = parser_current_body;
+    right->binded.function = parser_current_function;
+    struct node* new_left_operand = right;
 
     node->exp.left  = new_left_operand;
     node->exp.right = new_right_operand;
@@ -587,6 +616,140 @@ static bool parser_is_complete_operand(struct node* node){
     }
     return S_EQ(node->exp.op, "[]") || S_EQ(node->exp.op, "()")
         || is_access_operator(node->exp.op);
+}
+
+// ch101 + ch175: extra reordering. ch101 was too aggressive
+// (`||` between the array and assignment tests reordered any
+// `a[i] op b` regardless of op). ch175 tightens to:
+//   - LHS array AND RHS assignment, or
+//   - LHS `()` or `[]` AND RHS `,`.
+static bool parser_needs_extra_reorder(struct node* node){
+    return (is_array_node(node->exp.left) && is_node_assignment(node->exp.right))
+        || ((node_is_expression(node->exp.left, "()")
+             || node_is_expression(node->exp.left, "[]"))
+            && node_is_expression(node->exp.right, ","));
+}
+
+// A right child the reorder leaves alone wherever it sits: reordering
+// it changes nothing (mirrors parser_reorder_expression's tests) and it
+// can never satisfy the extra rule from the right (not an assignment,
+// not a comma).
+static bool parser_is_quiet_right(struct node* node){
+    if(!node){
+        return false;
+    }
+    if(node->type != NODE_TYPE_EXPRESSION){
+        return true;
+    }
+    if(!node->exp.right || is_node_assignment(node) || node_is_expression(node, ",")){
+        return false;
+    }
+    bool complete_left = parser_is_complete_operand(node->exp.left);
+    if(complete_left && node->exp.right->type != NODE_TYPE_EXPRESSION){
+        return true;
+    }
+    if(complete_left && parser_left_op_has_priority(node->exp.op, node->exp.right->exp.op)){
+        return false;
+    }
+    return !parser_needs_extra_reorder(node);
+}
+
+// A run: root, root->exp.left, ... down to tail, every one an expression
+// whose operator is in one precedence group (not &&, || or ,, which
+// never shift over themselves) and whose right child is quiet. For a
+// left operand with priority over that group, the recursive reorder
+// does nothing on a run but shift, level after level.
+static struct {
+    struct node* root;
+    struct node* tail;
+} parser_run;
+
+static bool parser_is_run_op(const char* op){
+    return op && !S_EQ(op, "&&") && !S_EQ(op, "||") && !S_EQ(op, ",");
+}
+
+static bool parser_same_group(const char* op_a, const char* op_b){
+    struct expressionable_op_precedence_group* group = 0;
+    int a = parser_get_precedence_for_operator(op_a, &group);
+    int b = parser_get_precedence_for_operator(op_b, &group);
+    return a >= 0 && a == b;
+}
+
+static bool parser_is_run_node(struct node* node, const char* root_op){
+    return node && node->type == NODE_TYPE_EXPRESSION
+        && parser_is_run_op(node->exp.op)
+        && parser_same_group(node->exp.op, root_op)
+        && parser_is_quiet_right(node->exp.right);
+}
+
+// Record the run that starts at exp_node, the operand the enclosing
+// level of the right-recursive parse is about to reorder. Extending a
+// run kept from the previous level costs O(1) per level for a chain.
+static void parser_run_note(struct node* exp_node){
+    if(parser_run.root != exp_node){
+        parser_run.root = parser_run.tail = 0;
+        if(!parser_is_run_node(exp_node, exp_node->exp.op)){
+            return;
+        }
+        parser_run.root = parser_run.tail = exp_node;
+    }
+    const char* op = exp_node->exp.op;
+    while(parser_is_run_node(parser_run.tail->exp.left, op)){
+        parser_run.tail = parser_run.tail->exp.left;
+    }
+}
+
+// `a + b + c + ...` is parsed right to left, so each new left operand
+// travelled down the whole left spine of the already ordered right side,
+// one shift and two recursive calls per level: O(n^2) for n terms.
+//
+// Shifting node (t1 op1 S0) down a run S0 .. S(k-1) ends with node
+// holding S0's operator and operands, every Sj (j >= 1) in its place
+// and (t1 op1 X) at the bottom, X being S(k-1)'s old left operand. So
+// when the right operand is the recorded run, node takes S0's contents
+// and the S0 node becomes the bottom, in O(1). Below the run (or with
+// no record) the remaining levels that qualify are shifted in a loop.
+// Returns the node where the shifting stopped, which the caller hands
+// back to the full reorder, or NULL when not even one level qualifies.
+// Same tree as the recursion built.
+static struct node* parser_shift_run_left(struct node* node){
+    struct node* cur = node;
+    bool shifted = false;
+    struct node* first = node->exp.right;
+    if(first && first == parser_run.root && parser_run.tail != first
+       && parser_is_run_node(first, first->exp.op)
+       && parser_is_run_node(parser_run.tail, first->exp.op)
+       && parser_left_op_has_priority(node->exp.op, first->exp.op)){
+        struct node* tail = parser_run.tail;
+        struct node* t1   = node->exp.left;
+        const char*  op1  = node->exp.op;
+        struct node* x    = tail->exp.left;
+        node->exp.left  = first->exp.left;
+        node->exp.right = first->exp.right;
+        node->exp.op    = first->exp.op;
+        *first = (struct node){
+            .type      = NODE_TYPE_EXPRESSION,
+            .exp.left  = t1,
+            .exp.right = x,
+            .exp.op    = op1,
+        };
+        first->binded.owner    = parser_current_body;
+        first->binded.function = parser_current_function;
+        tail->exp.left = first;
+        // node now heads the same run down to tail.
+        parser_run.root = node;
+        cur     = first;
+        shifted = true;
+    }
+    while(cur->exp.right
+          && cur->exp.right->type == NODE_TYPE_EXPRESSION
+          && parser_is_quiet_right(cur->exp.right->exp.right)
+          && parser_left_op_has_priority(cur->exp.op, cur->exp.right->exp.op)){
+        parser_node_shift_children_left(cur);
+        cur = cur->exp.left;
+        shifted = true;
+    }
+    return shifted ? cur : NULL;
 }
 
 // Recursive reorder: walks the freshly-built expression subtree and
@@ -610,21 +773,18 @@ static void parser_reorder_expression(struct node** node_out){
        && node->exp.right->type == NODE_TYPE_EXPRESSION){
         const char* right_op = node->exp.right->exp.op;
         if(parser_left_op_has_priority(node->exp.op, right_op)){
-            parser_node_shift_children_left(node);
-            parser_reorder_expression(&node->exp.left);
-            parser_reorder_expression(&node->exp.right);
+            struct node* bottom = parser_shift_run_left(node);
+            if(bottom){
+                parser_reorder_expression(&bottom);
+            } else {
+                parser_node_shift_children_left(node);
+                parser_reorder_expression(&node->exp.left);
+                parser_reorder_expression(&node->exp.right);
+            }
         }
     }
 
-    // ch101 + ch175: extra reordering. ch101 was too aggressive
-    // (`||` between the array and assignment tests reordered any
-    // `a[i] op b` regardless of op). ch175 tightens to:
-    //   - LHS array AND RHS assignment, or
-    //   - LHS `()` or `[]` AND RHS `,`.
-    if((is_array_node(node->exp.left) && is_node_assignment(node->exp.right))
-       || ((node_is_expression(node->exp.left, "()")
-            || node_is_expression(node->exp.left, "[]"))
-           && node_is_expression(node->exp.right, ","))){
+    if(parser_needs_extra_reorder(node)){
         parser_node_move_right_left_to_left(node);
     }
 }
@@ -738,6 +898,10 @@ static void parse_exp_normal(struct history* history){
 
     token_next();          // consume operator
 
+    // Only the run noted by the right operand's own parse below may be
+    // used by this level's reorder.
+    parser_run.root = parser_run.tail = 0;
+
     node_pop();            // detach the left operand
     node_left->flags |= NODE_FLAG_INSIDE_EXPRESSION;
     size_t count_before_right = node_count();
@@ -769,7 +933,13 @@ static void parse_exp_normal(struct history* history){
     // ch30: reorder for operator precedence.
     parser_reorder_expression(&exp_node);
 
-    node_push(parser_hoist_postfix(exp_node));
+    struct node* result = parser_hoist_postfix(exp_node);
+    if(result == exp_node){
+        parser_run_note(exp_node);
+    } else {
+        parser_run.root = parser_run.tail = 0;
+    }
+    node_push(result);
 }
 
 // ch77: after a `(`...`)` is parsed, if the next token is an
@@ -3486,6 +3656,7 @@ static void parse_asm(void){
 }
 
 static void parse_statement(struct history* history){
+    compiler_check_stack(current_process);
     if(parser_next_is_asm()){
         parse_asm();
         return;
@@ -4632,6 +4803,7 @@ static bool parser_is_operand_token(struct token* token){
 }
 
 static void parse_expressionable(struct history* history){
+    compiler_check_stack(current_process);
     while(parse_expressionable_single(history) == 0){
         // Two operands in a row (`foo x;` with foo an unknown type name,
         // `a b`) are not an expression. Both were pushed, the statement

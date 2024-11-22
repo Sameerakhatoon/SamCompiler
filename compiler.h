@@ -4,7 +4,15 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
-#include <linux/limits.h>
+#include <stdlib.h>
+#include <limits.h>
+#include "helpers/arena.h"
+
+// PATH_MAX comes from <limits.h> on POSIX systems; others may not
+// define it.
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 // String equality with NULL-safe operands. Used everywhere from the lexer
 // onwards to compare keyword / operator spellings.
@@ -553,6 +561,11 @@ struct compile_process {
 
 int                     compile_file(const char* filename, const char* out_filename, int flags);
 struct compile_process* compile_process_create(const char* filename, const char* filename_out, int flags, struct compile_process* parent_process);
+void                    compile_process_close_files(struct compile_process* process);
+void                    compiler_teardown(void);
+// Stops the compile with an error when the recursion over a deeply
+// nested program is about to exhaust the stack (E7).
+void                    compiler_check_stack(struct compile_process* compiler);
 
 // ch229: include-directory iteration + include compilation.
 const char* compiler_include_dir_begin(struct compile_process* process);
@@ -569,6 +582,7 @@ void        compiler_set_own_include_dir(const char* dir);
 // -D / -U from the driver, as "#define NAME VALUE" / "#undef NAME"
 // lines run through the preprocessor ahead of each top-level source.
 void        compiler_add_cli_macro_line(const char* line);
+void        compiler_clear_cli_macro_lines(void);
 struct compile_process* compile_include(const char* filename, struct compile_process* parent_process);
 // `#include <x.h>` (angled) skips the including file's own directory;
 // `#include "x.h"` searches it first.
@@ -576,6 +590,9 @@ struct compile_process* compile_include_search(const char* filename, struct comp
 
 // ch229: helpers.
 bool file_exists(const char* filename);
+// Canonical absolute path of an existing file into out (PATH_MAX
+// bytes); false when it cannot be resolved.
+bool compiler_real_path(const char* path, char* out);
 
 void compiler_error(struct compile_process* compiler, const char* msg, ...);
 void compiler_warning(struct compile_process* compiler, const char* msg, ...);
@@ -1502,6 +1519,7 @@ struct symbol* symresolver_get_symbol_any(struct compile_process* process, const
 struct symbol* symresolver_register_symbol(struct compile_process* process, const char* sym_name, int type, void* data);
 struct symbol* symresolver_get_symbol_for_native_function(struct compile_process* process, const char* name);
 struct symbol* symresolver_register_symbol(struct compile_process* process, const char* sym_name, int type, void* data);
+void           symresolver_free_all(void);
 
 // ch74: returns the function's stack_addition (bytes between EBP and
 // the first argument; typically 8 = saved EBP + return EIP).
@@ -1602,6 +1620,7 @@ struct resolver_scope*   resolver_scope_root(struct resolver_process* process);
 struct resolver_scope*   resolver_new_scope_create(void);
 struct resolver_scope*   resolver_new_scope(struct resolver_process* resolver, void* private, int flags);
 void                     resolver_finish_scope(struct resolver_process* resolver);
+void                     resolver_free_lookup(void);
 struct resolver_process* resolver_new_process(struct compile_process* compiler, struct resolver_callbacks* callbacks);
 struct resolver_entity*  resolver_create_new_entity(struct resolver_result* result, int type, void* private);
 struct resolver_entity*  resolver_create_new_entity_for_unsupported_node(struct resolver_result* result, struct node* node);
@@ -1698,6 +1717,7 @@ enum {
 bool          function_node_is_prototype(struct node* node);
 bool          function_defined_in_tree(struct compile_process* process, const char* name);
 bool          variable_defined_in_tree(struct compile_process* process, const char* name);
+void          node_defined_forget(void);
 bool          symbol_defined_in_tree(struct compile_process* process, const char* name);
 size_t        function_node_stack_size(struct node* node);
 struct vector* function_node_argument_vec(struct node* node);

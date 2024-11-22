@@ -399,3 +399,13 @@ bool file_exists(const char* filename){
     fclose(f);
     return true;
 }
+
+// The one place that resolves a path. realpath is POSIX; Windows has
+// _fullpath, which makes the path absolute without resolving links.
+bool compiler_real_path(const char* path, char* out){
+#ifdef _WIN32
+    return _fullpath(out, path, PATH_MAX) != NULL;
+#else
+    return realpath(path, out) != NULL;
+#endif
+}

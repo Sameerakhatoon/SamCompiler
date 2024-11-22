@@ -46,10 +46,10 @@ int main(void){
 
     preprocessor_run(cp);
 
-    // The 5 built-in macros (__LINE__ first) come before user defs.
+    // The 11 built-in macros (six GNU no-ops) (__LINE__ first) come before user defs.
     int n_defs = vector_count(cp->preprocessor->definitions);
-    int user_defs = n_defs - 5;
-    vector_set_peek_pointer(cp->preprocessor->definitions, 5);
+    int user_defs = n_defs - 11;
+    vector_set_peek_pointer(cp->preprocessor->definitions, 11);
     struct preprocessor_definition* d = vector_peek_ptr(cp->preprocessor->definitions);
     int name_ok = d && S_EQ(d->name, "FOO");
     int type_ok = d && d->type == PREPROCESSOR_DEFINITION_STANDARD;

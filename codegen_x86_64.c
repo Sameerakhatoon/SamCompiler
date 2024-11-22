@@ -1094,6 +1094,7 @@ static void codegen_generate_statement_return(struct node* node){
 }
 
 static void codegen_generate_statement(struct node* node, struct history* history){
+    compiler_check_stack(current_process);
     (void)history;
     // A backend error names the statement's line, not the end of the file.
     if(node->pos.line){

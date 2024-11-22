@@ -421,49 +421,120 @@ bool function_node_is_prototype(struct node* node){
     return node->func.body_n == 0;
 }
 
-// Whether this translation unit also defines the function `name`
-// (gives it a body), so a prototype for it is not an external symbol.
-bool function_defined_in_tree(struct compile_process* process, const char* name){
-    for(int i = 0; i < vector_count(process->node_tree_vec); i++){
-        struct node* node = *(struct node**)vector_at(process->node_tree_vec, i);
-        if(node->type == NODE_TYPE_FUNCTION && node->func.body_n && S_EQ(node->func.name, name)){
-            return true;
-        }
+// The names the translation unit defines, hashed: the backends ask for
+// every reference to a global or a function, and a walk of the whole
+// tree each time made 20,000 functions quadratic. Built
+// from the finished tree the first time it is asked, again when the
+// process or the tree's size changes; compiler_teardown drops it with
+// the arena.
+#define NODE_DEFINED_FUNCTION 1
+#define NODE_DEFINED_VARIABLE 2
+struct node_defined {
+    const char* name;
+    int         kinds;
+};
+static struct node_defined*    node_defined_table;
+static size_t                  node_defined_size;
+static struct compile_process* node_defined_process;
+static int                     node_defined_tree_count = -1;
+
+void node_defined_forget(void){
+    node_defined_table = 0;
+    node_defined_size = 0;
+    node_defined_process = 0;
+    node_defined_tree_count = -1;
+}
+
+static size_t node_defined_hash(const char* name){
+    size_t hash = 2166136261u;
+    for(const unsigned char* p = (const unsigned char*)name; *p; p++){
+        hash = (hash ^ *p) * 16777619u;
     }
-    return false;
+    return hash;
 }
 
-static bool variable_node_defines(struct node* var, const char* name){
+static struct node_defined* node_defined_slot(const char* name){
+    size_t i = node_defined_hash(name) & (node_defined_size - 1);
+    while(node_defined_table[i].name && !S_EQ(node_defined_table[i].name, name)){
+        i = (i + 1) & (node_defined_size - 1);
+    }
+    return &node_defined_table[i];
+}
+
+static void node_defined_add(const char* name, int kind){
+    struct node_defined* slot = node_defined_slot(name);
+    slot->name = name;
+    slot->kinds |= kind;
+}
+
+static bool variable_node_defines(struct node* var){
     return var && var->type == NODE_TYPE_VARIABLE && !(var->var.type.flags & DATATYPE_FLAG_IS_EXTERN)
-        && var->var.name && S_EQ(var->var.name, name);
+        && var->var.name;
 }
 
-// Whether this translation unit defines the global variable `name`
-// (not just `extern`), in any of the shapes a global comes in: alone,
-// in a list (`int a, b;`) or after a struct or union body.
-bool variable_defined_in_tree(struct compile_process* process, const char* name){
-    for(int i = 0; i < vector_count(process->node_tree_vec); i++){
-        struct node* node = *(struct node**)vector_at(process->node_tree_vec, i);
-        if(variable_node_defines(node, name)){
-            return true;
+// The functions with a body and the global variables (not just
+// `extern`), in any of the shapes a global comes in: alone, in a list
+// (`int a, b;`) or after a struct or union body.
+static void node_defined_build(struct compile_process* process){
+    struct vector* tree = process->node_tree_vec;
+    int count = vector_count(tree);
+    if(node_defined_table && node_defined_process == process && node_defined_tree_count == count){
+        return;
+    }
+    size_t names = 0;
+    for(int i = 0; i < count; i++){
+        struct node* node = *(struct node**)vector_at(tree, i);
+        names += node->type == NODE_TYPE_VARIABLE_LIST ? (size_t)vector_count(node->var_list.list) : 1;
+    }
+    node_defined_size = 16;
+    while(node_defined_size < 2 * names + 1){
+        node_defined_size *= 2;
+    }
+    node_defined_table = calloc(node_defined_size, sizeof(struct node_defined));
+    node_defined_process = process;
+    node_defined_tree_count = count;
+    for(int i = 0; i < count; i++){
+        struct node* node = *(struct node**)vector_at(tree, i);
+        if(node->type == NODE_TYPE_FUNCTION && node->func.body_n){
+            node_defined_add(node->func.name, NODE_DEFINED_FUNCTION);
+        }
+        struct node* var = 0;
+        if(node->type == NODE_TYPE_VARIABLE){
+            var = node;
+        } else if(node->type == NODE_TYPE_STRUCT && (node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED)){
+            var = node->_struct.var;
+        } else if(node->type == NODE_TYPE_UNION && (node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED)){
+            var = node->_union.var;
+        }
+        if(variable_node_defines(var)){
+            node_defined_add(var->var.name, NODE_DEFINED_VARIABLE);
         }
         if(node->type == NODE_TYPE_VARIABLE_LIST){
             for(int j = 0; j < vector_count(node->var_list.list); j++){
-                if(variable_node_defines(*(struct node**)vector_at(node->var_list.list, j), name)){
-                    return true;
+                struct node* item = *(struct node**)vector_at(node->var_list.list, j);
+                if(variable_node_defines(item)){
+                    node_defined_add(item->var.name, NODE_DEFINED_VARIABLE);
                 }
             }
         }
-        if(node->type == NODE_TYPE_STRUCT && (node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED)
-           && variable_node_defines(node->_struct.var, name)){
-            return true;
-        }
-        if(node->type == NODE_TYPE_UNION && (node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED)
-           && variable_node_defines(node->_union.var, name)){
-            return true;
-        }
     }
-    return false;
+}
+
+static bool node_defined(struct compile_process* process, const char* name, int kind){
+    node_defined_build(process);
+    return (node_defined_slot(name)->kinds & kind) != 0;
+}
+
+// Whether this translation unit also defines the function `name`
+// (gives it a body), so a prototype for it is not an external symbol.
+bool function_defined_in_tree(struct compile_process* process, const char* name){
+    return node_defined(process, name, NODE_DEFINED_FUNCTION);
+}
+
+// Whether this translation unit defines the global variable `name`
+// (not just `extern`).
+bool variable_defined_in_tree(struct compile_process* process, const char* name){
+    return node_defined(process, name, NODE_DEFINED_VARIABLE);
 }
 
 // Whether `name` is a function or variable this translation unit

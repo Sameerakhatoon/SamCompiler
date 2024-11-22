@@ -3,7 +3,7 @@ OBJECTS  = ./build/compiler.o ./build/cprocess.o ./build/validator.o \
            ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/resolver.o ./build/rdefault.o ./build/codegen.o ./build/codegen_x86.o ./build/codegen_x86_64.o ./build/codegen_aarch64.o ./build/codegen_riscv64.o ./build/target.o ./build/stackframe.o ./build/fixup.o ./build/array.o ./build/initializer.o ./build/exp64.o ./build/helper.o ./build/constant.o \
            ./build/preprocessor.o ./build/native.o \
            ./build/static-include.o ./build/static-includes/stdarg.o ./build/static-includes/stddef.o \
-           ./build/helpers/buffer.o ./build/helpers/vector.o
+           ./build/helpers/buffer.o ./build/helpers/vector.o ./build/helpers/arena.o
 INCLUDES = -I./
 # -Wall -Wextra with nothing hidden except unused parameters: callbacks
 # such as the expressionable and static-include tables must take the
@@ -124,6 +124,9 @@ all: ./main
 
 ./build/helpers/vector.o: ./helpers/vector.c ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./helpers/vector.c -o ./build/helpers/vector.o
+
+./build/helpers/arena.o: ./helpers/arena.c ./helpers/arena.h
+	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./helpers/arena.c -o ./build/helpers/arena.o
 
 clean:
 	rm -f ./main

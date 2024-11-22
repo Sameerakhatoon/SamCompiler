@@ -137,6 +137,74 @@ struct resolver_scope* resolver_scope_root(struct resolver_process* process){
     return process->scope.root;
 }
 
+// Name lookups walked a scope's entities newest first with strcmp, so
+// the root scope (every global and function) made a file with n of
+// them O(n^2). Each entity pushed into a scope is also chained into a
+// hash keyed by name, newest first, remembering its scope; a finished
+// scope takes its entries out because its address may be reused.
+#define RESOLVER_HASH_SIZE 8192
+
+struct resolver_hash_entry {
+    struct resolver_scope*      scope;
+    struct resolver_entity*     entity;
+    struct resolver_hash_entry* next;
+};
+
+static struct resolver_hash_entry* resolver_hash[RESOLVER_HASH_SIZE];
+
+// FNV-1a. A NULL name (never matched by S_EQ) lands in bucket 0.
+static unsigned resolver_hash_name(const char* name){
+    unsigned hash = 2166136261u;
+    if(!name){
+        return 0;
+    }
+    for(const unsigned char* c = (const unsigned char*)name; *c; c++){
+        hash = (hash ^ *c) * 16777619u;
+    }
+    return hash % RESOLVER_HASH_SIZE;
+}
+
+static void resolver_scope_push_entity(struct resolver_scope* scope, struct resolver_entity* entity){
+    vector_push(scope->entities, &entity);
+    struct resolver_hash_entry* hash_entry = calloc(1, sizeof(struct resolver_hash_entry));
+    unsigned bucket = resolver_hash_name(entity->name);
+    hash_entry->scope  = scope;
+    hash_entry->entity = entity;
+    hash_entry->next   = resolver_hash[bucket];
+    resolver_hash[bucket] = hash_entry;
+}
+
+static void resolver_scope_forget_entities(struct resolver_scope* scope){
+    vector_set_peek_pointer(scope->entities, 0);
+    vector_unset_flag(scope->entities, VECTOR_FLAG_PEEK_DECREMENT);
+    struct resolver_entity* entity = vector_peek_ptr(scope->entities);
+    while(entity){
+        struct resolver_hash_entry** link = &resolver_hash[resolver_hash_name(entity->name)];
+        while(*link){
+            if((*link)->scope == scope && (*link)->entity == entity){
+                struct resolver_hash_entry* gone = *link;
+                *link = gone->next;
+                free(gone);
+                break;
+            }
+            link = &(*link)->next;
+        }
+        entity = vector_peek_ptr(scope->entities);
+    }
+}
+
+void resolver_free_lookup(void){
+    for(int i = 0; i < RESOLVER_HASH_SIZE; i++){
+        struct resolver_hash_entry* entry = resolver_hash[i];
+        while(entry){
+            struct resolver_hash_entry* next = entry->next;
+            free(entry);
+            entry = next;
+        }
+        resolver_hash[i] = 0;
+    }
+}
+
 struct resolver_scope* resolver_new_scope_create(void){
     struct resolver_scope* scope = calloc(1, sizeof(struct resolver_scope));
     scope->entities = vector_create(sizeof(struct resolver_entity*));
@@ -160,6 +228,8 @@ void resolver_finish_scope(struct resolver_process* resolver){
     struct resolver_scope* scope = resolver->scope.current;
     resolver->scope.current      = scope->prev;
     resolver->callbacks.delete_scope(scope);
+    resolver_scope_forget_entities(scope);
+    vector_free(scope->entities);
     free(scope);
 }
 
@@ -350,7 +420,7 @@ struct resolver_entity* resolver_new_entity_for_var_node(struct resolver_process
     if(!entity){
         return 0;
     }
-    vector_push(process->scope.current->entities, &entity);
+    resolver_scope_push_entity(process->scope.current, entity);
     return entity;
 }
 
@@ -433,7 +503,7 @@ struct resolver_entity* resolver_create_new_entity_for_native_function(struct re
     entity->name             = name;
     entity->native_func.symbol = native_func_symbol;
     entity->scope            = resolver_process_scope_current(process);
-    vector_push(process->scope.root->entities, &entity);
+    resolver_scope_push_entity(process->scope.root, entity);
     return entity;
 }
 
@@ -447,7 +517,7 @@ struct resolver_entity* resolver_register_function(struct resolver_process* proc
     entity->node  = func_node;
     entity->dtype = func_node->func.rtype;
     entity->scope = resolver_process_scope_current(process);
-    vector_push(process->scope.root->entities, &entity);
+    resolver_scope_push_entity(process->scope.root, entity);
     return entity;
 }
 
@@ -473,22 +543,25 @@ struct resolver_entity* resolver_get_entity_in_scope_with_entity_type(struct res
             }, sscope);
     }
 
-    // Primitive lookup: walk the scope's entities top-down looking
-    // for one whose name (and optional type) matches.
-    vector_set_peek_pointer_end(scope->entities);
-    vector_set_flag(scope->entities, VECTOR_FLAG_PEEK_DECREMENT);
-    struct resolver_entity* current = vector_peek_ptr(scope->entities);
-    while(current){
+    // Primitive lookup: the newest entity of this scope whose name (and
+    // optional type) matches, through the name hash.
+    if(!entity_name){
+        return 0;
+    }
+    struct resolver_hash_entry* hash_entry = resolver_hash[resolver_hash_name(entity_name)];
+    for(; hash_entry; hash_entry = hash_entry->next){
+        struct resolver_entity* current = hash_entry->entity;
+        if(hash_entry->scope != scope){
+            continue;
+        }
         if(entity_type != -1 && current->type != entity_type){
-            current = vector_peek_ptr(scope->entities);
             continue;
         }
         if(S_EQ(current->name, entity_name)){
-            break;
+            return current;
         }
-        current = vector_peek_ptr(scope->entities);
     }
-    return current;
+    return 0;
 }
 
 // ch125: book ships these with typo'd struct types ("resoler_entity",
@@ -873,6 +946,7 @@ struct resolver_entity* resolver_follow_array_bracket(struct resolver_process* r
 // Book lacks a return; we replicate verbatim (the result vector is
 // the real output channel).
 struct resolver_entity* resolver_follow_part_return_entity(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    compiler_check_stack(resolver->compiler);
     struct resolver_entity* entity = 0;
     switch(node->type){
         case NODE_TYPE_IDENTIFIER:

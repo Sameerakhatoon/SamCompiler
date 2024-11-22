@@ -38,9 +38,9 @@ int main(void){
 
     preprocessor_run(cp);
 
-    // The 5 built-in macros stay in definitions; subtract them for the
+    // The 11 built-in macros (six GNU no-ops) stay in definitions; subtract them for the
     // user-visible count.
-    int n = vector_count(cp->preprocessor->definitions) - 5;
+    int n = vector_count(cp->preprocessor->definitions) - 11;
     printf("after_undef_defs=%d\n", n);
     return 0;
 }

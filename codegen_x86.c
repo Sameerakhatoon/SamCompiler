@@ -398,6 +398,7 @@ static void x87_initialize(struct node* value, struct datatype* type, const char
 // A21: an expression with floating point in it goes to the x87 code,
 // unless only its address is wanted.
 static void codegen_generate_expressionable(struct node* node, struct history* history){
+    compiler_check_stack(current_process);
     if(node->pos.line){
         current_process->pos = node->pos;
     }
@@ -3145,6 +3146,7 @@ static void codegen_generate_statement_return(struct node* node){
 }
 
 static void codegen_generate_statement(struct node* node, struct history* history){
+    compiler_check_stack(current_process);
     (void)history;
     // A backend error names the statement's line, not the end of the file.
     if(node->pos.line){
