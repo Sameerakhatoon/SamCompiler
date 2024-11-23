@@ -3168,6 +3168,12 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         case NODE_TYPE_UNARY:
             codegen_generate_unary(node, codegen_history_begin(history->flags));
             break;
+        // `(b = a);`, `((b) = (a));`: the parentheses add nothing to a
+        // statement. This case was dropped once with the ++/-- lowering,
+        // and the statement then generated no code at all.
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            codegen_generate_statement(node->parenthesis.exp, history);
+            return;
         case NODE_TYPE_VARIABLE:
             codegen_generate_scope_variable(node);
             break;
