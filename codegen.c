@@ -1577,13 +1577,10 @@ static void codegen_generate_switch_stmt_case_jumps(struct node* node){
         sc = vector_peek(node->stmt.switch_stmt.cases);
     }
     if(node->stmt.switch_stmt.has_default_case){
-        // G06: book writes `codegen_switch_id` without `()`, passing
-        // the function pointer to printf as `%i`. Preserved verbatim
-        // (with a cast to silence the warning); the resulting
-        // truncated address means the default jump targets a bogus
-        // switch id. We'll patch in a gotcha when we have a test
-        // that exercises it.
-        asm_push("jmp .switch_stmt_%i_case_default", (int)(long)codegen_switch_id);
+        // ch186 fixed the ch166 typo - `codegen_switch_id` without
+        // `()` was passing the function pointer to printf and
+        // producing a bogus label id.
+        asm_push("jmp .switch_stmt_%i_case_default", codegen_switch_id());
         return;
     }
     codegen_goto_exit_point_maintain_stack(node);

@@ -40,7 +40,9 @@ struct history_cases {
 };
 
 struct parser_history_switch {
-    struct history_cases case_data;
+    // ch186: pointer (not value) so history_down() copies share the
+    // underlying case data instead of each clone allocating its own.
+    struct history_cases* case_data;
 };
 
 // ch57: parser-side scope entity. Each declared variable becomes one
@@ -152,7 +154,10 @@ static struct history* history_down(struct history* history, int flags){
 // calls parser_end_switch_statement at exit.
 static struct parser_history_switch parser_new_switch_statement(struct history* history){
     memset(&history->_switch, 0, sizeof(history->_switch));
-    history->_switch.case_data.cases = vector_create(sizeof(struct parsed_switch_case));
+    // ch186: allocate case_data on the heap so the inner cases vector
+    // survives history_down() copies.
+    history->_switch.case_data = calloc(1, sizeof(struct history_cases));
+    history->_switch.case_data->cases = vector_create(sizeof(struct parsed_switch_case));
     history->flags |= HISTORY_FLAG_IN_SWITCH_STATEMENT;
     return history->_switch;
 }
@@ -165,7 +170,7 @@ static void parser_register_case(struct history* history, struct node* case_node
     assert(history->flags & HISTORY_FLAG_IN_SWITCH_STATEMENT);
     struct parsed_switch_case scase;
     scase.index = case_node->stmt._case.exp->llnum;
-    vector_push(history->_switch.case_data.cases, &scase);
+    vector_push(history->_switch.case_data->cases, &scase);
 }
 
 static void parser_ignore_nl_or_comment(struct token* token){
@@ -1669,7 +1674,7 @@ static void parse_switch(struct history* history){
     size_t var_size = 0;
     parse_body(&var_size, history);
     struct node* body_node = node_pop();
-    make_switch_node(exp_node, body_node, sw.case_data.cases, sw.case_data.has_default_case);
+    make_switch_node(exp_node, body_node, sw.case_data->cases, sw.case_data->has_default_case);
     parser_end_switch_statement(&sw);
 }
 
