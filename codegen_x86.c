@@ -702,19 +702,55 @@ static void codegen_generate_entity_access_array_bracket(struct resolver_result*
         &(struct stack_frame_data){.dtype = entity->dtype});
 }
 
+// What the access chain pushed before a `*`: the address where the
+// pointer is kept (after a member, an element, or a root loaded as an
+// address) or the pointer's value (a root pushed as a value, a call,
+// a cast, a generated expression).
+static bool codegen_indirection_operand_is_address(struct resolver_result* result, struct resolver_entity* entity){
+    struct resolver_entity* prev = entity->prev;
+    if(!prev){
+        return false;
+    }
+    if(prev == resolver_result_entity_root(result)){
+        if(prev->type == RESOLVER_ENTITY_TYPE_UNSUPPORTED){
+            return false;
+        }
+        return !(result->flags & RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE);
+    }
+    // A member or element that is an array is used by its address, which
+    // is already its value; only a pointer kept there needs the load.
+    bool keeps_pointer = (prev->dtype.flags & DATATYPE_FLAG_IS_POINTER)
+        && !(prev->dtype.flags & DATATYPE_FLAG_IS_ARRAY);
+    switch(prev->type){
+        case RESOLVER_ENTITY_TYPE_VARIABLE:
+        case RESOLVER_ENTITY_TYPE_GENERAL:
+            return keeps_pointer;
+        case RESOLVER_ENTITY_TYPE_ARRAY_BRACKET:
+            return keeps_pointer || resolver_entity_is_pointer_array_element(prev);
+        default:
+            return false;
+    }
+}
+
 // ch154: LHS unary indirection. Pop the address, walk
 // `depth - 1` dereferences (the last one is the store, handled
 // upstream), push tagged IS_PUSHED_ADDRESS.
 static void codegen_generate_entity_access_for_unary_indirection_for_assignment_left_operand(struct resolver_result* result, struct resolver_entity* entity, struct history* history){
     asm_push("; INDIRECTION");
+    struct datatype operand_datatype;
+    bool has_type = asm_datatype_back(&operand_datatype);
     int flags = asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     (void)flags;
     int gen_entity_rules = codegen_entity_rules(result->last_entity, history);
     (void)gen_entity_rules;
-    // A member read through `->` leaves the member's address, not its
-    // value, so `*w->p = 9` must follow one more level.
+    // The store wants the address of `*p`, which is p's value: one load
+    // fewer than the depth, plus one when the chain left the address
+    // where p is kept (`*w->p = 9`, `(*bp->p).y = 30`) rather than p's
+    // value (`*p = 9`, `(*q).y = 20`). The result flag that stood for
+    // this also comes from a member access after the `*`.
+    (void)has_type;
     int depth = entity->indirection.depth - 1;
-    if(result->flags & RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE){
+    if(codegen_indirection_operand_is_address(result, entity)){
         depth++;
     }
     codegen_apply_unary_access(depth);
@@ -1280,6 +1316,13 @@ static void codegen_generate_entity_access_for_unary_indirection(struct resolver
     // as that address.
     if(datatype_is_struct_or_union_non_pointer(&result_dtype)){
         depth--;
+        // Under `&` (`&(*q).y`) the root was pushed as the address where
+        // q is kept, not q's value, so the struct's address is one load
+        // further.
+        if(entity->prev == resolver_result_entity_root(result)
+           && codegen_indirection_operand_is_address(result, entity)){
+            depth++;
+        }
     }
     codegen_apply_unary_access(depth);
     asm_push_ins_push_with_data("ebx",

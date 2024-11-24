@@ -18,7 +18,7 @@ int main(void){
     struct pt p;
     struct pt* q = &p;
     (q->x = 10);
-    (q->y = 20);
+    ((*q).y = 20);
     (bump());
     ((bump()));
     return (b * 100 + g * 10 + a + p.x + p.y + calls) % 127;

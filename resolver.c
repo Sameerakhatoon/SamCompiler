@@ -671,10 +671,12 @@ struct resolver_entity* resolver_follow_variable(struct resolver_process* resolv
 // ch233: indirection on the right of `->` is only valid when the
 // left is itself an addressable thing - not a FUNCTION_CALL result,
 // not the target of unary-&, not a CAST result.
+// `p->m` loads p first, also under `&`: `&q->y` is q's value plus y's
+// offset. The book skipped the load when the result takes an address,
+// which gave the address of q itself plus the offset; the `&` only
+// drops the final load of the member.
 static bool resolver_do_indirection(struct resolver_entity* entity){
-    struct resolver_result* result = entity->result;
     return entity->type != RESOLVER_ENTITY_TYPE_FUNCTION_CALL
-        && !(result->flags & RESOLVER_RESULT_FLAG_DOES_GET_ADDRESS)
         && entity->type != RESOLVER_ENTITY_TYPE_CAST;
 }
 
