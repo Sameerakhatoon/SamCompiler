@@ -26,6 +26,9 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 got="$(cat "$outfile")"
 assert_contains "$got" "extern puts"     "external symbol declared"
 assert_contains "$got" "push dword 42"   "argument pushed"
-assert_contains "$got" "call ecx"        "indirect call through ecx"
+# ch187 changed the indirect call to go through a per-call .data
+# slot instead of ecx (so arguments that are themselves calls can't
+# clobber the target).
+assert_contains "$got" "call [function_call_" "indirect call via the per-call .data slot"
 assert_contains "$got" "add esp,"        "stack reclaimed after the call"
 pass
