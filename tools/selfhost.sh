@@ -24,7 +24,7 @@ total=0
 for f in $files; do
     total=$((total + 1))
     name=$(echo "$f" | tr '/.' '__')
-    if ./main -Itools/selfhost/include -target=x86_64 "$f" "$out/$name.s" object >"$out/log" 2>&1; then
+    if ./main -Itools/selfhost/include -I. -target=x86_64 -S "$f" -o "$out/$name.s" >"$out/log" 2>&1; then
         ok=$((ok + 1))
         echo "ok    $f"
     else
