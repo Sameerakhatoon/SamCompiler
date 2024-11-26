@@ -1221,8 +1221,12 @@ static void codegen_generate_cast(struct node* node, struct history* history){
         codegen_generate_expressionable(node->cast.operand, history);
     }
     asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-    codegen_reduce_register("eax", datatype_size(&node->cast.dtype),
-        node->cast.dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+    // `(void)x` (assert's `cond ? (void)0 : ...`) keeps no value to
+    // narrow; its size 0 wrote `movsx eax, (null)`.
+    if(node->cast.dtype.type != DATA_TYPE_VOID || (node->cast.dtype.flags & DATATYPE_FLAG_IS_POINTER)){
+        codegen_reduce_register("eax", datatype_size(&node->cast.dtype),
+            node->cast.dtype.flags & DATATYPE_FLAG_IS_SIGNED);
+    }
     asm_push_ins_push_with_data("eax",
         STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
         &(struct stack_frame_data){.dtype = node->cast.dtype});
@@ -3216,6 +3220,11 @@ static void codegen_generate_statement(struct node* node, struct history* histor
         // and the statement then generated no code at all.
         case NODE_TYPE_EXPRESSION_PARENTHESES:
             codegen_generate_statement(node->parenthesis.exp, history);
+            return;
+        // `(void)f(x);`: a cast only shapes the value, which a statement
+        // discards; the operand still runs. It generated nothing.
+        case NODE_TYPE_CAST:
+            codegen_generate_statement(node->cast.operand, history);
             return;
         case NODE_TYPE_VARIABLE:
             codegen_generate_scope_variable(node);
