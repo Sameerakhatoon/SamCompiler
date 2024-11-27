@@ -3199,7 +3199,10 @@ static void parser_wide_string_object(struct vector* units, int unit_size, bool 
     }
     element.size = unit_size;
     struct datatype type = element;
-    type.flags |= DATATYPE_FLAG_IS_ARRAY;
+    // Internal linkage, as a string literal has: every file numbers its
+    // own `__wide_string_N` from 0, and exported ones clashed at link
+    // time ("multiple definition of `__wide_string_0'").
+    type.flags |= DATATYPE_FLAG_IS_ARRAY | DATATYPE_FLAG_IS_STATIC;
     type.array.brackets = array_brackets_new();
     array_brackets_add(type.array.brackets, parser_bracket_of(vector_count(units)));
     type.array.size = array_brackets_calculate_size(&type, type.array.brackets);
