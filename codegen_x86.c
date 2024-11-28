@@ -748,7 +748,15 @@ static void codegen_generate_entity_access_for_unary_indirection_for_assignment_
     // where p is kept (`*w->p = 9`, `(*bp->p).y = 30`) rather than p's
     // value (`*p = 9`, `(*q).y = 20`). The result flag that stood for
     // this also comes from a member access after the `*`.
-    (void)has_type;
+    // `*(p + 1) = v`, `*p++ = v`: the chain's root is a generated
+    // expression the resolver has no type for, so the stored object had
+    // size 0 and the store was written `mov (null) [edx], eax`. The
+    // operand's real type is on the stack: the object is what it points to.
+    if(has_type && entity == result->last_entity && datatype_element_size(&entity->dtype) == 0
+       && (operand_datatype.flags & DATATYPE_FLAG_IS_POINTER)){
+        entity->dtype = *datatype_pointer_reduce(&operand_datatype, entity->indirection.depth);
+        entity->dtype.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    }
     int depth = entity->indirection.depth - 1;
     if(codegen_indirection_operand_is_address(result, entity)){
         depth++;
@@ -838,6 +846,9 @@ static void codegen_generate_plain_assignment(struct node* node, struct resolver
             codegen_generate_move_struct(dtype, "edx", 0);
             return;
         }
+        // The access walk may have learnt the stored type (`*(p + 1)`).
+        reg_to_use = "eax";
+        mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(dtype), &reg_to_use);
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
         asm_push("mov %s [edx], %s", mov_type, reg_to_use);
     }
@@ -865,6 +876,8 @@ static void codegen_generate_read_modify_write(struct node* node, struct resolve
         codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
         asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
         address = "ebx";
+        // The access walk may have learnt the stored type (`*(a + 3) -= 2`).
+        dtype = result->last_entity->dtype;
     }
     if(assign_flags & CODEGEN_ASSIGN_STEP_ONE){
         asm_push("mov ecx, 1");
@@ -922,6 +935,9 @@ static void codegen_generate_assignment_part(struct node* node, const char* op, 
             asm_push("add %s [%s], %s", mov_type, result->base.address, reg_to_use);
         } else {
             codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
+            // The access walk may have learnt the stored type (`*(p + 1)`).
+            reg_to_use = "eax";
+            mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(dtype), &reg_to_use);
             asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
             asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
             asm_push("add %s [edx], %s", mov_type, reg_to_use);
