@@ -25,7 +25,5 @@ typedef __builtin_va_list va_list;
 // at its own width. The third argument only carries the type, so that
 // a double is taken from where floating-point arguments go.
 #define va_arg(list, type) (*(type*)__builtin_va_arg(list, sizeof(type), (type*)0))
-// No parentheses around the assignment: the x86 generator miscompiles
-// a parenthesized assignment used as a statement.
 #define va_copy(dest, src) (dest) = (src)
 #endif
