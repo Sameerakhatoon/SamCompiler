@@ -30,34 +30,44 @@ void expressionable_parse(struct expressionable* expressionable);
 static int hn_calls = 0, hi_calls = 0, mk_exp_calls = 0;
 static char last_op[8] = {0};
 
+struct tn { int type; void* left; void* right; char op[4]; };
+
 void* my_handle_number(struct expressionable* e){
     hn_calls++;
     vector_peek(e->token_vec);
-    int* n = malloc(sizeof(int)); *n = EXPRESSIONABLE_GENERIC_TYPE_NUMBER;
+    struct tn* n = calloc(1, sizeof(*n));
+    n->type = EXPRESSIONABLE_GENERIC_TYPE_NUMBER;
     return n;
 }
 void* my_handle_identifier(struct expressionable* e){
     hi_calls++;
     vector_peek(e->token_vec);
-    int* n = malloc(sizeof(int)); *n = EXPRESSIONABLE_GENERIC_TYPE_IDENTIFIER;
+    struct tn* n = calloc(1, sizeof(*n));
+    n->type = EXPRESSIONABLE_GENERIC_TYPE_IDENTIFIER;
     return n;
 }
 void my_make_exp(struct expressionable* e, void* l, void* r, const char* op){
     mk_exp_calls++;
     strncpy(last_op, op, sizeof(last_op)-1);
-    int* n = malloc(sizeof(int)); *n = EXPRESSIONABLE_GENERIC_TYPE_EXPRESSION;
+    struct tn* n = calloc(1, sizeof(*n));
+    n->type = EXPRESSIONABLE_GENERIC_TYPE_EXPRESSION;
+    n->left = l; n->right = r;
+    strncpy(n->op, op, sizeof(n->op)-1);
     vector_push(e->node_vec_out, &n);
 }
 void my_make_unary(struct expressionable* e, const char* op, void* o){}
 void my_make_uind(struct expressionable* e, int d, void* o){}
 void my_make_tenary(struct expressionable* e, void* t, void* f){}
-int  my_get_type(struct expressionable* e, void* n){ return n ? *(int*)n : -1; }
-void* my_get_left(struct expressionable* e, void* n){ return NULL; }
-void* my_get_right(struct expressionable* e, void* n){ return NULL; }
-void** my_get_left_addr(struct expressionable* e, void* n){ return NULL; }
-void** my_get_right_addr(struct expressionable* e, void* n){ return NULL; }
-const char* my_get_op(struct expressionable* e, void* n){ return NULL; }
-void my_set_exp(struct expressionable* e, void* n, void* l, void* r, const char* op){}
+int  my_get_type(struct expressionable* e, void* n){ return n ? ((struct tn*)n)->type : -1; }
+void* my_get_left(struct expressionable* e, void* n){ return n ? ((struct tn*)n)->left : NULL; }
+void* my_get_right(struct expressionable* e, void* n){ return n ? ((struct tn*)n)->right : NULL; }
+void** my_get_left_addr(struct expressionable* e, void* n){ return n ? &((struct tn*)n)->left : NULL; }
+void** my_get_right_addr(struct expressionable* e, void* n){ return n ? &((struct tn*)n)->right : NULL; }
+const char* my_get_op(struct expressionable* e, void* n){ return n ? ((struct tn*)n)->op : NULL; }
+void my_set_exp(struct expressionable* e, void* n, void* l, void* r, const char* op){
+    struct tn* t = n; t->left = l; t->right = r;
+    strncpy(t->op, op, sizeof(t->op)-1); t->op[sizeof(t->op)-1] = 0;
+}
 bool my_should_join(struct expressionable* e, void* p, void* c){ return false; }
 void* my_join(struct expressionable* e, void* p, void* c){ return p; }
 bool my_expecting(struct expressionable* e, void* n){ return false; }
