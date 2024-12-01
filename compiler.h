@@ -600,6 +600,7 @@ bool token_is_nl_or_comment_or_newline_seperator(struct token* token);
 bool keyword_is_datatype(const char* str);
 bool token_is_primitive_keyword(struct token* token);
 bool token_is_operator(struct token* token, const char* val);
+bool is_operator_token(struct token* token);
 bool datatype_is_struct_or_union_for_name(const char* name);
 bool datatype_is_struct_or_union(struct datatype* dtype);
 
@@ -1322,6 +1323,7 @@ struct expressionable_config {
         EXPRESSIONABLE_HANDLE_NUMBER                handle_number_callback;
         EXPRESSIONABLE_HANDLE_IDENTIFIER            handle_identifier_callback;
         EXPRESSIONABLE_MAKE_EXPRESSION_NODE         make_expression_node;
+        EXPRESSIONABLE_MAKE_PARENTHESES_NODE        make_parentheses_node;
         EXPRESSIONABLE_MAKE_UNARY_NODE              make_unary_node;
         EXPRESSIONABLE_MAKE_UNARY_INDIRECTION_NODE  make_unary_indirection_node;
         EXPRESSIONABLE_MAKE_TENARY_NODE             make_tenary_node;
