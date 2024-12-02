@@ -87,6 +87,12 @@ struct token* expressionable_peek_next(struct expressionable* expressionable)
     return vector_peek_no_increment(expressionable->token_vec);
 }
 
+bool expressionable_token_next_is_operator(struct expressionable* expressionable, const char* op)
+{
+    struct token* token = expressionable_peek_next(expressionable);
+    return token_is_operator(token, op);
+}
+
 int expressionable_parse_number(struct expressionable* expressionable)
 {
     void* node_ptr = expressionable_callbacks(expressionable)->handle_number_callback(expressionable);
@@ -276,6 +282,50 @@ void expressionable_parse_parentheses(struct expressionable* expressionable)
     expressionable_deal_with_additional_expression(expressionable);
 }
 
+int expressionable_get_pointer_depth(struct expressionable* expressionable)
+{
+    int depth = 0;
+    while (expressionable_token_next_is_operator(expressionable, "*"))
+    {
+        depth += 1;
+        expressionable_token_next(expressionable);
+    }
+
+    return depth;
+}
+
+void expressionable_parse_for_indirection_unary(struct expressionable* expressionable)
+{
+    int depth = expressionable_get_pointer_depth(expressionable);
+    expressionable_parse(expressionable);
+
+    void* unary_operand_node = expressionable_node_pop(expressionable);
+    expressionable_callbacks(expressionable)->make_unary_indirection_node(expressionable, depth, unary_operand_node);
+}
+
+void expressionable_parse_for_normal_unary(struct expressionable* expressionable)
+{
+    const char* unary_op = expressionable_token_next(expressionable)->sval;
+    expressionable_parse(expressionable);
+
+    void* unary_operand_node = expressionable_node_pop(expressionable);
+    expressionable_callbacks(expressionable)->make_unary_node(expressionable, unary_op, unary_operand_node);
+}
+
+void expressionable_parse_unary(struct expressionable* expressionable)
+{
+    const char* unary_op = expressionable_peek_next(expressionable)->sval;
+    if (op_is_indirection(unary_op))
+    {
+        expressionable_parse_for_indirection_unary(expressionable);
+        return;
+    }
+
+    expressionable_parse_for_normal_unary(expressionable);
+
+    expressionable_deal_with_additional_expression(expressionable);
+}
+
 void expressionable_parse_for_operator(struct expressionable* expressionable)
 {
     struct token* op_token = expressionable_peek_next(expressionable);
@@ -283,7 +333,12 @@ void expressionable_parse_for_operator(struct expressionable* expressionable)
     void* node_left = expressionable_node_peek_or_null(expressionable);
     if (!node_left)
     {
-        #warning "deal with a unary"
+        if (!is_unary_operator(op))
+        {
+            expressionable_error(expressionable, "Not a unary operator..");
+        }
+
+        expressionable_parse_unary(expressionable);
         return;
     }
 
@@ -301,8 +356,7 @@ void expressionable_parse_for_operator(struct expressionable* expressionable)
         }
         else if (is_unary_operator(expressionable_peek_next(expressionable)->sval))
         {
-            #warning "parse the unary"
-            // expressionable_parse_unary()
+            expressionable_parse_unary(expressionable);
         }
         else
         {
