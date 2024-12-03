@@ -1352,6 +1352,47 @@ struct expressionable {
     struct vector*              node_vec_out;
 };
 
+// ch197: full expressionable API surface, declared in one block so
+// the preprocessor (and any future client) can pull it in via
+// compiler.h instead of hand-declaring each function.
+struct expressionable_callbacks* expressionable_callbacks(struct expressionable* expressionable);
+void* expressionable_node_pop(struct expressionable* expressionable);
+struct token* expressionable_token_next(struct expressionable* expressionable);
+
+void expressionable_node_push(struct expressionable* expressionable, void* node_ptr);
+void* expressionable_node_peek_or_null(struct expressionable* expressionable);
+void expressionable_ignore_nl(struct expressionable* expressionable, struct token* next_token);
+struct token* expressionable_peek_next(struct expressionable* expressionable);
+bool expressionable_token_next_is_operator(struct expressionable* expressionable, const char* op);
+void expressionable_init(struct expressionable* expressionable, struct vector* token_vector, struct vector* node_vector, struct expressionable_config* config, int flags);
+struct expressionable* expressionable_create(struct expressionable_config* config, struct vector* token_vector, struct vector* node_vector, int flags);
+int expressionable_parse_number(struct expressionable* expressionable);
+int expressionable_parse_identifier(struct expressionable* expressionable);
+
+bool expressionable_parser_left_op_has_priority(const char* op_left, const char* op_right);
+void expressionable_parser_node_shift_children_left(struct expressionable* expressionable, void* node);
+
+void expressionable_parser_reorder_expression(struct expressionable* expressionable, void** node_out);
+
+bool expressionable_generic_type_is_value_expressionable(int type);
+void expressionable_expect_op(struct expressionable* expressionable, const char* op);
+
+void expressionable_expect_sym(struct expressionable* expressionable, char c);
+void expressionable_deal_with_additional_expression(struct expressionable* expressionable);
+void expressionable_parse_parentheses(struct expressionable* expressionable);
+int expressionable_get_pointer_depth(struct expressionable* expressionable);
+void expressionable_parse_for_indirection_unary(struct expressionable* expressionable);
+
+void expressionable_parse_for_normal_unary(struct expressionable* expressionable);
+void expressionable_parse_unary(struct expressionable* expressionable);
+void expressionable_parse_for_operator(struct expressionable* expressionable);
+void expressionable_parse_tenary(struct expressionable* expressionable);
+int expressionable_parse_exp(struct expressionable* expressionable, struct token* token);
+int expressionable_parse_token(struct expressionable* expressionable, struct token* token, int flags);
+int expressionable_parse_single_with_flags(struct expressionable* expressionable, int flags);
+int expressionable_parse_single(struct expressionable* expressionable);
+void expressionable_parse(struct expressionable* expressionable);
+
 // ch96: deferred-resolution "fixup" system. Lets the parser register a
 // piece of work it cannot finish right now (forward decl references,
 // etc.) and try again later via the fix callback. end runs when the
