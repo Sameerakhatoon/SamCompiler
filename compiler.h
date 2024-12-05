@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <linux/limits.h>
 
 // String equality with NULL-safe operands. Used everywhere from the lexer
 // onwards to compare keyword / operator spellings.
@@ -207,12 +208,95 @@ struct compile_process_input_file {
 struct code_generator;
 struct resolver_process;
 
+// ch200: preprocessor scaffolding. Definitions, included files, the
+// preprocessor itself - all live in their own structs so the
+// preprocessor can shuttle state across nested includes.
+struct preprocessor;
+struct preprocessor_definition;
+struct preprocessor_function_argument;
+struct preprocessor_included_file;
+
+typedef void (*PREPROCESSOR_STATIC_INCLUDE_HANDLER_POST_CREATION)(struct preprocessor* preprocessor, struct preprocessor_included_file* included_file);
+
+enum {
+    PREPROCESSOR_DEFINITION_STANDARD,
+    PREPROCESSOR_DEFINITION_MACRO_FUNCTION,
+    PREPROCESSOR_DEFINITION_NATIVE_CALLBACK,
+    PREPROCESSOR_DEFINITION_TYPEDEF,
+};
+
+struct preprocessor_function_argument {
+    // Tokens for this argument; vector of struct token.
+    struct vector* tokens;
+};
+
+struct preprocessor_function_arguments {
+    // Vector of struct preprocessor_function_argument.
+    struct vector* arguments;
+};
+
+typedef int (*PREPROCESSOR_DEFINITION_NATIVE_CALL_EVALUATE)(struct preprocessor_definition* definition, struct preprocessor_function_arguments* arguments);
+typedef struct vector* (*PREPROCESSOR_DEFINITION_NATIVE_CALL_VALUE)(struct preprocessor_definition* definition, struct preprocessor_function_arguments* arguments);
+
+struct preprocessor_definition {
+    // Standard, macro function, native callback, or typedef.
+    int type;
+
+    // Name; e.g. `#define ABC` -> "ABC".
+    const char* name;
+    union {
+        struct standard_preprocessor_definition {
+            // Definition value tokens (can be multiple lines).
+            // Vector of struct token.
+            struct vector* value;
+
+            // Function arguments in order, e.g. ABC(a, b, c).
+            // Vector of const char*.
+            struct vector* arguments;
+        } standard;
+
+        struct typedef_preprocessor_definition {
+            struct vector* value;
+        } _typedef;
+
+        struct native_callback_preprocessor_definition {
+            PREPROCESSOR_DEFINITION_NATIVE_CALL_EVALUATE evaluate;
+            PREPROCESSOR_DEFINITION_NATIVE_CALL_VALUE    value;
+        } native;
+    };
+};
+
+struct preprocessor_included_file {
+    char filename[PATH_MAX];
+};
+
+struct preprocessor {
+    // Vector of struct preprocessor_definition*.
+    struct vector* definitions;
+    // Vector of struct preprocessor_node*.
+    struct vector* exp_vector;
+
+    struct expressionable* expressionable;
+
+    struct compile_process* compiler;
+
+    // Vector of struct preprocessor_included_file*.
+    struct vector* includes;
+};
+
+struct preprocessor* preprocessor_create(struct compile_process* compiler);
+int                  preprocessor_run(struct compile_process* compiler);
+
 struct compile_process {
     // Flags controlling how this file should be compiled.
     int flags;
 
     struct pos                        pos;
     struct compile_process_input_file cfile;
+
+    // Untampered token vector, contains definitions + source code tokens.
+    // The preprocessor walks this vector and populates token_vec below.
+    struct vector* token_vec_original;
 
     // Token vector from lexical analysis; populated after lex() runs.
     // The parser will consume it; for now it's just attached so the
@@ -246,10 +330,14 @@ struct compile_process {
     struct code_generator* generator;
     // ch137: resolver, owned by compile_process_create.
     struct resolver_process* resolver;
+
+    // ch200: vector of const char* representing include directories.
+    struct vector*         include_dirs;
+    struct preprocessor*   preprocessor;
 };
 
 int                     compile_file(const char* filename, const char* out_filename, int flags);
-struct compile_process* compile_process_create(const char* filename, const char* filename_out, int flags);
+struct compile_process* compile_process_create(const char* filename, const char* filename_out, int flags, struct compile_process* parent_process);
 
 void compiler_error(struct compile_process* compiler, const char* msg, ...);
 void compiler_warning(struct compile_process* compiler, const char* msg, ...);

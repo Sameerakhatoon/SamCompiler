@@ -19,7 +19,7 @@ cat > "$probe" <<EOF
 #include "compiler.h"
 #include "helpers/vector.h"
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", 0, 0);
+    struct compile_process* cp = compile_process_create("${scratch}", 0, 0, NULL);
     int has_table = cp && cp->generator && cp->generator->string_table != NULL;
     int empty     = has_table && vector_count(cp->generator->string_table) == 0;
     printf("table=%d empty=%d\n", has_table, empty);

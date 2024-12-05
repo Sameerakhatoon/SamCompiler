@@ -16,7 +16,7 @@ cat > "$probe" <<EOF
 #include "compiler.h"
 #include "helpers/vector.h"
 int main(void){
-    struct compile_process* cp = compile_process_create("./test.c", "/tmp/sam_ch25_out", 0);
+    struct compile_process* cp = compile_process_create("./test.c", "/tmp/sam_ch25_out", 0, NULL);
     if(!cp){ printf("FAIL cp\n"); return 1; }
     if(!cp->node_vec){ printf("FAIL: node_vec NULL\n"); return 1; }
     if(!cp->node_tree_vec){ printf("FAIL: node_tree_vec NULL\n"); return 1; }

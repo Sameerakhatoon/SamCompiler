@@ -3,7 +3,7 @@
 #include "compiler.h"
 #include "helpers/vector.h"
 
-struct compile_process* compile_process_create(const char* filename, const char* filename_out, int flags){
+struct compile_process* compile_process_create(const char* filename, const char* filename_out, int flags, struct compile_process* parent_process){
     struct compile_process* process = 0;
     FILE* file     = 0;
     FILE* out_file = 0;
@@ -25,24 +25,38 @@ struct compile_process* compile_process_create(const char* filename, const char*
         goto out_err;
     }
 
-    process->flags          = flags;
-    process->cfile.fp       = file;
-    process->cfile.abs_path = filename;
-    process->ofile          = out_file;
-    process->generator      = codegenerator_new(process);
+    process->flags                = flags;
+    process->cfile.fp             = file;
+    process->cfile.abs_path       = filename;
+    process->ofile                = out_file;
+    process->generator            = codegenerator_new(process);
     // ch137: default resolver lives next to the codegen.
-    process->resolver       = resolver_default_new_process(process);
-    process->pos.line       = 1;
-    process->pos.col        = 1;
-    process->pos.filename   = filename;
-    process->node_vec       = vector_create(sizeof(struct node*));
-    process->node_tree_vec  = vector_create(sizeof(struct node*));
+    process->resolver             = resolver_default_new_process(process);
+    process->pos.line             = 1;
+    process->pos.col              = 1;
+    process->pos.filename         = filename;
+    process->token_vec            = vector_create(sizeof(struct token));
+    process->token_vec_original   = vector_create(sizeof(struct token));
+    process->node_vec             = vector_create(sizeof(struct node*));
+    process->node_tree_vec        = vector_create(sizeof(struct node*));
 
     // ch66: kick off the symbol resolver here so anyone creating a
     // compile_process gets a usable symbol table without parse() having
     // to do double duty.
     symresolver_initialize(process);
     symresolver_new_table(process);
+
+    // ch200: nested compile_processes (e.g. for includes) inherit the
+    // parent's preprocessor + include-dirs vector; top-level creates fresh.
+    if(parent_process){
+        process->preprocessor = parent_process->preprocessor;
+        process->include_dirs = parent_process->include_dirs;
+    }
+    else{
+        process->preprocessor = preprocessor_create(process);
+        process->include_dirs = vector_create(sizeof(const char*));
+        // setup default include dirs...
+    }
 
     return process;
 

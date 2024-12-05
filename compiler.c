@@ -40,7 +40,7 @@ int compile_file(const char* filename, const char* out_filename, int flags){
     struct compile_process* process     = 0;
     struct lex_process*     lex_process = 0;
 
-    process = compile_process_create(filename, out_filename, flags);
+    process = compile_process_create(filename, out_filename, flags, NULL);
     if(!process){
         res = COMPILER_FAILED_WITH_ERRORS;
         goto out;
@@ -58,9 +58,13 @@ int compile_file(const char* filename, const char* out_filename, int flags){
         goto out;
     }
 
-    // Hand the token vector to the compile_process so the parser stage
-    // (ch24+) can find it without going back through lex_process.
-    process->token_vec = lex_process->token_vec;
+    // ch200: stash the raw lexer output as token_vec_original; the
+    // preprocessor will fill token_vec by walking that.
+    process->token_vec_original = lex_process_tokens(lex_process);
+    if(preprocessor_run(process) != 0){
+        res = COMPILER_FAILED_WITH_ERRORS;
+        goto out;
+    }
 
     // Perform parsing.
     if(parse(process) != PARSE_ALL_OK){

@@ -23,7 +23,7 @@ static void* mk_priv(struct resolver_entity* e, struct node* n, int o, struct re
     (void)e; (void)n; (void)o; (void)s; return NULL;
 }
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", 0, 0);
+    struct compile_process* cp = compile_process_create("${scratch}", 0, 0, NULL);
     struct resolver_callbacks cb = {.delete_scope=del_scope,.delete_entity=del_ent,.make_private=mk_priv};
     struct resolver_process* rp = resolver_new_process(cp, &cb);
 

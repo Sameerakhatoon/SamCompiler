@@ -24,7 +24,7 @@ static void* mk_priv(struct resolver_entity* e, struct node* n, int o, struct re
 }
 static void set_base(struct resolver_result* r, struct resolver_entity* e){ (void)r; (void)e; }
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", 0, 0);
+    struct compile_process* cp = compile_process_create("${scratch}", 0, 0, NULL);
     struct lex_process* lp = lex_process_create(cp, &compiler_lex_functions, 0);
     lex(lp); cp->token_vec = lex_process_tokens(lp); parse(cp);
 

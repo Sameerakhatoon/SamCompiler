@@ -20,7 +20,7 @@ cat > "$probe" <<EOF
 extern struct lex_process_functions compiler_lex_functions;
 
 int main(void){
-    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_ch10_out", 0);
+    struct compile_process* cp = compile_process_create("${scratch}", "/tmp/sam_ch10_out", 0, NULL);
     struct lex_process* lp = lex_process_create(cp, &compiler_lex_functions, 0);
     if(lex(lp) != LEXICAL_ANALYSIS_ALL_OK){ printf("FAIL lex\n"); return 1; }
 
