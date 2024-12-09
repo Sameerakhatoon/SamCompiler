@@ -603,6 +603,22 @@ static int x86_64_call_general(const struct exp64_call* call){
                 }
                 continue;
             }
+            if(a->pieces){
+                // a struct with floating members, by its
+                // eightbytes: SSE ones to xmm, INTEGER ones to the
+                // general registers.
+                for(int k = 0; k < a->pieces && pass == 1; k++){
+                    const struct exp64_piece* p = &a->piece[k];
+                    if(!p->fp){
+                        asm_push("mov %s, [rsp+%i]", codegen_arg_registers[p->reg], from + p->offset);
+                    } else if(p->size == DATA_SIZE_DWORD){
+                        asm_push("movd xmm%i, dword [rsp+%i]", p->reg, from + p->offset);
+                    } else {
+                        asm_push("movq xmm%i, [rsp+%i]", p->reg, from + p->offset);
+                    }
+                }
+                continue;
+            }
             for(int w = 0; w < a->words; w++){
                 if(w >= a->reg_words && pass == 0){
                     asm_push("mov r11, [rsp+%i]", from + 8 * w);
@@ -652,7 +668,23 @@ static void x86_64_call(const struct exp64_call* call){
         x86_64_from_xmm("rax", 0, call->float_return);
     }
     if(call->struct_size){
-        if(call->struct_in_regs){
+        if(call->ld_return){
+            // a long double comes back in st0.
+            asm_push("fstp tword [rsp]");
+        } else if(call->return_pieces){
+            // SSE eightbytes from xmm0, xmm1, INTEGER ones
+            // from rax, rdx.
+            for(int k = 0; k < call->return_pieces; k++){
+                const struct exp64_piece* p = &call->return_piece[k];
+                if(!p->fp){
+                    asm_push("mov [rsp+%i], %s", p->offset, p->reg ? "rdx" : "rax");
+                } else if(p->size == DATA_SIZE_DWORD){
+                    asm_push("movd dword [rsp+%i], xmm%i", p->offset, p->reg);
+                } else {
+                    asm_push("movq [rsp+%i], xmm%i", p->offset, p->reg);
+                }
+            }
+        } else if(call->struct_in_regs){
             asm_push("mov [rsp], rax");
             if(call->struct_size > 8){
                 asm_push("mov [rsp+8], rdx");
@@ -789,6 +821,130 @@ static void x86_64_sp_set(void){
     asm_push("mov rsp, rax");
 }
 
+// ---------------------------------------------------------------
+// long double, the x87 80-bit format in 16 bytes. A value is
+// its address in rax (rcx for the right operand); the x87 stack is
+// empty between operations.
+// ---------------------------------------------------------------
+
+static void x86_64_slot_address(int slots){
+    asm_push("lea rax, [rsp+%i]", DATA_SIZE_DDWORD * slots);
+}
+
+// st0 = [rax], st1 = [rcx], or the other way round with swap.
+static void x86_64_ld_load_pair(bool swap){
+    asm_push("fld tword [%s]", swap ? "rax" : "rcx");
+    asm_push("fld tword [%s]", swap ? "rcx" : "rax");
+}
+
+// [rsp] = [rax] op [rcx]: st1 = left, st0 = right, and the popping
+// form leaves st1 op st0.
+static void x86_64_ld_arith(const char* op){
+    const char* ins = S_EQ(op, "+") ? "faddp" : S_EQ(op, "-") ? "fsubp" : S_EQ(op, "*") ? "fmulp" : "fdivp";
+    x86_64_ld_load_pair(true);
+    asm_push("%s st1, st0", ins);
+    asm_push("fstp tword [rsp]");
+    asm_push("mov rax, rsp");
+}
+
+// fucomip sets ZF, PF and CF as ucomisd does: a < b is b > a with the
+// operands swapped round.
+static void x86_64_ld_compare(const char* op){
+    bool swap = S_EQ(op, "<") || S_EQ(op, "<=");
+    x86_64_ld_load_pair(swap);
+    asm_push("fucomip st0, st1");
+    asm_push("fstp st0");
+    if(S_EQ(op, "==") || S_EQ(op, "!=")){
+        bool eq = S_EQ(op, "==");
+        asm_push(eq ? "sete al" : "setne al");
+        asm_push(eq ? "setnp dl" : "setp dl");
+        asm_push(eq ? "and al, dl" : "or al, dl");
+    } else {
+        asm_push((S_EQ(op, "<") || S_EQ(op, ">")) ? "seta al" : "setae al");
+    }
+    asm_push("movzx eax, al");
+}
+
+static void x86_64_ld_truth(void){
+    asm_push("fld tword [rax]");
+    asm_push("fldz");
+    asm_push("fucomip st0, st1");
+    asm_push("fstp st0");
+    asm_push("setne al");
+    asm_push("setp dl");
+    asm_push("or al, dl");
+    asm_push("movzx eax, al");
+}
+
+// [rsp] = rax as a long double. An unsigned long of 2^63 or more loads
+// as a negative one, and 2^64 is added.
+static void x86_64_ld_from(int kind){
+    asm_push("mov [rsp], rax");
+    if(kind == EXP64_LD_FLOAT){
+        asm_push("fld dword [rsp]");
+    } else if(kind == EXP64_LD_DOUBLE){
+        asm_push("fld qword [rsp]");
+    } else {
+        asm_push("fild qword [rsp]");
+    }
+    if(kind == EXP64_LD_U64){
+        int done = codegen_label_count();
+        asm_push("test rax, rax");
+        asm_push("jns .fp_%i", done);
+        asm_push("mov dword [rsp+8], 0x5f800000");
+        asm_push("fadd dword [rsp+8]");
+        asm_push(".fp_%i:", done);
+    }
+    asm_push("fstp tword [rsp]");
+    asm_push("mov rax, rsp");
+}
+
+// rax = st0 truncated toward zero, popped: the control word set to
+// chop for the fistp, then restored. [rsp] to [rsp+16] are scratch.
+static void x86_64_ld_truncate(void){
+    asm_push("fnstcw [rsp+8]");
+    asm_push("mov dx, [rsp+8]");
+    asm_push("or dx, 0x0c00");
+    asm_push("mov [rsp+10], dx");
+    asm_push("fldcw [rsp+10]");
+    asm_push("fistp qword [rsp]");
+    asm_push("fldcw [rsp+8]");
+    asm_push("mov rax, [rsp]");
+}
+
+// rax = the long double at rax as a float or double (its bits), or
+// truncated to a long or unsigned long; for the unsigned one, a value of
+// 2^63 or more has 2^63 taken off first and its top bit set again after.
+static void x86_64_ld_to(int kind){
+    asm_push("fld tword [rax]");
+    asm_push("sub rsp, 16");
+    if(kind == EXP64_LD_FLOAT){
+        asm_push("fstp dword [rsp]");
+        asm_push("mov eax, [rsp]");
+    } else if(kind == EXP64_LD_DOUBLE){
+        asm_push("fstp qword [rsp]");
+        asm_push("mov rax, [rsp]");
+    } else if(kind == EXP64_LD_S64){
+        x86_64_ld_truncate();
+    } else {
+        int small = codegen_label_count();
+        int done = codegen_label_count();
+        asm_push("mov dword [rsp], 0x5f000000");
+        asm_push("fld dword [rsp]");
+        asm_push("fucomip st0, st1");
+        asm_push("ja .fp_%i", small);
+        asm_push("fld dword [rsp]");
+        asm_push("fsubp st1, st0");
+        x86_64_ld_truncate();
+        asm_push("btc rax, 63");
+        asm_push("jmp .fp_%i", done);
+        asm_push(".fp_%i:", small);
+        x86_64_ld_truncate();
+        asm_push(".fp_%i:", done);
+    }
+    asm_push("add rsp, 16");
+}
+
 static const struct exp64_ops x86_64_ops = {
     .push           = x86_64_push,
     .push_struct    = x86_64_push_struct,
@@ -823,6 +979,12 @@ static const struct exp64_ops x86_64_ops = {
     .float_resize   = x86_64_float_resize,
     .sp_get         = x86_64_sp_get,
     .sp_set         = x86_64_sp_set,
+    .slot_address   = x86_64_slot_address,
+    .ld_arith       = x86_64_ld_arith,
+    .ld_compare     = x86_64_ld_compare,
+    .ld_truth       = x86_64_ld_truth,
+    .ld_from        = x86_64_ld_from,
+    .ld_to          = x86_64_ld_to,
 };
 
 // ---------------------------------------------------------------
@@ -886,6 +1048,12 @@ static void codegen_discard_unused_stack(void){
 // double goes back in xmm0.
 static void codegen_generate_statement_return_exp(struct node* node){
     struct datatype dtype = exp64_return_value(node->stmt.return_stmt.exp, &current_function->func.rtype);
+    if(exp64_returns_x87(&dtype)){
+        // a long double, or a struct of just one, goes back in
+        // st0.
+        asm_push("fld tword [rax]");
+        return;
+    }
     if(datatype_is_floating(&dtype)){
         x86_64_to_xmm(0, "rax", dtype.size);
         return;
@@ -901,6 +1069,21 @@ static void codegen_generate_statement_return_exp(struct node* node){
         return;
     }
     asm_push("mov r11, rax");
+    struct exp64_piece pieces[EXP64_MAX_PIECES];
+    int count = exp64_return_pieces(&dtype, pieces);
+    if(count){
+        // SSE eightbytes in xmm0, xmm1, INTEGER ones in rax, rdx.
+        for(int k = 0; k < count; k++){
+            if(!pieces[k].fp){
+                x86_64_load_bytes(pieces[k].reg ? "rdx" : "rax", "r11", pieces[k].offset, pieces[k].size);
+            } else if(pieces[k].size == DATA_SIZE_DWORD){
+                asm_push("movd xmm%i, dword [r11+%i]", pieces[k].reg, pieces[k].offset);
+            } else {
+                asm_push("movq xmm%i, [r11+%i]", pieces[k].reg, pieces[k].offset);
+            }
+        }
+        return;
+    }
     if(size > DATA_SIZE_DDWORD){
         x86_64_load_bytes("rdx", "r11", DATA_SIZE_DDWORD, size - DATA_SIZE_DDWORD);
     }
@@ -1215,9 +1398,10 @@ static void codegen_generate_function_with_body(struct node* node){
     int locals = C_ALIGN(function_node_stack_size(node));
     codegen_stack_sub(locals);
     // Float and double parameters arrive in xmm0-7, which go to a home
-    // of their own under the locals; only functions that have some.
+    // of their own under the locals; only functions that have some
+    // (with room after it for structs that came in pieces).
     int fp_registers = exp64_fp_parameter_registers(node);
-    int fp_home_size = fp_registers ? EXP64_FP_ARG_REGISTERS * DATA_SIZE_DDWORD : 0;
+    int fp_home_size = exp64_fp_home_size(node);
     int fp_home = -(locals + fp_home_size);
     codegen_stack_sub(fp_home_size);
     for(int i = 0; i < fp_registers; i++){

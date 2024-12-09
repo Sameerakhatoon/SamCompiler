@@ -125,6 +125,10 @@ enum {
     // of its value as a double. FLOAT: the f suffix, the type is float.
     NUMBER_FLAG_FLOATING    = 0b10000,
     NUMBER_FLAG_FLOAT       = 0b100000,
+    // the L suffix, the type is long double. llnum holds the
+    // value rounded to a double; num.text keeps the spelling, from
+    // which the exact long double is read.
+    NUMBER_FLAG_LONG_DOUBLE = 0b1000000,
 };
 
 enum {
@@ -152,6 +156,8 @@ struct token {
         int type;
         // NUMBER_FLAG_*.
         int flags;
+        // NUMBER_FLAG_LONG_DOUBLE: the constant without its suffix.
+        const char* text;
     } num;
 
     // Set on a u"", U"" or L"" TOKEN_TYPE_STRING: the bytes of one code
@@ -557,6 +563,8 @@ struct compile_process {
     // A21: the program names float or double or has a floating
     // constant. The x86 backend looks for floating point only then.
     bool                   uses_floating;
+    // the program names long double or has an L constant.
+    bool                   uses_long_double;
 };
 
 int                     compile_file(const char* filename, const char* out_filename, int flags);
@@ -832,6 +840,8 @@ struct node {
         // The value itself is in llnum.
         struct node_number {
             int flags;
+            // NUMBER_FLAG_LONG_DOUBLE: the constant without its suffix.
+            const char* text;
             // A folded `sizeof expr`: the operand, kept so the validator
             // can check its names (and count them as used). Not generated.
             struct node* sizeof_operand;
@@ -1080,6 +1090,14 @@ double          number_node_double(struct node* node);
 // The bits of `value` as the floating type of `size` bytes stores it.
 unsigned long long floating_bits(double value, size_t size);
 double          floating_value(unsigned long long bits, size_t size);
+// long double.
+bool            datatype_is_long_double(struct datatype* dtype);
+struct datatype datatype_long_double(void);
+bool            long_double_is_x87(void);
+void            long_double_from_text(const char* text, unsigned char out[16]);
+void            long_double_from_double(double value, unsigned char out[16]);
+void            long_double_from_integer(unsigned long long value, bool negative, unsigned char out[16]);
+bool            long_double_fold(struct compile_process* process, struct node* node, unsigned char out[16]);
 struct datatype datatype_promote(struct datatype* dtype);
 struct datatype_binary {
     // The type the instruction works in: its width and signedness pick
@@ -1312,6 +1330,21 @@ enum {
     EXP64_ARG_REF,      // one word: the address of a copy the caller makes
 };
 
+// a part of a struct with float or double members that the
+// psABI puts in a register of its own: `size` bytes at `offset` in the
+// struct, in floating-point register `reg` (xmm, v or fa) or, without
+// fp, in integer register `reg` (an argument register for an argument,
+// for a result the first or second return register).
+struct exp64_piece {
+    bool fp;
+    bool is_signed;     // an integer piece narrower than 8 bytes (riscv64)
+    int  offset;
+    int  size;
+    int  reg;
+};
+
+#define EXP64_MAX_PIECES 4
+
 struct exp64_arg {
     int kind;
     int size;           // bytes of the value
@@ -1324,6 +1357,11 @@ struct exp64_arg {
     int stack;          // outgoing stack word of the first word not in a register, or -1
     int copy;           // REF: byte offset of the copy in the outgoing area
     int slot;           // caller: expression-stack slot of word 0, counted from the top
+    // a struct with floating members in registers by its
+    // psABI's classification: its pieces (reg is then -1, the integer
+    // and floating-point registers are the pieces' own).
+    int pieces;
+    struct exp64_piece piece[EXP64_MAX_PIECES];
 };
 
 // A call as exp64 hands it to the backend. The arguments' words are on
@@ -1348,6 +1386,21 @@ struct exp64_call {
     bool              struct_in_regs;   // it comes back in the two return registers, not through memory
     int               fp_regs;          // floating-point argument registers used (al on x86_64)
     int               float_return;     // a float (4) or double (8) result: from xmm0, d0/s0 or fa0 to R0; else 0
+    // a struct result in pieces (struct_in_regs): stored from
+    // the floating-point and integer return registers into the room.
+    int               return_pieces;
+    struct exp64_piece return_piece[EXP64_MAX_PIECES];
+    // a long double result (struct_size 16, struct_in_regs):
+    // from st0 on x86_64, q0 on aarch64, a0:a1 on riscv64.
+    bool              ld_return;
+};
+
+// what a long double converts from or to (ld_from, ld_to).
+enum {
+    EXP64_LD_FLOAT,
+    EXP64_LD_DOUBLE,
+    EXP64_LD_S64,
+    EXP64_LD_U64,
 };
 
 struct exp64_ops {
@@ -1402,6 +1455,20 @@ struct exp64_ops {
     // R0 = the stack pointer, and the stack pointer = R0.
     void (*sp_get)(void);
     void (*sp_set)(void);
+    // long double. Its value is the address of its 16 bytes,
+    // as a struct value is; a result goes to the room exp64 reserved on
+    // top of the expression stack, whose address R0 is afterwards.
+    // aarch64 and riscv64 call the libgcc soft-float routines, which
+    // keep nothing of R1.
+    void (*slot_address)(int slots);                            // R0 = the address `slots` slots above the top
+    void (*ld_arith)(const char* op);                           // [top] = [R0] op [R1]: + - * /
+    void (*ld_compare)(const char* op);                         // R0 = [R0] op [R1], 0 or 1 (false if unordered, but !=)
+    void (*ld_truth)(void);                                     // R0 = [R0] != 0
+    void (*ld_from)(int kind);                                  // [top] = R0 (EXP64_LD_*) as a long double
+    void (*ld_to)(int kind);                                    // R0 = [R0] as a float, double, long or unsigned long
+    // aarch64: store the q register `reg` (a long double argument) at
+    // the frame offset; NULL elsewhere.
+    void (*ld_spill_q)(int reg, int offset);
 };
 
 // The floating-point argument registers every 64-bit ABI here has:
@@ -1410,9 +1477,12 @@ struct exp64_ops {
 
 void            exp64_parameters(struct node* function, int register_home, int stack_home, int fp_home);
 int             exp64_fp_parameter_registers(struct node* function);
+int             exp64_fp_home_size(struct node* function);
+int             exp64_return_pieces(struct datatype* dtype, struct exp64_piece* out);
 struct datatype exp64_return_value(struct node* node, struct datatype* rtype);
 void            exp64_test(struct node* node);
 bool            exp64_returns_in_memory(struct datatype* dtype);
+bool            exp64_returns_x87(struct datatype* dtype);
 
 void            exp64_begin(const struct exp64_ops* ops, struct compile_process* process);
 void            exp64_set_function(struct node* function);
@@ -1937,6 +2007,9 @@ enum {
     DATA_TYPE_LONG,
     DATA_TYPE_FLOAT,
     DATA_TYPE_DOUBLE,
+    // x87 80-bit on x86 and x86_64, IEEE binary128 on aarch64
+    // and riscv64. Not datatype_is_floating, which is float and double.
+    DATA_TYPE_LONG_DOUBLE,
     DATA_TYPE_STRUCT,
     DATA_TYPE_UNION,
     DATA_TYPE_UNKNOWN,
@@ -1966,6 +2039,12 @@ enum {
     FUNCTION_NODE_FLAG_IS_NATIVE   = 0b00000001,
     // The parameter list ends in `...`: a call may pass more arguments.
     FUNCTION_NODE_FLAG_IS_VARIADIC = 0b00000010,
+    // the body has `(struct s*)0`, as va_arg of a struct does
+    // (exp64_fp_home_size).
+    FUNCTION_NODE_FLAG_STRUCT_POINTER_CAST = 0b00000100,
+    // the body has `(long double*)0`, as va_arg of a long
+    // double does.
+    FUNCTION_NODE_FLAG_LONG_DOUBLE_POINTER_CAST = 0b00001000,
 };
 
 // Operator precedence table - definitions moved out of expressionable.c

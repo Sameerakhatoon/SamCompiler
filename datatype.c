@@ -66,6 +66,10 @@ size_t datatype_alignment(struct datatype* dtype){
     if(dtype->size == 0){
         return 1;
     }
+    if(datatype_is_long_double(dtype) || (dtype->type == DATA_TYPE_LONG_DOUBLE && (dtype->flags & DATATYPE_FLAG_IS_ARRAY))){
+        // 16 on the 64-bit targets, 4 on i386.
+        return max == DATA_SIZE_DWORD ? DATA_SIZE_DWORD : 16;
+    }
     return dtype->size < max ? dtype->size : max;
 }
 
@@ -98,6 +102,26 @@ static int datatype_rank(struct datatype* dtype){
 // unsigned long; u limits the list to unsigned types, l starts it at
 // long. long long is the target's long. A value no type holds becomes
 // unsigned long, as gcc does with a warning.
+// long double, x87 80-bit extended on x86 and x86_64 (12 and
+// 16 bytes with the padding), IEEE binary128 on aarch64 and riscv64.
+bool datatype_is_long_double(struct datatype* dtype){
+    return !(dtype->flags & (DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_ARRAY)) && dtype->type == DATA_TYPE_LONG_DOUBLE;
+}
+
+bool long_double_is_x87(void){
+    const char* name = target_current()->backend->name;
+    return S_EQ(name, "x86") || S_EQ(name, "x86_64");
+}
+
+struct datatype datatype_long_double(void){
+    struct datatype dtype = {0};
+    dtype.type     = DATA_TYPE_LONG_DOUBLE;
+    dtype.type_str = "long double";
+    dtype.size     = target_current()->pointer_size == DATA_SIZE_DWORD ? 12 : 16;
+    dtype.flags    = DATATYPE_FLAG_IS_SIGNED;
+    return dtype;
+}
+
 bool datatype_is_floating(struct datatype* dtype){
     return !(dtype->flags & (DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_ARRAY))
         && (dtype->type == DATA_TYPE_FLOAT || dtype->type == DATA_TYPE_DOUBLE);
@@ -145,6 +169,11 @@ struct datatype datatype_for_number_node(struct node* node){
     int flags = node->num.flags;
     unsigned long long value = node->llnum;
     size_t long_size = target_current()->long_size;
+    if(flags & NUMBER_FLAG_LONG_DOUBLE){
+        struct datatype dtype = datatype_long_double();
+        dtype.flags |= DATATYPE_FLAG_IS_LITERAL;
+        return dtype;
+    }
     if(flags & NUMBER_FLAG_FLOATING){
         struct datatype dtype = datatype_floating((flags & NUMBER_FLAG_FLOAT) ? DATA_SIZE_DWORD : DATA_SIZE_DDWORD);
         dtype.flags |= DATATYPE_FLAG_IS_LITERAL;
@@ -203,6 +232,9 @@ struct datatype datatype_promote(struct datatype* dtype){
     if((dtype->flags & DATATYPE_FLAG_IS_POINTER) || datatype_is_struct_or_union(dtype)){
         return *dtype;
     }
+    if(datatype_is_long_double(dtype)){
+        return datatype_long_double();
+    }
     if(datatype_is_floating(dtype)){
         return datatype_floating(dtype->size);
     }
@@ -217,7 +249,11 @@ struct datatype datatype_promote(struct datatype* dtype){
 // unsigned type wins unless the signed type is wider and so holds all
 // its values; if not, the unsigned version of the signed type.
 static struct datatype datatype_common(struct datatype* left, struct datatype* right){
-    // A floating operand wins: double over float over every integer.
+    // A floating operand wins: long double over double over float over
+    // every integer.
+    if(datatype_is_long_double(left) || datatype_is_long_double(right)){
+        return datatype_long_double();
+    }
     if(datatype_is_floating(left) || datatype_is_floating(right)){
         bool is_double = (datatype_is_floating(left) && left->size == DATA_SIZE_DDWORD)
                       || (datatype_is_floating(right) && right->size == DATA_SIZE_DDWORD);

@@ -392,6 +392,7 @@ static void x87_push(struct node* node, int flags);
 static void x87_effect(struct node* node);
 static void x87_return(struct node* node, struct datatype* rtype);
 static void x87_initialize(struct node* value, struct datatype* type, const char* address);
+static bool x87_is_floating(struct datatype* t);
 
 // ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
 // nested calls so the recursive walk knows it's deeper than the top.
@@ -514,7 +515,7 @@ void codegen_entity_address(struct generator* generator, struct resolver_entity*
 static void codegen_generate_scope_variable(struct node* node){
     struct resolver_entity* entity = codegen_new_scope_entity(node, node->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
     if(node->var.val && !datatype_is_struct_or_union_non_pointer(&entity->dtype)
-       && (x87_wanted(node->var.val) || (current_process->uses_floating && datatype_is_floating(&entity->dtype)))){
+       && (x87_wanted(node->var.val) || (current_process->uses_floating && x87_is_floating(&entity->dtype)))){
         x87_initialize(node->var.val, &entity->dtype, codegen_entity_private(entity)->address);
         return;
     }
@@ -1899,8 +1900,14 @@ static struct datatype x87_value(struct node* node);
 static bool            x87_involves(struct node* node);
 static struct datatype x87_call_emit(struct node* node, bool struct_result);
 
+// a long double is the x87's own 80-bit format, 12 bytes in
+// memory (a tword and two bytes of padding); it is never rounded.
 static bool x87_is_floating(struct datatype* t){
-    return datatype_is_floating(t);
+    return datatype_is_floating(t) || datatype_is_long_double(t);
+}
+
+static bool x87_is_long(struct datatype* t){
+    return datatype_is_long_double(t);
 }
 
 static bool x87_is_comparison(const char* op){
@@ -2212,7 +2219,7 @@ static void x87_scratch(void){
 }
 
 static const char* x87_size_keyword(int size){
-    return size == DATA_SIZE_DWORD ? "dword" : "qword";
+    return size == DATA_SIZE_DWORD ? "dword" : size == DATA_SIZE_DDWORD ? "qword" : "tword";
 }
 
 // Room on the stack, in the ledger like every push.
@@ -2224,14 +2231,22 @@ static void x87_release(int bytes){
     codegen_stack_add_with_name(bytes, "x87_spill");
 }
 
-// st0 to a new stack qword (exact for a float too).
-static void x87_spill(void){
-    x87_reserve(DATA_SIZE_DDWORD);
-    asm_push("fstp qword [esp]");
+// st0 to new stack room of the bytes a value of the floating type t is
+// spilled in (exact for a float too): a qword, or a long double's 12.
+static int x87_spill_size(struct datatype* t){
+    return x87_is_long(t) ? (int)t->size : DATA_SIZE_DDWORD;
 }
 
-// st0 rounded to a float or double.
+static void x87_spill_as(struct datatype* t){
+    x87_reserve(x87_spill_size(t));
+    asm_push("fstp %s [esp]", x87_size_keyword(x87_spill_size(t)));
+}
+
+// st0 rounded to a float or double; a long double is left as it is.
 static void x87_round(int size){
+    if(size > DATA_SIZE_DDWORD){
+        return;
+    }
     x87_scratch();
     asm_push("fstp %s [x87_tmp]", x87_size_keyword(size));
     asm_push("fld %s [x87_tmp]", x87_size_keyword(size));
@@ -2390,6 +2405,12 @@ static void x87_load(struct datatype* t){
 // The object at the address in ecx = the value of type t (st0, kept as
 // the expression's value, or eax).
 static void x87_store(struct datatype* t){
+    if(x87_is_long(t)){
+        // fst has no tword form.
+        asm_push("fstp tword [ecx]");
+        asm_push("fld tword [ecx]");
+        return;
+    }
     if(x87_is_floating(t)){
         asm_push("fst %s [ecx]", x87_size_keyword(t->size));
         return;
@@ -2401,6 +2422,18 @@ static void x87_store(struct datatype* t){
 
 static void x87_constant(struct node* node, struct datatype* t){
     int id = codegen_label_count();
+    if(x87_is_long(t)){
+        // the tword from the constant's spelling.
+        unsigned char bytes[16];
+        long_double_from_text(node->num.text, bytes);
+        unsigned int words[3];
+        for(int w = 0; w < 3; w++){
+            words[w] = bytes[4 * w] | bytes[4 * w + 1] << 8 | bytes[4 * w + 2] << 16 | (unsigned int)bytes[4 * w + 3] << 24;
+        }
+        codegen_data_section_add("x87_const_%i: dd %u, %u, %u", id, words[0], words[1], words[2]);
+        asm_push("fld tword [x87_const_%i]", id);
+        return;
+    }
     unsigned long long bits = floating_bits(number_node_double(node), t->size);
     codegen_data_section_add("x87_const_%i: %s %llu", id, t->size == DATA_SIZE_DWORD ? "dd" : "dq", bits);
     asm_push("fld %s [x87_const_%i]", x87_size_keyword(t->size), id);
@@ -2444,12 +2477,12 @@ static const char* x87_arith_ins(const char* op){
 }
 
 // Both operands in the common type c, spilled: the right one at [esp],
-// the left at [esp+8].
+// the left at [esp+8] (at [esp+12] for a long double).
 static void x87_operands(struct node* left, struct node* right, struct datatype* c){
     x87_operand_as(left, c);
-    x87_spill();
+    x87_spill_as(c);
     x87_operand_as(right, c);
-    x87_spill();
+    x87_spill_as(c);
 }
 
 static struct datatype x87_common(struct node* left, struct node* right){
@@ -2468,9 +2501,17 @@ static struct datatype x87_arith(struct node* node){
     struct datatype c = x87_common(node->exp.left, node->exp.right);
     const char* ins = x87_arith_ins(node->exp.op);
     x87_operands(node->exp.left, node->exp.right, &c);
-    asm_push("fld qword [esp+8]");
-    asm_push("%s qword [esp]", ins);
-    x87_release(2 * DATA_SIZE_DDWORD);
+    int spill = x87_spill_size(&c);
+    if(x87_is_long(&c)){
+        // No tword operand for the arithmetic: st1 op st0, popped.
+        asm_push("fld tword [esp+%i]", spill);
+        asm_push("fld tword [esp]");
+        asm_push("%sp st1, st0", ins);
+    } else {
+        asm_push("fld qword [esp+8]");
+        asm_push("%s qword [esp]", ins);
+    }
+    x87_release(2 * spill);
     x87_round(c.size);
     return c;
 }
@@ -2483,8 +2524,10 @@ static struct datatype x87_compare(struct node* node){
     struct datatype c = x87_common(node->exp.left, node->exp.right);
     x87_operands(node->exp.left, node->exp.right, &c);
     bool swap = S_EQ(op, "<") || S_EQ(op, "<=");
-    asm_push("fld qword [esp+%i]", swap ? 8 : 0);
-    asm_push("fld qword [esp+%i]", swap ? 0 : 8);
+    int spill = x87_spill_size(&c);
+    const char* keyword = x87_size_keyword(spill);
+    asm_push("fld %s [esp+%i]", keyword, swap ? spill : 0);
+    asm_push("fld %s [esp+%i]", keyword, swap ? 0 : spill);
     asm_push("fucomip st0, st1");
     asm_push("fstp st0");
     if(S_EQ(op, "==") || S_EQ(op, "!=")){
@@ -2497,7 +2540,7 @@ static struct datatype x87_compare(struct node* node){
     }
     asm_push("movzx eax, al");
     // The flags are read: `add esp` may change them now.
-    x87_release(2 * DATA_SIZE_DDWORD);
+    x87_release(2 * spill);
     return datatype_for_int();
 }
 
@@ -2508,16 +2551,20 @@ static struct datatype x87_assign(struct node* node){
     struct datatype lt = x87_type(node->exp.left);
     if(S_EQ(op, "=")){
         x87_operand_as(node->exp.right, &lt);
-        int bytes = x87_is_floating(&lt) ? DATA_SIZE_DDWORD : DATA_SIZE_DWORD;
+        int bytes = x87_is_floating(&lt) ? x87_spill_size(&lt) : DATA_SIZE_DWORD;
         if(x87_is_floating(&lt)){
-            x87_spill();
+            x87_spill_as(&lt);
         } else {
             x87_reserve(bytes);
             asm_push("mov [esp], eax");
         }
         x87_address(node->exp.left);
         asm_push("mov ecx, eax");
-        asm_push(x87_is_floating(&lt) ? "fld qword [esp]" : "mov eax, [esp]");
+        if(x87_is_floating(&lt)){
+            asm_push("fld %s [esp]", x87_size_keyword(bytes));
+        } else {
+            asm_push("mov eax, [esp]");
+        }
         x87_release(bytes);
         x87_store(&lt);
         x87_reduce(&lt);
@@ -2531,13 +2578,19 @@ static struct datatype x87_assign(struct node* node){
     x87_reserve(DATA_SIZE_DWORD);
     asm_push("mov [esp], eax");
     x87_operand_as(node->exp.right, &c);
-    x87_spill();
-    asm_push("mov eax, [esp+8]");
+    x87_spill_as(&c);
+    int spill = x87_spill_size(&c);
+    asm_push("mov eax, [esp+%i]", spill);
     x87_load(&lt);
     x87_convert(&lt, &c);
-    asm_push("%s qword [esp]", ins);
+    if(x87_is_long(&c)){
+        asm_push("fld tword [esp]");
+        asm_push("%sp st1, st0", ins);
+    } else {
+        asm_push("%s qword [esp]", ins);
+    }
     x87_round(c.size);
-    x87_release(DATA_SIZE_DDWORD);
+    x87_release(spill);
     x87_convert(&c, &lt);
     asm_push("mov ecx, [esp]");
     x87_release(DATA_SIZE_DWORD);
@@ -2558,18 +2611,23 @@ static struct datatype x87_increment(struct node* node){
     x87_reserve(DATA_SIZE_DWORD);
     asm_push("mov [esp], eax");
     x87_load(&lt);
+    int spill = x87_spill_size(&lt);
     if(postfix){
         asm_push("fld st0");
-        x87_spill();
+        x87_spill_as(&lt);
     }
     asm_push("%s dword [x87_one]", S_EQ(node->unary.op, "++") ? "fadd" : "fsub");
     x87_round(lt.size);
-    asm_push("mov ecx, [esp%s]", postfix ? "+8" : "");
+    if(postfix){
+        asm_push("mov ecx, [esp+%i]", spill);
+    } else {
+        asm_push("mov ecx, [esp]");
+    }
     x87_store(&lt);
     if(postfix){
         asm_push("fstp st0");
-        asm_push("fld qword [esp]");
-        x87_release(DATA_SIZE_DDWORD);
+        asm_push("fld %s [esp]", x87_size_keyword(spill));
+        x87_release(spill);
     }
     x87_release(DATA_SIZE_DWORD);
     return lt;
@@ -2660,8 +2718,11 @@ static struct datatype x87_call_emit(struct node* node, bool struct_result){
         if(x87_param_type(callee, i, &param)){
             t = param;
         } else if(x87_is_floating(&t)){
-            // The default argument promotions: a float is a double.
-            t = datatype_floating(DATA_SIZE_DDWORD);
+            // The default argument promotions: a float is a double; a
+            // long double stays one.
+            if(!x87_is_long(&t)){
+                t = datatype_floating(DATA_SIZE_DDWORD);
+            }
         } else if(t.flags & DATATYPE_FLAG_IS_ARRAY){
             t = datatype_decay(&t);
         } else {
@@ -2932,7 +2993,7 @@ static void codegen_discard_unused_stack(void){
 static void codegen_generate_statement_return_exp(struct node* node){
     struct datatype* rtype = &node->binded.function->func.rtype;
     if(!datatype_is_struct_or_union_non_pointer(rtype)
-       && (x87_wanted(node->stmt.return_stmt.exp) || (current_process->uses_floating && datatype_is_floating(rtype)))){
+       && (x87_wanted(node->stmt.return_stmt.exp) || (current_process->uses_floating && x87_is_floating(rtype)))){
         // A21: a float or double result goes back in st0.
         x87_return(node->stmt.return_stmt.exp, rtype);
         return;
@@ -3656,6 +3717,7 @@ static void codegen_generate_global_variable(struct node* node){
         case DATA_TYPE_LONG:
         case DATA_TYPE_FLOAT:
         case DATA_TYPE_DOUBLE:
+        case DATA_TYPE_LONG_DOUBLE:
             codegen_generate_global_variable_for_primitive(node);
             break;
         case DATA_TYPE_STRUCT:

@@ -366,7 +366,20 @@ void make_tenary_node(struct node* true_node, struct node* false_node){
     });
 }
 
+extern struct node* parser_current_function;
+
 void make_cast_node(struct datatype* dtype, struct node* operand_node){
+    // `(struct s*)0` is how va_arg passes a struct type, and
+    // `(long double*)0` a long double.
+    if(parser_current_function && (dtype->flags & DATATYPE_FLAG_IS_POINTER) && dtype->pointer_depth == 1
+       && operand_node && operand_node->type == NODE_TYPE_NUMBER && operand_node->llnum == 0){
+        if(datatype_is_struct_or_union(dtype)){
+            parser_current_function->func.flags |= FUNCTION_NODE_FLAG_STRUCT_POINTER_CAST;
+        }
+        if(dtype->type == DATA_TYPE_LONG_DOUBLE){
+            parser_current_function->func.flags |= FUNCTION_NODE_FLAG_LONG_DOUBLE_POINTER_CAST;
+        }
+    }
     node_create(&(struct node){
         .type         = NODE_TYPE_CAST,
         .cast.dtype   = *dtype,

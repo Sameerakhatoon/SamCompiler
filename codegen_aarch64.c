@@ -62,6 +62,8 @@ static int           codegen_switch_id(void);
 static void          codegen_begin_case_statement(long long index);
 static void          codegen_end_case_statement(void);
 static void          codegen_goto_entry_point(struct node* node);
+static const char*   aarch64_freg(int n, int size);
+static void          aarch64_ld_load_q(int reg, int off, int off2);
 
 static void codegen_new_scope(int flags){
     resolver_default_new_scope(current_process->resolver, flags);
@@ -540,10 +542,28 @@ static int aarch64_call_general(const struct exp64_call* call){
                 continue;
             }
             if(a->fp){
-                if(pass == 1){
+                if(pass == 1 && a->size == 16){
+                    // a long double, its words in two slots.
+                    aarch64_ld_load_q(a->reg, from, from + CODEGEN_SLOT);
+                } else if(pass == 1){
                     char reg[8];
                     snprintf(reg, sizeof(reg), "d%i", a->reg);
                     codegen_sp_word("ldr", reg, from);
+                }
+                continue;
+            }
+            if(a->pieces){
+                // a homogeneous floating-point aggregate, a
+                // member to each s or d register. Its words are in
+                // 16-byte slots.
+                for(int k = 0; k < a->pieces && pass == 1; k++){
+                    const struct exp64_piece* p = &a->piece[k];
+                    int at = from + CODEGEN_SLOT * (p->offset / 8) + p->offset % 8;
+                    if(p->size == 16){
+                        aarch64_ld_load_q(p->reg, at, at + CODEGEN_SLOT);
+                        continue;
+                    }
+                    codegen_sp_word("ldr", aarch64_freg(p->reg, p->size), at);
                 }
                 continue;
             }
@@ -586,7 +606,16 @@ static void aarch64_call(const struct exp64_call* call){
         aarch64_from_freg(0, call->float_return);
     }
     if(call->struct_size){
-        if(call->struct_in_regs){
+        if(call->ld_return){
+            // a long double comes back in q0.
+            asm_push("str q0, [sp]");
+        } else if(call->return_pieces){
+            // an aggregate from s0-s3 or d0-d3.
+            for(int k = 0; k < call->return_pieces; k++){
+                const struct exp64_piece* p = &call->return_piece[k];
+                asm_push("str %s, [sp, #%i]", aarch64_freg(p->reg, p->size), p->offset);
+            }
+        } else if(call->struct_in_regs){
             asm_push(call->struct_size > 8 ? "stp x0, x1, [sp]" : "str x0, [sp]");
         }
         asm_push("mov x0, sp");
@@ -608,7 +637,7 @@ static const char* aarch64_freg(int n, int size){
     static char buffers[4][8];
     static int next;
     char* out = buffers[next++ % 4];
-    snprintf(out, sizeof(buffers[0]), "%c%i", size == DATA_SIZE_DWORD ? 's' : 'd', n);
+    snprintf(out, sizeof(buffers[0]), "%c%i", size == DATA_SIZE_DWORD ? 's' : size == 16 ? 'q' : 'd', n);
     return out;
 }
 
@@ -669,6 +698,88 @@ static void aarch64_sp_set(void){
     asm_push("mov sp, x0");
 }
 
+// ---------------------------------------------------------------
+// long double, IEEE binary128, through the libgcc soft-float
+// routines, which take and give it in q registers. A value is its
+// address in x0 (x1 for the right operand).
+// ---------------------------------------------------------------
+
+static void aarch64_slot_address(int slots){
+    codegen_add_imm("x0", "sp", CODEGEN_SLOT * slots);
+}
+
+static void aarch64_ld_arith(const char* op){
+    const char* routine = S_EQ(op, "+") ? "__addtf3" : S_EQ(op, "-") ? "__subtf3" : S_EQ(op, "*") ? "__multf3" : "__divtf3";
+    asm_push("ldr q0, [x0]");
+    asm_push("ldr q1, [x1]");
+    asm_push("bl %s", routine);
+    asm_push("str q0, [sp]");
+    asm_push("mov x0, sp");
+}
+
+// The comparison routines give an int whose sign says the answer, and
+// the one that makes the comparison false for an unordered pair.
+static void aarch64_ld_compare(const char* op){
+    const char* routine = S_EQ(op, "==") ? "__eqtf2" : S_EQ(op, "!=") ? "__netf2" : S_EQ(op, "<") ? "__lttf2"
+                        : S_EQ(op, "<=") ? "__letf2" : S_EQ(op, ">") ? "__gttf2" : "__getf2";
+    const char* cond = S_EQ(op, "==") ? "eq" : S_EQ(op, "!=") ? "ne" : S_EQ(op, "<") ? "lt"
+                     : S_EQ(op, "<=") ? "le" : S_EQ(op, ">") ? "gt" : "ge";
+    asm_push("ldr q0, [x0]");
+    asm_push("ldr q1, [x1]");
+    asm_push("bl %s", routine);
+    asm_push("cmp w0, #0");
+    asm_push("cset w0, %s", cond);
+}
+
+static void aarch64_ld_truth(void){
+    asm_push("ldr q0, [x0]");
+    asm_push("movi v1.2d, #0");
+    asm_push("bl __netf2");
+    asm_push("cmp w0, #0");
+    asm_push("cset w0, ne");
+}
+
+static void aarch64_ld_from(int kind){
+    if(kind == EXP64_LD_FLOAT){
+        asm_push("fmov s0, w0");
+        asm_push("bl __extendsftf2");
+    } else if(kind == EXP64_LD_DOUBLE){
+        asm_push("fmov d0, x0");
+        asm_push("bl __extenddftf2");
+    } else {
+        asm_push("bl %s", kind == EXP64_LD_S64 ? "__floatditf" : "__floatunditf");
+    }
+    asm_push("str q0, [sp]");
+    asm_push("mov x0, sp");
+}
+
+static void aarch64_ld_to(int kind){
+    asm_push("ldr q0, [x0]");
+    if(kind == EXP64_LD_FLOAT){
+        asm_push("bl __trunctfsf2");
+        asm_push("fmov w0, s0");
+    } else if(kind == EXP64_LD_DOUBLE){
+        asm_push("bl __trunctfdf2");
+        asm_push("fmov x0, d0");
+    } else {
+        asm_push("bl %s", kind == EXP64_LD_S64 ? "__fixtfdi" : "__fixunstfdi");
+    }
+}
+
+static void aarch64_ld_spill_q(int reg, int offset){
+    codegen_add_imm("x11", "x29", offset);
+    asm_push("str q%i, [x11]", reg);
+}
+
+// q<reg> = the long double in two 8-byte words at sp + off and sp + off2.
+static void aarch64_ld_load_q(int reg, int off, int off2){
+    char d[8];
+    snprintf(d, sizeof(d), "d%i", reg);
+    codegen_sp_word("ldr", d, off);
+    codegen_sp_word("ldr", "x11", off2);
+    asm_push("mov v%i.d[1], x11", reg);
+}
+
 static const struct exp64_ops aarch64_ops = {
     .push           = aarch64_push,
     .push_struct    = aarch64_push_struct,
@@ -703,6 +814,13 @@ static const struct exp64_ops aarch64_ops = {
     .float_resize   = aarch64_float_resize,
     .sp_get         = aarch64_sp_get,
     .sp_set         = aarch64_sp_set,
+    .slot_address   = aarch64_slot_address,
+    .ld_arith       = aarch64_ld_arith,
+    .ld_compare     = aarch64_ld_compare,
+    .ld_truth       = aarch64_ld_truth,
+    .ld_from        = aarch64_ld_from,
+    .ld_to          = aarch64_ld_to,
+    .ld_spill_q     = aarch64_ld_spill_q,
 };
 
 // ---------------------------------------------------------------
@@ -764,6 +882,11 @@ static void codegen_discard_unused_stack(void){
 // or double goes back in s0 or d0.
 static void codegen_generate_statement_return_exp(struct node* node){
     struct datatype dtype = exp64_return_value(node->stmt.return_stmt.exp, &current_function->func.rtype);
+    if(datatype_is_long_double(&dtype)){
+        // a long double goes back in q0.
+        asm_push("ldr q0, [x0]");
+        return;
+    }
     if(datatype_is_floating(&dtype)){
         aarch64_to_freg(0, 0, dtype.size);
         return;
@@ -779,6 +902,15 @@ static void codegen_generate_statement_return_exp(struct node* node){
         return;
     }
     asm_push("mov x11, x0");
+    struct exp64_piece pieces[EXP64_MAX_PIECES];
+    int count = exp64_return_pieces(&dtype, pieces);
+    if(count){
+        // an aggregate in s0-s3 or d0-d3.
+        for(int k = 0; k < count; k++){
+            asm_push("ldr %s, [x11, #%i]", aarch64_freg(pieces[k].reg, pieces[k].size), pieces[k].offset);
+        }
+        return;
+    }
     if(size > DATA_SIZE_DDWORD){
         aarch64_load_bytes(1, "x11", DATA_SIZE_DDWORD, size - DATA_SIZE_DDWORD);
     }
@@ -1104,7 +1236,7 @@ static void codegen_generate_function_with_body(struct node* node){
     // a home of their own under the locals; only functions that have
     // some.
     int fp_registers = exp64_fp_parameter_registers(node);
-    int fp_home_size = fp_registers ? EXP64_FP_ARG_REGISTERS * DATA_SIZE_DDWORD : 0;
+    int fp_home_size = exp64_fp_home_size(node);
     int fp_home = -(locals + fp_home_size);
     codegen_stack_sub(fp_home_size);
     if(fp_registers){

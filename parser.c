@@ -447,7 +447,11 @@ static void parse_single_token_to_node(void){
             if(token->num.flags & NUMBER_FLAG_FLOATING){
                 current_process->uses_floating = true;
             }
-            node_create(&(struct node){ .type = NODE_TYPE_NUMBER,     .llnum = token->llnum, .num.flags = token->num.flags });
+            if(token->num.flags & NUMBER_FLAG_LONG_DOUBLE){
+                current_process->uses_long_double = true;
+            }
+            node_create(&(struct node){ .type = NODE_TYPE_NUMBER,     .llnum = token->llnum, .num.flags = token->num.flags,
+                                        .num.text = token->num.text });
             break;
         case TOKEN_TYPE_IDENTIFIER: {
             bool member = parser_previous_token
@@ -1373,12 +1377,18 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
             "Your not allowed a secondary datatype here for the given datatype %s\n",
             datatype_token->sval);
     }
-    // `long double` would silently be a long; gcc's is 10 or 16 bytes,
-    // which this compiler has no code for.
+    // `long double` (or `double long`) is a type of its own,
+    // 12 bytes on i386 and 16 on the 64-bit targets.
     if(datatype_secondary_token
        && ((S_EQ(datatype_token->sval, "long") && S_EQ(datatype_secondary_token->sval, "double"))
            || (S_EQ(datatype_token->sval, "double") && S_EQ(datatype_secondary_token->sval, "long")))){
-        compiler_error(current_process, "long double is not supported\n");
+        struct datatype ld = datatype_long_double();
+        datatype_out->type     = ld.type;
+        datatype_out->size     = ld.size;
+        datatype_out->type_str = ld.type_str;
+        current_process->uses_floating = true;
+        current_process->uses_long_double = true;
+        return;
     }
 
     if(S_EQ(datatype_token->sval, "void")){
@@ -2186,6 +2196,10 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
             if(upward_stack && datatype_is_floating(&node->var.type) && align > current_process->target->arg_slot_size){
                 align = current_process->target->arg_slot_size;
             }
+            if(datatype_is_long_double(&node->var.type)){
+                // 16 on the 64-bit targets, 4 on i386.
+                align = datatype_alignment(&node->var.type);
+            }
             variable_node(node)->var.padding =
                 padding(upward_stack ? offset : -offset, align);
         }
@@ -2354,6 +2368,12 @@ static struct node* parser_global_initializer(struct datatype* dtype, struct tok
     bool is_scalar = !(dtype->flags & DATATYPE_FLAG_IS_ARRAY) && !datatype_is_struct_or_union(dtype);
     if(!is_scalar || value_node->type == NODE_TYPE_STRING){
         return value_node;
+    }
+    if(datatype_is_long_double(dtype)){
+        // written as its bytes, from parser_global_initializer_node.
+        struct vector* leaves = vector_create(sizeof(struct initializer_leaf));
+        parser_add_leaf(leaves, 0, dtype, value_node);
+        return parser_global_initializer_node(name_token, leaves);
     }
     // An address (`&g`, an array or function name) is written as a
     // symbol; the backends printed llnum of the node, a garbage value.
@@ -2871,8 +2891,38 @@ static struct vector* parser_global_bitfield_bytes(struct vector* sorted){
 // A global's leaves must be constants, string literals for pointers,
 // or addresses (`&g`, an array or function name). Constants are folded
 // and converted to the leaf's type.
+// a long double leaf of a global becomes the words of its
+// bytes in the target's format (long_double_fold), 8 bytes each on the
+// 64-bit targets and 4 on i386, which every backend writes as numbers.
+static struct vector* parser_long_double_leaves(struct token* name_token, struct vector* sorted){
+    struct vector* out = vector_create(sizeof(struct initializer_leaf));
+    for(int i = 0; i < vector_count(sorted); i++){
+        struct initializer_leaf* leaf = vector_at(sorted, i);
+        if(!datatype_is_long_double(&leaf->type)){
+            vector_push(out, leaf);
+            continue;
+        }
+        unsigned char bytes[16];
+        if(!long_double_fold(current_process, leaf->value, bytes)){
+            compiler_error(current_process, "The initializer of global %s must be a constant expression\n",
+                name_token ? name_token->sval : "variable");
+        }
+        size_t word = current_process->target->pointer_size;
+        for(size_t at = 0; at < leaf->type.size; at += word){
+            unsigned long long v = 0;
+            for(size_t b = word; b > 0; b--){
+                v = (v << 8) | bytes[at + b - 1];
+            }
+            struct constant c = { v, datatype_for_number_node(&(struct node){ .num.flags = NUMBER_FLAG_TYPED | NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG }) };
+            struct initializer_leaf part = { .offset = leaf->offset + at, .type = c.type, .value = constant_node(&c) };
+            vector_push(out, &part);
+        }
+    }
+    return out;
+}
+
 static struct node* parser_global_initializer_node(struct token* name_token, struct vector* leaves){
-    struct vector* sorted = parser_sorted_leaves(leaves);
+    struct vector* sorted = parser_long_double_leaves(name_token, parser_sorted_leaves(leaves));
     for(int i = 0; i < vector_count(sorted); i++){
         struct initializer_leaf* leaf = vector_at(sorted, i);
         struct node* value = leaf->value;
@@ -3762,6 +3812,11 @@ static void parser_append_size_for_node(struct history* history, size_t* _variab
             return;
         }
         *_variable_size += variable_size(node);
+        if(node->var.type.type == DATA_TYPE_LONG_DOUBLE && !(node->var.type.flags & DATATYPE_FLAG_IS_POINTER)){
+            // the up to 12 bytes that align a long double to
+            // 16 count too, or the last ones of a frame overran it.
+            *_variable_size += node->var.padding;
+        }
     } else if(node->type == NODE_TYPE_VARIABLE_LIST){
         parser_append_size_for_variable_list(history, _variable_size, node->var_list.list);
     }

@@ -292,6 +292,19 @@ static const char* riscv64_store_ins(int size){
     return size == 1 ? "sb" : size == 2 ? "sh" : size == 4 ? "sw" : "sd";
 }
 
+static const char* riscv64_load_ins(int size, bool is_signed){
+    if(size == DATA_SIZE_BYTE){
+        return is_signed ? "lb" : "lbu";
+    }
+    if(size == DATA_SIZE_WORD){
+        return is_signed ? "lh" : "lhu";
+    }
+    if(size == DATA_SIZE_DWORD){
+        return is_signed ? "lw" : "lwu";
+    }
+    return "ld";
+}
+
 static void riscv64_store(int size){
     asm_push("%s a0, 0(a1)", riscv64_store_ins(size));
 }
@@ -540,6 +553,21 @@ static int riscv64_call_general(const struct exp64_call* call){
                 }
                 continue;
             }
+            if(a->pieces){
+                // a struct of one or two floating members, or
+                // one and one integer member: each member to its fa or a
+                // register as a scalar of its type. Its words are in
+                // 16-byte slots.
+                for(int k = 0; k < a->pieces && pass == 1; k++){
+                    const struct exp64_piece* p = &a->piece[k];
+                    int at = from + CODEGEN_SLOT * (p->offset / 8) + p->offset % 8;
+                    char reg[8];
+                    snprintf(reg, sizeof(reg), "%s%i", p->fp ? "fa" : "a", p->reg);
+                    codegen_sp_word(p->fp ? (p->size == DATA_SIZE_DWORD ? "flw" : "fld")
+                                          : riscv64_load_ins(p->size, p->is_signed), reg, at);
+                }
+                continue;
+            }
             for(int w = 0; w < a->words; w++){
                 if(w >= a->reg_words && pass == 0){
                     codegen_sp_word("ld", "t1", from + CODEGEN_SLOT * w);
@@ -580,7 +608,18 @@ static void riscv64_call(const struct exp64_call* call){
         riscv64_from_freg("fa0", call->float_return);
     }
     if(call->struct_size){
-        if(call->struct_in_regs){
+        if(call->return_pieces){
+            // floating members from fa0, fa1, an integer one
+            // from a0.
+            for(int k = 0; k < call->return_pieces; k++){
+                const struct exp64_piece* p = &call->return_piece[k];
+                if(p->fp){
+                    asm_push("%s fa%i, %i(sp)", p->size == DATA_SIZE_DWORD ? "fsw" : "fsd", p->reg, p->offset);
+                } else {
+                    asm_push("%s a%i, %i(sp)", riscv64_store_ins(p->size), p->reg, p->offset);
+                }
+            }
+        } else if(call->struct_in_regs){
             asm_push("sd a0, 0(sp)");
             if(call->struct_size > 8){
                 asm_push("sd a1, 8(sp)");
@@ -670,6 +709,96 @@ static void riscv64_sp_set(void){
     asm_push("mv sp, a0");
 }
 
+// ---------------------------------------------------------------
+// long double, IEEE binary128, through the libgcc soft-float
+// routines, which take and give it in a pair of integer registers. A
+// value is its address in a0 (a1 for the right operand).
+// ---------------------------------------------------------------
+
+static void riscv64_slot_address(int slots){
+    codegen_add_imm("a0", "sp", CODEGEN_SLOT * slots);
+}
+
+// a0:a1 = [a0], a2:a3 = [a1].
+static void riscv64_ld_load_pair(void){
+    asm_push("ld a2, 0(a1)");
+    asm_push("ld a3, 8(a1)");
+    asm_push("ld a1, 8(a0)");
+    asm_push("ld a0, 0(a0)");
+}
+
+static void riscv64_ld_store_result(void){
+    asm_push("sd a0, 0(sp)");
+    asm_push("sd a1, 8(sp)");
+    asm_push("mv a0, sp");
+}
+
+static void riscv64_ld_arith(const char* op){
+    const char* routine = S_EQ(op, "+") ? "__addtf3" : S_EQ(op, "-") ? "__subtf3" : S_EQ(op, "*") ? "__multf3" : "__divtf3";
+    riscv64_ld_load_pair();
+    asm_push("call %s", routine);
+    riscv64_ld_store_result();
+}
+
+// The comparison routines give an int whose sign says the answer, and
+// the one that makes the comparison false for an unordered pair.
+static void riscv64_ld_compare(const char* op){
+    const char* routine = S_EQ(op, "==") ? "__eqtf2" : S_EQ(op, "!=") ? "__netf2" : S_EQ(op, "<") ? "__lttf2"
+                        : S_EQ(op, "<=") ? "__letf2" : S_EQ(op, ">") ? "__gttf2" : "__getf2";
+    riscv64_ld_load_pair();
+    asm_push("call %s", routine);
+    if(S_EQ(op, "==")){
+        asm_push("seqz a0, a0");
+    } else if(S_EQ(op, "!=")){
+        asm_push("snez a0, a0");
+    } else if(S_EQ(op, "<")){
+        asm_push("slt a0, a0, zero");
+    } else if(S_EQ(op, "<=")){
+        asm_push("slti a0, a0, 1");
+    } else if(S_EQ(op, ">")){
+        asm_push("sgt a0, a0, zero");
+    } else {
+        asm_push("slti a0, a0, 0");
+        asm_push("xori a0, a0, 1");
+    }
+}
+
+static void riscv64_ld_truth(void){
+    asm_push("ld a1, 8(a0)");
+    asm_push("ld a0, 0(a0)");
+    asm_push("li a2, 0");
+    asm_push("li a3, 0");
+    asm_push("call __netf2");
+    asm_push("snez a0, a0");
+}
+
+static void riscv64_ld_from(int kind){
+    if(kind == EXP64_LD_FLOAT){
+        asm_push("fmv.w.x fa0, a0");
+        asm_push("call __extendsftf2");
+    } else if(kind == EXP64_LD_DOUBLE){
+        asm_push("fmv.d.x fa0, a0");
+        asm_push("call __extenddftf2");
+    } else {
+        asm_push("call %s", kind == EXP64_LD_S64 ? "__floatditf" : "__floatunditf");
+    }
+    riscv64_ld_store_result();
+}
+
+static void riscv64_ld_to(int kind){
+    asm_push("ld a1, 8(a0)");
+    asm_push("ld a0, 0(a0)");
+    if(kind == EXP64_LD_FLOAT){
+        asm_push("call __trunctfsf2");
+        asm_push("fmv.x.w a0, fa0");
+    } else if(kind == EXP64_LD_DOUBLE){
+        asm_push("call __trunctfdf2");
+        asm_push("fmv.x.d a0, fa0");
+    } else {
+        asm_push("call %s", kind == EXP64_LD_S64 ? "__fixtfdi" : "__fixunstfdi");
+    }
+}
+
 static const struct exp64_ops riscv64_ops = {
     .push           = riscv64_push,
     .push_struct    = riscv64_push_struct,
@@ -704,6 +833,12 @@ static const struct exp64_ops riscv64_ops = {
     .float_resize   = riscv64_float_resize,
     .sp_get         = riscv64_sp_get,
     .sp_set         = riscv64_sp_set,
+    .slot_address   = riscv64_slot_address,
+    .ld_arith       = riscv64_ld_arith,
+    .ld_compare     = riscv64_ld_compare,
+    .ld_truth       = riscv64_ld_truth,
+    .ld_from        = riscv64_ld_from,
+    .ld_to          = riscv64_ld_to,
 };
 
 // ---------------------------------------------------------------
@@ -765,6 +900,12 @@ static void codegen_discard_unused_stack(void){
 // double goes back in fa0.
 static void codegen_generate_statement_return_exp(struct node* node){
     struct datatype dtype = exp64_return_value(node->stmt.return_stmt.exp, &current_function->func.rtype);
+    if(datatype_is_long_double(&dtype)){
+        // a long double goes back in a0:a1.
+        asm_push("ld a1, 8(a0)");
+        asm_push("ld a0, 0(a0)");
+        return;
+    }
     if(datatype_is_floating(&dtype)){
         riscv64_to_freg("fa0", "a0", dtype.size);
         return;
@@ -780,6 +921,19 @@ static void codegen_generate_statement_return_exp(struct node* node){
         return;
     }
     asm_push("mv t4, a0");
+    struct exp64_piece pieces[EXP64_MAX_PIECES];
+    int count = exp64_return_pieces(&dtype, pieces);
+    if(count){
+        // floating members in fa0, fa1, an integer one in a0.
+        for(int k = 0; k < count; k++){
+            if(pieces[k].fp){
+                asm_push("%s fa%i, %i(t4)", pieces[k].size == DATA_SIZE_DWORD ? "flw" : "fld", pieces[k].reg, pieces[k].offset);
+            } else {
+                asm_push("%s a%i, %i(t4)", riscv64_load_ins(pieces[k].size, pieces[k].is_signed), pieces[k].reg, pieces[k].offset);
+            }
+        }
+        return;
+    }
     if(size > DATA_SIZE_DDWORD){
         riscv64_load_bytes("a1", "t4", DATA_SIZE_DDWORD, size - DATA_SIZE_DDWORD);
     }
@@ -1091,7 +1245,7 @@ static void codegen_generate_function_with_body(struct node* node){
     // of their own under the locals; only functions that have some. A
     // float is stored NaN-boxed, its bits in the low word.
     int fp_registers = exp64_fp_parameter_registers(node);
-    int fp_home_size = fp_registers ? EXP64_FP_ARG_REGISTERS * DATA_SIZE_DDWORD : 0;
+    int fp_home_size = exp64_fp_home_size(node);
     int fp_home = -(locals + fp_home_size);
     codegen_stack_sub(fp_home_size);
     if(fp_registers){

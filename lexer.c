@@ -241,8 +241,8 @@ static struct token* token_make_number(void){
 }
 
 // A floating constant (C11 6.4.4.2): decimal or hexadecimal (`0x1.8p3`),
-// then f or F for float or nothing for double (l or L, long double, is
-// rejected). The value is read by the C library, strtof for
+// then f or F for float, nothing for double, l or L for long double
+//. The value is read by the C library, strtof for
 // a float so it is rounded once, and kept as the bits of the double in
 // llnum, which holds a float's value exactly too.
 static struct token* token_make_floating(const char* text){
@@ -258,7 +258,10 @@ static struct token* token_make_floating(const char* text){
         number_type = NUMBER_TYPE_FLOAT;
         digits[--len] = 0;
     } else if(last == 'l' || last == 'L'){
-        compiler_error(lex_process->compiler, "%s is a long double, which is not supported\n", text);
+        // llnum gets the value as a double; the spelling is
+        // kept for the exact long double.
+        flags |= NUMBER_FLAG_LONG_DOUBLE | NUMBER_FLAG_FLOATING;
+        digits[--len] = 0;
     }
     if(hex && !strpbrk(digits, "pP")){
         compiler_error(lex_process->compiler, "The hexadecimal floating constant %s needs a p exponent\n", text);
@@ -273,7 +276,12 @@ static struct token* token_make_floating(const char* text){
     if(len == 0 || *end != 0 || end == digits){
         compiler_error(lex_process->compiler, "Invalid floating constant %s\n", text);
     }
-    free(digits);
+    const char* spelling = 0;
+    if(flags & NUMBER_FLAG_LONG_DOUBLE){
+        spelling = digits;
+    } else {
+        free(digits);
+    }
     unsigned long long bits = 0;
     memcpy(&bits, &value, sizeof(bits));
     return token_create(&(struct token){
@@ -281,6 +289,7 @@ static struct token* token_make_floating(const char* text){
         .llnum     = bits,
         .num.type  = number_type,
         .num.flags = flags,
+        .num.text  = spelling,
     });
 }
 

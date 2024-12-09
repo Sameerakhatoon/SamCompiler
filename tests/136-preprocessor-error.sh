@@ -27,7 +27,7 @@ int main(void){
     cp->pos.col  = 1;
     cp->pos.filename = "test";
 
-    struct token tk;
+    struct token tk = {0};
     tk.type = TOKEN_TYPE_SYMBOL;     tk.cval = '#';     vector_push(cp->token_vec_original, &tk);
     tk.type = TOKEN_TYPE_IDENTIFIER; tk.sval = "error"; vector_push(cp->token_vec_original, &tk);
     tk.type = TOKEN_TYPE_IDENTIFIER; tk.sval = "halt";  vector_push(cp->token_vec_original, &tk);

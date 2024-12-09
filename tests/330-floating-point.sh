@@ -4,8 +4,10 @@
 #   - printf of floats and doubles and sqrt/sqrtf from libm, by their
 #     output, built by SamCompiler and linked with -lm on all four
 #     targets, against the output of the same program built by gcc;
-#   - what is rejected instead of miscompiled: long double, % on a
-#     double, va_arg of a float (it was promoted to double);
+#   - what is rejected instead of miscompiled: % on a double or a long
+#     double, va_arg of a float (it was promoted to double), a global
+#     long double initialized with long double arithmetic (
+#     long double itself works since then, tests 391 and diff/long_double_*);
 #   - va_arg of a double on all four targets.
 . "$(dirname "$0")/lib.sh"
 
@@ -44,8 +46,8 @@ reject(){
 }
 
 for target in x86 x86_64 aarch64 riscv64; do
-    reject $target "long double" 'int main(void){ long double x = 1; return 0; }' "long double is not supported"
-    reject $target "1.0L" 'int main(void){ double x = 1.0L; return 0; }' "long double, which is not supported"
+    reject $target "1.0L / 3 in a global" 'long double g = 1.0L / 3; int main(void){ return 0; }' "must be a constant expression"
+    reject $target "% on a long double" 'int main(void){ long double x = 5; return x % 2; }' "does not take"
     reject $target "% on a double" 'int main(void){ double x = 5; return x % 2; }' "does not take floating operands"
 done
 vasrc='#include <stdarg.h>

@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include <string.h>
 #include "compiler.h"
 
 // Integer constant expressions (C11 6.6), folded where the language
@@ -263,6 +265,11 @@ bool constant_fold(struct compile_process* process, struct node* node, struct co
     }
     switch(node->type){
         case NODE_TYPE_NUMBER: {
+            // a long double is not folded in double precision;
+            // a global's initializer goes through long_double_fold.
+            if(node->num.flags & NUMBER_FLAG_LONG_DOUBLE){
+                return false;
+            }
             struct datatype type = datatype_for_number_node(node);
             constant_set(out, node->llnum, type);
             return true;
@@ -276,7 +283,7 @@ bool constant_fold(struct compile_process* process, struct node* node, struct co
         case NODE_TYPE_CAST: {
             struct constant operand;
             struct datatype* type = &node->cast.dtype;
-            if(datatype_is_struct_or_union(type) && !(type->flags & DATATYPE_FLAG_IS_POINTER)){
+            if((datatype_is_struct_or_union(type) && !(type->flags & DATATYPE_FLAG_IS_POINTER)) || datatype_is_long_double(type)){
                 return false;
             }
             if(!constant_fold(process, node->cast.operand, &operand)){
@@ -352,4 +359,380 @@ unsigned long long constant_value_as(struct constant* c, struct datatype* dtype)
 
 bool constant_is_integer(struct constant* c){
     return !constant_is_floating(c);
+}
+
+// ---------------------------------------------------------------
+// long double constants
+// ---------------------------------------------------------------
+//
+// A long double constant is worked out here to the bits of the target's
+// format: the x87 80-bit extended format (a 64-bit significand with its
+// integer bit, then 15 bits of exponent and the sign; 16 bytes with the
+// padding) on x86 and x86_64, IEEE binary128 (a 112-bit fraction, 15
+// bits of exponent and the sign) on aarch64 and riscv64. Both have the
+// exponent bias 16383. A decimal constant is converted exactly and
+// rounded once to nearest, ties to even, with big integers, so the
+// result does not depend on the C library or the host's long double.
+
+#define LD_LIMBS 1024
+
+struct ld_big {
+    int          n;                 // limbs in use, the top one not 0
+    unsigned int d[LD_LIMBS];       // 32 bits each, least significant first
+};
+
+static void ld_big_set(struct ld_big* b, unsigned long long v){
+    b->n = 0;
+    while(v){
+        b->d[b->n++] = (unsigned int)v;
+        v >>= 32;
+    }
+}
+
+static void ld_big_mul_add(struct ld_big* b, unsigned int m, unsigned int add){
+    unsigned long long carry = add;
+    for(int i = 0; i < b->n; i++){
+        unsigned long long t = (unsigned long long)b->d[i] * m + carry;
+        b->d[i] = (unsigned int)t;
+        carry = t >> 32;
+    }
+    if(carry && b->n < LD_LIMBS){
+        b->d[b->n++] = (unsigned int)carry;
+    }
+}
+
+static int ld_big_bits(struct ld_big* b){
+    if(b->n == 0){
+        return 0;
+    }
+    int bits = (b->n - 1) * 32;
+    for(unsigned int top = b->d[b->n - 1]; top; top >>= 1){
+        bits++;
+    }
+    return bits;
+}
+
+static int ld_big_bit(struct ld_big* b, int i){
+    return i / 32 < b->n ? (b->d[i / 32] >> (i % 32)) & 1 : 0;
+}
+
+static void ld_big_shl(struct ld_big* b, int k){
+    int words = k / 32, bits = k % 32;
+    int n = b->n + words + 1;
+    if(n > LD_LIMBS){
+        n = LD_LIMBS;
+    }
+    for(int i = n - 1; i >= 0; i--){
+        int from = i - words;
+        unsigned long long v = from >= 0 && from < b->n ? b->d[from] : 0;
+        unsigned long long below = from - 1 >= 0 && from - 1 < b->n ? b->d[from - 1] : 0;
+        b->d[i] = (unsigned int)((v << bits) | (bits ? below >> (32 - bits) : 0));
+    }
+    b->n = n;
+    while(b->n && !b->d[b->n - 1]){
+        b->n--;
+    }
+}
+
+static int ld_big_cmp(struct ld_big* a, struct ld_big* b){
+    if(a->n != b->n){
+        return a->n < b->n ? -1 : 1;
+    }
+    for(int i = a->n - 1; i >= 0; i--){
+        if(a->d[i] != b->d[i]){
+            return a->d[i] < b->d[i] ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+// a -= b, a >= b.
+static void ld_big_sub(struct ld_big* a, struct ld_big* b){
+    long long borrow = 0;
+    for(int i = 0; i < a->n; i++){
+        long long t = (long long)a->d[i] - (i < b->n ? b->d[i] : 0) - borrow;
+        borrow = t < 0;
+        a->d[i] = (unsigned int)(t + (borrow ? 0x100000000LL : 0));
+    }
+    while(a->n && !a->d[a->n - 1]){
+        a->n--;
+    }
+}
+
+// The value sign * q * 2^e, q (hi:lo) exact but for `sticky` (nonzero
+// bits below it), in the target's long double format.
+static void ld_pack(bool negative, unsigned long long hi, unsigned long long lo, int e, bool sticky, unsigned char out[16]){
+    bool x87 = long_double_is_x87();
+    int precision = x87 ? 64 : 113;
+    int emin = -16382;
+    memset(out, 0, 16);
+    int bits = 0;
+    for(int i = 127; i >= 0; i--){
+        if(i >= 64 ? (hi >> (i - 64)) & 1 : (lo >> i) & 1){
+            bits = i + 1;
+            break;
+        }
+    }
+    unsigned long long sig_hi = 0, sig_lo = 0;
+    int exponent_field = 0;
+    if(bits){
+        // The weight of the significand's lowest bit: the value is
+        // 1.f * 2^top, or a subnormal below 2^emin.
+        int top = e + bits - 1;
+        int low = top - (precision - 1);
+        if(top < emin){
+            low = emin - (precision - 1);
+        }
+        int drop = low - e;
+        if(drop > 128){
+            hi = lo = 0;
+        } else if(drop > 0){
+            // Round to nearest, ties to even.
+            bool half = false, rest = sticky;
+            for(int i = 0; i < drop && i < 128; i++){
+                int bit = i >= 64 ? (int)((hi >> (i - 64)) & 1) : (int)((lo >> i) & 1);
+                if(i == drop - 1){
+                    half = bit;
+                } else if(bit){
+                    rest = true;
+                }
+            }
+            for(int i = 0; i < drop; i++){
+                lo = (lo >> 1) | (hi << 63);
+                hi >>= 1;
+            }
+            if(half && (rest || (lo & 1))){
+                lo++;
+                if(lo == 0){
+                    hi++;
+                }
+            }
+        } else {
+            for(int i = 0; i < -drop; i++){
+                hi = (hi << 1) | (lo >> 63);
+                lo <<= 1;
+            }
+        }
+        // hi:lo is now the significand counted from 2^low; rounding up
+        // may have carried it one bit further.
+        bool carried = precision > 64 ? (hi >> (precision - 64)) & 1 : (precision == 64 ? hi != 0 : 0);
+        if(carried){
+            lo = (lo >> 1) | (hi << 63);
+            hi >>= 1;
+            low++;
+        }
+        bool normal = precision > 64 ? (hi >> (precision - 65)) & 1 : (lo >> 63) & 1;
+        int exponent = low + precision - 1;
+        if(exponent > 16383){
+            // Infinity.
+            exponent_field = 0x7FFF;
+            hi = 0;
+            lo = x87 ? 0x8000000000000000ULL : 0;
+        } else {
+            exponent_field = normal ? exponent + 16383 : 0;
+        }
+        sig_hi = hi;
+        sig_lo = lo;
+    }
+    if(x87){
+        for(int i = 0; i < 8; i++){
+            out[i] = (unsigned char)(sig_lo >> (8 * i));
+        }
+        out[8] = (unsigned char)exponent_field;
+        out[9] = (unsigned char)((exponent_field >> 8) | (negative ? 0x80 : 0));
+        return;
+    }
+    // binary128: the fraction is the significand without its top bit.
+    sig_hi &= 0xFFFFFFFFFFFFULL;
+    for(int i = 0; i < 8; i++){
+        out[i] = (unsigned char)(sig_lo >> (8 * i));
+    }
+    for(int i = 0; i < 6; i++){
+        out[8 + i] = (unsigned char)(sig_hi >> (8 * i));
+    }
+    out[14] = (unsigned char)exponent_field;
+    out[15] = (unsigned char)((exponent_field >> 8) | (negative ? 0x80 : 0));
+}
+
+void long_double_from_integer(unsigned long long value, bool negative, unsigned char out[16]){
+    ld_pack(negative, 0, value, 0, false, out);
+}
+
+// Exactly: a double has 53 bits, both long double formats more.
+void long_double_from_double(double value, unsigned char out[16]){
+    unsigned long long bits = floating_bits(value, DATA_SIZE_DDWORD);
+    bool negative = bits >> 63;
+    int exponent = (int)((bits >> 52) & 0x7FF);
+    unsigned long long fraction = bits & 0xFFFFFFFFFFFFFULL;
+    if(exponent == 0x7FF){
+        // Infinity or a NaN (a quiet one, keeping the top fraction bits).
+        memset(out, 0, 16);
+        bool x87 = long_double_is_x87();
+        if(x87){
+            unsigned long long sig = 0x8000000000000000ULL | (fraction << 11);
+            for(int i = 0; i < 8; i++){
+                out[i] = (unsigned char)(sig >> (8 * i));
+            }
+            out[8] = 0xFF;
+            out[9] = 0x7F | (negative ? 0x80 : 0);
+        } else {
+            unsigned long long sig_hi = fraction >> 4;
+            out[7] = (unsigned char)((fraction & 0xF) << 4);
+            for(int i = 0; i < 6; i++){
+                out[8 + i] = (unsigned char)(sig_hi >> (8 * i));
+            }
+            out[14] = 0xFF;
+            out[15] = 0x7F | (negative ? 0x80 : 0);
+        }
+        return;
+    }
+    if(exponent == 0){
+        ld_pack(negative, 0, fraction, -1074, false, out);
+        return;
+    }
+    ld_pack(negative, 0, fraction | (1ULL << 52), exponent - 1075, false, out);
+}
+
+static int ld_hex_digit(char c){
+    if(c >= '0' && c <= '9') return c - '0';
+    if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// A floating constant's spelling, without its suffix (the lexer checked
+// it): decimal with an optional e exponent, or hexadecimal with a p one.
+void long_double_from_text(const char* text, unsigned char out[16]){
+    static struct ld_big num, den, rem;
+    bool hex = text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+    const char* p = hex ? text + 2 : text;
+    int base = hex ? 16 : 10;
+    long exponent = 0;          // of the base (10), or of 2 for hex
+    int fraction_digits = 0;
+    bool in_fraction = false;
+    ld_big_set(&num, 0);
+    for(; *p; p++){
+        if(*p == '.'){
+            in_fraction = true;
+            continue;
+        }
+        int digit = hex ? ld_hex_digit(*p) : (*p >= '0' && *p <= '9' ? *p - '0' : -1);
+        if(digit < 0){
+            break;
+        }
+        // Digits past what any long double can tell apart only make
+        // the number longer: they count as a sticky 1.
+        if(ld_big_bits(&num) < 4000){
+            ld_big_mul_add(&num, base, digit);
+            fraction_digits += in_fraction;
+        } else if(!in_fraction){
+            exponent += hex ? 4 : 1;
+        }
+    }
+    if(*p == 'e' || *p == 'E' || *p == 'p' || *p == 'P'){
+        exponent += strtol(p + 1, 0, 10);
+    }
+    if(num.n == 0){
+        ld_pack(false, 0, 0, 0, false, out);
+        return;
+    }
+    int e2 = 0;
+    ld_big_set(&den, 1);
+    if(hex){
+        e2 = (int)exponent - 4 * fraction_digits;
+    } else {
+        long e10 = exponent - fraction_digits;
+        if(e10 > 5000){
+            ld_pack(false, 1, 0, 20000, false, out);
+            return;
+        }
+        if(e10 < -5200){
+            ld_pack(false, 0, 0, 0, false, out);
+            return;
+        }
+        for(long i = 0; i < (e10 < 0 ? -e10 : e10); i++){
+            ld_big_mul_add(e10 < 0 ? &den : &num, 10, 0);
+        }
+    }
+    // q = num / den with 116 bits or so, and whether anything is left.
+    int k = 116 - (ld_big_bits(&num) - ld_big_bits(&den));
+    if(k > 0){
+        ld_big_shl(&num, k);
+    } else {
+        ld_big_shl(&den, -k);
+    }
+    e2 -= k;
+    unsigned long long hi = 0, lo = 0;
+    ld_big_set(&rem, 0);
+    for(int i = ld_big_bits(&num) - 1; i >= 0; i--){
+        ld_big_shl(&rem, 1);
+        if(ld_big_bit(&num, i)){
+            if(rem.n == 0){
+                rem.n = 1;
+                rem.d[0] = 0;
+            }
+            rem.d[0] |= 1;
+        }
+        int q = 0;
+        if(ld_big_cmp(&rem, &den) >= 0){
+            ld_big_sub(&rem, &den);
+            q = 1;
+        }
+        hi = (hi << 1) | (lo >> 63);
+        lo = (lo << 1) | q;
+    }
+    ld_pack(false, hi, lo, e2, rem.n != 0, out);
+}
+
+// The value of a constant expression of arithmetic type as a long
+// double: a long double constant from its spelling, other constants
+// exactly from their double or integer value, and `-`, `+`, casts and
+// parentheses on top. Anything else is folded as constant_fold does (in
+// double) and then converted.
+bool long_double_fold(struct compile_process* process, struct node* node, unsigned char out[16]){
+    if(!node){
+        return false;
+    }
+    switch(node->type){
+        case NODE_TYPE_NUMBER:
+            if(node->num.flags & NUMBER_FLAG_LONG_DOUBLE){
+                long_double_from_text(node->num.text, out);
+                return true;
+            }
+            break;
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            return long_double_fold(process, node->parenthesis.exp, out);
+        case NODE_TYPE_UNARY:
+            if(S_EQ(node->unary.op, "-") || S_EQ(node->unary.op, "+")){
+                if(!long_double_fold(process, node->unary.operand, out)){
+                    return false;
+                }
+                if(S_EQ(node->unary.op, "-")){
+                    out[long_double_is_x87() ? 9 : 15] ^= 0x80;
+                }
+                return true;
+            }
+            break;
+        case NODE_TYPE_CAST:
+            if(datatype_is_long_double(&node->cast.dtype)){
+                return long_double_fold(process, node->cast.operand, out);
+            }
+            break;
+    }
+    struct constant c;
+    if(!constant_fold(process, node, &c)){
+        return false;
+    }
+    if(constant_is_floating(&c)){
+        long_double_from_double(constant_double(&c), out);
+        return true;
+    }
+    unsigned long long v = constant_convert(c.value, &c.type);
+    bool is_signed = (c.type.flags & DATATYPE_FLAG_IS_SIGNED) || datatype_element_size(&c.type) < DATA_SIZE_DDWORD;
+    if(is_signed && (long long)v < 0){
+        long_double_from_integer(0 - v, true, out);
+    } else {
+        long_double_from_integer(v, false, out);
+    }
+    return true;
 }

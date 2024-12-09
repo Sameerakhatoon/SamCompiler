@@ -45,6 +45,15 @@ static int                     exp64_va_gp_end;
 static int                     exp64_va_overflow;
 static int                     exp64_va_fp;
 static int                     exp64_va_fp_end;
+// the frame offset of the room where va_arg puts together a
+// struct whose pieces came in two kinds of registers (exp64_fp_home_size).
+static int                     exp64_va_scratch;
+// the frame offset of the q register home of a variadic
+// aarch64 function that reads long doubles, or 0.
+static int                     exp64_va_qhome;
+#define EXP64_VA_SCRATCH 32
+static bool                    exp64_needs_scratch(struct node* function);
+static bool                    exp64_needs_qhome(struct node* function);
 
 static struct datatype exp64_value(struct node* node);
 static struct datatype exp64_rvalue(struct node* node, bool decay);
@@ -52,6 +61,7 @@ static struct datatype exp64_address(struct node* node);
 static struct datatype exp64_number_type(struct node* node);
 static long long       exp64_number_value(struct node* node);
 static bool            exp64_names_function(struct node* node);
+static int             exp64_struct_pieces(struct datatype* t, struct exp64_piece* out);
 
 void exp64_begin(const struct exp64_ops* backend_ops, struct compile_process* process){
     ops             = backend_ops;
@@ -100,6 +110,19 @@ static bool exp64_is_void(struct datatype* t){
 static bool exp64_is_floating(struct datatype* t){
     return !exp64_is_array(t) && !exp64_is_pointer(t) && datatype_is_floating(t);
 }
+
+// a long double's value is the address of its 16 bytes, as a
+// struct's is; the backend's ld_* ops work on them in memory.
+static bool exp64_is_ldouble(struct datatype* t){
+    return datatype_is_long_double(t);
+}
+
+// A value that is the address of the object: a struct or a long double.
+static bool exp64_in_memory(struct datatype* t){
+    return exp64_is_struct(t) || exp64_is_ldouble(t);
+}
+
+#define EXP64_LD_SIZE 16
 
 static bool exp64_is_signed(struct datatype* t){
     return !exp64_is_pointer(t) && !exp64_is_floating(t) && (t->flags & DATATYPE_FLAG_IS_SIGNED);
@@ -184,6 +207,9 @@ static struct datatype exp64_promote(struct datatype* t){
 // The usual arithmetic conversions of two promoted integer types; a
 // floating operand makes it float, or double when either is double.
 static struct datatype exp64_common(struct datatype* a, struct datatype* b){
+    if(exp64_is_ldouble(a) || exp64_is_ldouble(b)){
+        return datatype_long_double();
+    }
     if(exp64_is_floating(a) || exp64_is_floating(b)){
         bool is_double = (exp64_is_floating(a) && a->size == DATA_SIZE_DDWORD)
                       || (exp64_is_floating(b) && b->size == DATA_SIZE_DDWORD);
@@ -244,8 +270,55 @@ static void exp64_convert_floating(struct datatype* from, struct datatype* to){
     }
 }
 
+// R0 held a value of type `from` and one of the two is a long
+// double. A conversion to long double puts it in new room on the
+// expression stack (R0 its address); one from it reads the long double
+// at R0.
+static void exp64_convert_ldouble(struct datatype* from, struct datatype* to){
+    if(exp64_is_ldouble(from) && exp64_is_ldouble(to)){
+        return;
+    }
+    if(exp64_is_ldouble(to)){
+        if(exp64_is_struct(from) || exp64_is_void(from) || exp64_is_pointer(from) || exp64_is_array(from)){
+            compiler_error(current_process, "Only an arithmetic value can become a long double\n");
+        }
+        int kind = EXP64_LD_S64;
+        if(exp64_is_floating(from)){
+            kind = from->size == DATA_SIZE_DWORD ? EXP64_LD_FLOAT : EXP64_LD_DOUBLE;
+        } else if(exp64_scalar_size(from) == DATA_SIZE_DDWORD && !exp64_is_signed(from)){
+            kind = EXP64_LD_U64;
+        }
+        ops->reserve(EXP64_LD_SIZE);
+        ops->ld_from(kind);
+        return;
+    }
+    if(to->flags & DATATYPE_FLAG_IS_BOOL){
+        ops->ld_truth();
+        return;
+    }
+    if(exp64_is_floating(to)){
+        ops->ld_to(to->size == DATA_SIZE_DWORD ? EXP64_LD_FLOAT : EXP64_LD_DOUBLE);
+        return;
+    }
+    if(exp64_is_pointer(to)){
+        compiler_error(current_process, "A long double cannot become a pointer\n");
+    }
+    int size = exp64_scalar_size(to);
+    ops->ld_to(size == DATA_SIZE_DDWORD && !exp64_is_signed(to) ? EXP64_LD_U64 : EXP64_LD_S64);
+    if(size < DATA_SIZE_DDWORD){
+        ops->extend(0, size, exp64_is_signed(to));
+    }
+}
+
 static void exp64_convert(int reg, struct datatype* from, struct datatype* to){
     if(exp64_is_void(to) || exp64_is_struct(to) || exp64_is_array(to)){
+        return;
+    }
+    if(exp64_is_ldouble(from) || exp64_is_ldouble(to)){
+        if(reg){
+            compiler_error(current_process, "BUG: a long double conversion of R1\n");
+        }
+        exp64_convert_ldouble(from, to);
         return;
     }
     if(exp64_is_floating(from) || exp64_is_floating(to)){
@@ -407,9 +480,10 @@ static struct datatype exp64_address(struct node* node){
             }
             break;
     }
-    // A struct value (a call's result) is already an address.
+    // A struct value (a call's result) is already an address, a long
+    // double too.
     struct datatype t = exp64_value(node);
-    if(!exp64_is_struct(&t)){
+    if(!exp64_in_memory(&t)){
         compiler_error(current_process, "This expression has no address\n");
     }
     return t;
@@ -420,11 +494,99 @@ static struct datatype exp64_load(struct datatype* t, bool decay){
     if(exp64_is_array(t)){
         return decay ? exp64_decay(t) : *t;
     }
-    if(exp64_is_struct(t) || exp64_is_void(t)){
+    if(exp64_in_memory(t) || exp64_is_void(t)){
         return *t;
     }
     ops->load(exp64_scalar_size(t), exp64_is_signed(t));
     return *t;
+}
+
+// ---------------------------------------------------------------
+// long double operations
+// ---------------------------------------------------------------
+
+// R0 = the word in the expression-stack slot at ledger index `index`.
+static void exp64_slot_load(int index){
+    ops->slot_address(vector_count(current_function->func.frame.elements) - 1 - index);
+    ops->load(DATA_SIZE_DDWORD, false);
+}
+
+// Push R0 and return its ledger index.
+static int exp64_push_index(void){
+    struct datatype word = exp64_int_type(DATA_SIZE_DDWORD, false);
+    ops->push(&word);
+    return vector_count(current_function->func.frame.elements) - 1;
+}
+
+// R0 = the long double at the address in the slot at left_index op the
+// one at the address in the slot at right_index: a new long double, or
+// the int of a comparison.
+static bool exp64_is_comparison(const char* op);
+
+static struct datatype exp64_ld_operate(const char* op, int left_index, int right_index){
+    exp64_slot_load(right_index);
+    ops->mov_r1();
+    exp64_slot_load(left_index);
+    if(exp64_is_comparison(op)){
+        ops->ld_compare(op);
+        return exp64_int_type(DATA_SIZE_DWORD, true);
+    }
+    if(!(S_EQ(op, "+") || S_EQ(op, "-") || S_EQ(op, "*") || S_EQ(op, "/"))){
+        compiler_error(current_process, "The operator %s does not take long double operands\n", op);
+    }
+    ops->reserve(EXP64_LD_SIZE);
+    ops->ld_arith(op);
+    return datatype_long_double();
+}
+
+// A long double constant: its bytes stored into new room.
+static struct datatype exp64_ld_number(struct node* node){
+    unsigned char bytes[16];
+    long_double_from_text(node->num.text, bytes);
+    unsigned long long lo = 0, hi = 0;
+    for(int i = 7; i >= 0; i--){
+        lo = (lo << 8) | bytes[i];
+        hi = (hi << 8) | bytes[8 + i];
+    }
+    ops->reserve(EXP64_LD_SIZE);
+    ops->slot_address(0);
+    ops->mov_r1();
+    ops->imm(0, (long long)lo);
+    ops->store(DATA_SIZE_DDWORD);
+    ops->slot_address(0);
+    ops->add_imm(DATA_SIZE_DDWORD);
+    ops->mov_r1();
+    ops->imm(0, (long long)hi);
+    ops->store(DATA_SIZE_DDWORD);
+    ops->slot_address(0);
+    return datatype_long_double();
+}
+
+// R0 = the address of a copy of the long double at R0, in new room.
+static void exp64_ld_copy(void){
+    ops->mov_r1();
+    ops->reserve(EXP64_LD_SIZE);
+    ops->slot_address(0);
+    ops->copy(EXP64_LD_SIZE);
+    ops->slot_address(0);
+}
+
+// -x: a copy with the sign bit flipped (byte 9 of the x87 format, 15 of
+// binary128), -0.0 and NaNs included.
+static struct datatype exp64_ld_negate(void){
+    exp64_ld_copy();
+    ops->add_imm(long_double_is_x87() ? 9 : 15);
+    int at = exp64_push_index();
+    ops->load(DATA_SIZE_BYTE, false);
+    ops->imm(1, 0x80);
+    ops->binop("^", DATA_SIZE_DWORD, false);
+    ops->mov_r1();
+    exp64_slot_load(at);
+    ops->swap();
+    ops->store(DATA_SIZE_BYTE);
+    ops->drop(1);
+    ops->slot_address(0);
+    return datatype_long_double();
 }
 
 // ---------------------------------------------------------------
@@ -522,13 +684,32 @@ static struct datatype exp64_binary(struct node* node){
     // exp64_rvalue rather than exp64_value: the left operands of a long
     // chain nest, and each frame counts.
     struct datatype lt = exp64_rvalue(node->exp.left, true);
-    if(node->exp.right->type == NODE_TYPE_NUMBER){
+    struct datatype ld = datatype_long_double();
+    if(exp64_is_ldouble(&lt)){
+        // both operands as long doubles in memory.
+        int left = exp64_push_index();
+        struct datatype rt = exp64_value(node->exp.right);
+        exp64_convert(0, &rt, &ld);
+        int right = exp64_push_index();
+        return exp64_ld_operate(node->exp.op, left, right);
+    }
+    if(node->exp.right->type == NODE_TYPE_NUMBER && !(node->exp.right->num.flags & NUMBER_FLAG_LONG_DOUBLE)){
         struct datatype rt = exp64_number_type(node->exp.right);
         ops->imm(1, exp64_number_value(node->exp.right));
         return exp64_arith(node->exp.op, &lt, &rt);
     }
     ops->push(&lt);
+    int left_value = vector_count(current_function->func.frame.elements) - 1;
     struct datatype rt = exp64_value(node->exp.right);
+    if(exp64_is_ldouble(&rt)){
+        // the left operand converted once the right one turns
+        // out to be a long double.
+        int right = exp64_push_index();
+        exp64_slot_load(left_value);
+        exp64_convert(0, &lt, &ld);
+        int left = exp64_push_index();
+        return exp64_ld_operate(node->exp.op, left, right);
+    }
     ops->mov_r1();
     ops->pop(0);
     return exp64_arith(node->exp.op, &lt, &rt);
@@ -537,6 +718,25 @@ static struct datatype exp64_binary(struct node* node){
 static bool exp64_is_compound_assignment(const char* op){
     return S_EQ(op, "+=") || S_EQ(op, "-=") || S_EQ(op, "*=") || S_EQ(op, "/=") || S_EQ(op, "%=")
         || S_EQ(op, "&=") || S_EQ(op, "|=") || S_EQ(op, "^=") || S_EQ(op, "<<=") || S_EQ(op, ">>=");
+}
+
+// the assignment of a value of type rt (R1, an address for a
+// long double) to the object of type lt at R0, either of them a long
+// double and the other not.
+static struct datatype exp64_ld_store(struct datatype* rt, struct datatype* lt){
+    int target = exp64_push_index();
+    ops->swap();
+    exp64_convert(0, rt, lt);
+    ops->mov_r1();
+    exp64_slot_load(target);
+    if(exp64_is_ldouble(lt)){
+        ops->copy(EXP64_LD_SIZE);
+        exp64_slot_load(target);
+        return *lt;
+    }
+    ops->swap();
+    ops->store(exp64_scalar_size(lt));
+    return *lt;
 }
 
 // `a = b` and `a op= b`. The target's address is worked out once.
@@ -550,10 +750,13 @@ static struct datatype exp64_assignment(struct node* node){
         struct datatype rt = exp64_value(node->exp.right);
         ops->mov_r1();
         lt = exp64_address(node->exp.left);
-        if(exp64_is_struct(&lt)){
+        if(exp64_is_struct(&lt) || (exp64_is_ldouble(&lt) && exp64_is_ldouble(&rt))){
             // copy wants the source in R1 and the target in R0.
             ops->copy(exp64_size(&lt));
             return lt;
+        }
+        if(exp64_is_ldouble(&lt) || exp64_is_ldouble(&rt)){
+            return exp64_ld_store(&rt, &lt);
         }
         ops->swap();
         exp64_convert(0, &rt, &lt);
@@ -561,10 +764,14 @@ static struct datatype exp64_assignment(struct node* node){
         struct datatype rt = exp64_value(node->exp.right);
         ops->push(&rt);
         lt = exp64_address(node->exp.left);
-        if(exp64_is_struct(&lt)){
+        if(exp64_is_struct(&lt) || (exp64_is_ldouble(&lt) && exp64_is_ldouble(&rt))){
             ops->pop(1);
             ops->copy(exp64_size(&lt));
             return lt;
+        }
+        if(exp64_is_ldouble(&lt) || exp64_is_ldouble(&rt)){
+            ops->pop(1);
+            return exp64_ld_store(&rt, &lt);
         }
         ops->mov_r1();
         ops->pop(0);
@@ -574,15 +781,47 @@ static struct datatype exp64_assignment(struct node* node){
         strncpy(arith_op, op, strlen(op) - 1);
         lt = exp64_address(node->exp.left);
         ops->push(&lt);
+        int target = vector_count(current_function->func.frame.elements) - 1;
+        if(exp64_is_ldouble(&lt)){
+            // x op= y on a long double x.
+            struct datatype ld = lt;
+            int left = exp64_push_index();
+            struct datatype rt = exp64_value(node->exp.right);
+            exp64_convert(0, &rt, &ld);
+            int right = exp64_push_index();
+            exp64_ld_operate(arith_op, left, right);
+            ops->mov_r1();
+            exp64_slot_load(target);
+            ops->copy(EXP64_LD_SIZE);
+            exp64_slot_load(target);
+            return lt;
+        }
         exp64_load(&lt, true);
         struct datatype old = lt;
         struct datatype rt;
-        if(node->exp.right->type == NODE_TYPE_NUMBER){
+        if(node->exp.right->type == NODE_TYPE_NUMBER && !(node->exp.right->num.flags & NUMBER_FLAG_LONG_DOUBLE)){
             rt = exp64_number_type(node->exp.right);
             ops->imm(1, exp64_number_value(node->exp.right));
         } else {
             ops->push(&old);
+            int old_value = vector_count(current_function->func.frame.elements) - 1;
             rt = exp64_value(node->exp.right);
+            if(exp64_is_ldouble(&rt)){
+                // x op= y with y a long double: worked out in
+                // long double, then converted to x's type.
+                struct datatype ld = rt;
+                int right = exp64_push_index();
+                exp64_slot_load(old_value);
+                exp64_convert(0, &old, &ld);
+                int left = exp64_push_index();
+                exp64_ld_operate(arith_op, left, right);
+                exp64_convert(0, &ld, &lt);
+                ops->mov_r1();
+                exp64_slot_load(target);
+                ops->swap();
+                ops->store(exp64_scalar_size(&lt));
+                return lt;
+            }
             ops->mov_r1();
             ops->pop(0);
         }
@@ -598,6 +837,10 @@ static struct datatype exp64_assignment(struct node* node){
 // compared with 0.0, so -0.0 is false and a NaN true.
 static struct datatype exp64_truth(struct node* node){
     struct datatype t = exp64_value(node);
+    if(exp64_is_ldouble(&t)){
+        ops->ld_truth();
+        return exp64_int_type(DATA_SIZE_DWORD, true);
+    }
     if(exp64_is_floating(&t)){
         ops->imm(1, 0);
         ops->fcompare("!=", t.size);
@@ -643,6 +886,33 @@ static struct datatype exp64_ternary(struct node* node){
     }
     int no_label = exp64_new_label();
     int end_label = exp64_new_label();
+    if(exp64_is_ldouble(&yt) || exp64_is_ldouble(&nt)){
+        // the result goes to room made before the branches,
+        // so both leave the expression stack the same.
+        t = datatype_long_double();
+        ops->reserve(EXP64_LD_SIZE);
+        int room = vector_count(current_function->func.frame.elements) - 1;
+        exp64_truth(node->exp.left);
+        ops->branch(no_label, EXP64_BRANCH_IF_ZERO);
+        for(int side = 0; side < 2; side++){
+            struct datatype vt = exp64_value(side ? no : yes);
+            exp64_convert(0, &vt, &t);
+            ops->mov_r1();
+            ops->slot_address(vector_count(current_function->func.frame.elements) - 1 - room);
+            ops->copy(EXP64_LD_SIZE);
+            int above = vector_count(current_function->func.frame.elements) - 1 - room;
+            if(above){
+                ops->drop(above);
+            }
+            if(!side){
+                ops->branch(end_label, EXP64_BRANCH_ALWAYS);
+                ops->label(no_label);
+            }
+        }
+        ops->label(end_label);
+        ops->slot_address(0);
+        return t;
+    }
     exp64_truth(node->exp.left);
     ops->branch(no_label, EXP64_BRANCH_IF_ZERO);
     exp64_value(yes);
@@ -749,6 +1019,111 @@ static void exp64_va_take_or_overflow(struct node* list, int field, int bytes, i
     ops->label(end_label);
 }
 
+// The va_list field at `field` rounded up to a multiple of `align`.
+static void exp64_va_align(struct node* list, int field, int align){
+    exp64_va_field(list, field);
+    ops->add_imm(align - 1);
+    ops->imm(1, -align);
+    ops->binop("&", DATA_SIZE_DDWORD, false);
+    exp64_va_set(list, field);
+}
+
+// R0 = the address of a long double passed to `...`: on
+// x86_64 in a 16-byte aligned stack slot, on riscv64 in an even pair of
+// integer registers or a 16-byte aligned stack slot (gp runs on into
+// the stack arguments), on aarch64 in the next q register, whose home
+// (exp64_va_qhome) is two of fp's 8-byte steps per register, else in a
+// 16-byte aligned stack slot (and no v register is used after it).
+static void exp64_va_ldouble(struct node* list, bool x86_64, bool aarch64){
+    if(!aarch64){
+        int field = x86_64 ? EXP64_VA_OVERFLOW : EXP64_VA_GP;
+        exp64_va_align(list, field, EXP64_LD_SIZE);
+        exp64_va_take(list, field, EXP64_LD_SIZE);
+        return;
+    }
+    if(!exp64_va_qhome){
+        compiler_error(current_process, "BUG: va_arg of a long double outside a variadic function\n");
+    }
+    int stack_label = exp64_new_label();
+    int end_label = exp64_new_label();
+    int mark = vector_count(current_function->func.frame.elements);
+    exp64_va_compare(list, EXP64_VA_FP, DATA_SIZE_DDWORD, ">", EXP64_VA_FP_END, stack_label);
+    exp64_va_take(list, EXP64_VA_FP, DATA_SIZE_DDWORD);
+    int fp = exp64_push_index();
+    ops->frame_address(exp64_va_fp_end - DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS);
+    ops->mov_r1();
+    exp64_slot_load(fp);
+    ops->binop("-", DATA_SIZE_DDWORD, false);
+    ops->mul_imm(0, 2);
+    int offset = exp64_push_index();
+    ops->frame_address(exp64_va_qhome);
+    ops->mov_r1();
+    exp64_slot_load(offset);
+    ops->binop("+", DATA_SIZE_DDWORD, false);
+    ops->drop(vector_count(current_function->func.frame.elements) - mark);
+    ops->branch(end_label, EXP64_BRANCH_ALWAYS);
+    ops->label(stack_label);
+    exp64_va_field(list, EXP64_VA_FP_END);
+    exp64_va_set(list, EXP64_VA_FP);
+    exp64_va_align(list, EXP64_VA_OVERFLOW, EXP64_LD_SIZE);
+    exp64_va_take(list, EXP64_VA_OVERFLOW, EXP64_LD_SIZE);
+    ops->label(end_label);
+}
+
+// R0 = the address of a struct that a caller on x86_64 or
+// aarch64 passed to `...` in pieces (exp64_struct_pieces): variadic
+// arguments go where named ones would. When the registers of all its
+// pieces were left, the pieces are taken from the fp and gp homes in
+// turn: in place when they are all eightbytes in floating-point
+// registers (the home slots then hold the struct as it is in memory),
+// else put together in the frame's scratch room. Otherwise the struct
+// is on the stack, and on aarch64 no floating-point register is used
+// after it (NSRN = 8).
+static void exp64_va_pieces(struct node* list, struct exp64_piece* pieces, int count, int size, bool aarch64){
+    struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
+    int ints = 0;
+    bool in_place = true;
+    for(int i = 0; i < count; i++){
+        if(pieces[i].size == EXP64_LD_SIZE){
+            compiler_error(current_process, "va_arg of a struct of long doubles is not supported\n");
+        }
+        ints += !pieces[i].fp;
+        if(!pieces[i].fp || (aarch64 && pieces[i].size != DATA_SIZE_DDWORD)){
+            in_place = false;
+        }
+    }
+    int fps = count - ints;
+    int stack_label = exp64_new_label();
+    int end_label = exp64_new_label();
+    exp64_va_compare(list, EXP64_VA_FP, DATA_SIZE_DDWORD * fps, ">", EXP64_VA_FP_END, stack_label);
+    if(ints){
+        exp64_va_compare(list, EXP64_VA_GP, DATA_SIZE_DDWORD * ints, ">", EXP64_VA_GP_END, stack_label);
+    }
+    if(in_place){
+        exp64_va_take(list, EXP64_VA_FP, DATA_SIZE_DDWORD * fps);
+    } else {
+        for(int i = 0; i < count; i++){
+            int field = pieces[i].fp ? EXP64_VA_FP : EXP64_VA_GP;
+            exp64_va_take(list, field, DATA_SIZE_DDWORD);
+            ops->load(pieces[i].size, false);
+            ops->push(&long_type);
+            ops->frame_address(exp64_va_scratch + pieces[i].offset);
+            ops->mov_r1();
+            ops->pop(0);
+            ops->store(pieces[i].size);
+        }
+        ops->frame_address(exp64_va_scratch);
+    }
+    ops->branch(end_label, EXP64_BRANCH_ALWAYS);
+    ops->label(stack_label);
+    if(aarch64){
+        exp64_va_field(list, EXP64_VA_FP_END);
+        exp64_va_set(list, EXP64_VA_FP);
+    }
+    exp64_va_take(list, EXP64_VA_OVERFLOW, align_value(size, DATA_SIZE_DDWORD));
+    ops->label(end_label);
+}
+
 // va_start(list, last): the five addresses of the first variadic
 // argument, from the layout of the named parameters (exp64_parameters),
 // so a named struct that went to the stack while later named scalars
@@ -781,10 +1156,17 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
     // went. A float passed to `...` was promoted to double, so there is
     // no float to read (gcc makes it a trap).
     bool floating = false;
+    bool ldouble = false;
+    struct exp64_piece pieces[EXP64_MAX_PIECES];
+    int piece_count = 0;
+    int struct_size = 0;
     if(vector_count(args) == 3 && !S_EQ(name, "va_start")){
         struct node* type_argument = *(struct node**)vector_at(args, 2);
         if(type_argument->type == NODE_TYPE_CAST){
             struct datatype t = *datatype_pointer_reduce(&type_argument->cast.dtype, 1);
+            piece_count = exp64_struct_pieces(&t, pieces);
+            struct_size = piece_count ? (int)exp64_size(&t) : 0;
+            ldouble = exp64_is_ldouble(&t);
             if(exp64_is_floating(&t)){
                 if(t.size != DATA_SIZE_DDWORD){
                     compiler_error(current_process, "va_arg of a float: a float passed to `...` is promoted to double, read a double\n");
@@ -822,6 +1204,14 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
     struct datatype result = exp64_pointer_to(&long_type);
     if(floating && (x86_64 || aarch64)){
         exp64_va_take_or_overflow(list, EXP64_VA_FP, DATA_SIZE_DDWORD, EXP64_VA_FP_END, false);
+        return result;
+    }
+    if(ldouble){
+        exp64_va_ldouble(list, x86_64, aarch64);
+        return result;
+    }
+    if(piece_count && (x86_64 || aarch64)){
+        exp64_va_pieces(list, pieces, piece_count, struct_size, aarch64);
         return result;
     }
     if(x86_64 && big){
@@ -875,11 +1265,233 @@ static struct datatype exp64_vla(const char* name, struct vector* args){
     return exp64_pointer_to(&byte);
 }
 
+// ---------------------------------------------------------------
+// structs with float or double members
+// ---------------------------------------------------------------
+
+// A struct's scalar members flattened, nested structs and arrays
+// opened up, which is what each psABI classifies.
+struct exp64_flat {
+    int  count;                                 // scalars seen
+    struct exp64_piece leaf[EXP64_MAX_PIECES];  // the first of them
+    bool int_in[2];                             // an integer scalar in eightbyte 0, 1
+    bool fp_in[2];                              // a float or double in eightbyte 0, 1
+    bool other;                                 // something no register class takes
+    bool has_union;                             // a union inside
+    bool has_ldouble;                           // a long double inside
+};
+
+static struct node* exp64_struct_body(struct datatype* t){
+    struct node* s = t->struct_node;
+    if(!s || (s->type == NODE_TYPE_STRUCT ? !s->_struct.body_n : !s->_union.body_n)){
+        s = t->type == DATA_TYPE_UNION ? union_node_for_name(current_process, t->type_str)
+                                       : struct_node_for_name(current_process, t->type_str);
+    }
+    if(!s){
+        return 0;
+    }
+    return s->type == NODE_TYPE_STRUCT ? s->_struct.body_n : s->_union.body_n;
+}
+
+static void exp64_flatten(struct datatype* t, int offset, struct exp64_flat* flat);
+
+static void exp64_flatten_member(struct node* member, bool is_union, int offset, struct exp64_flat* flat){
+    if(member->type != NODE_TYPE_VARIABLE || (member->var.bitfield.is_bitfield && member->var.bitfield.unnamed)){
+        return;
+    }
+    exp64_flatten(&member->var.type, offset + (is_union ? 0 : member->var.aoffset), flat);
+}
+
+static void exp64_flatten(struct datatype* t, int offset, struct exp64_flat* flat){
+    if(exp64_is_array(t)){
+        struct datatype e = exp64_array_element(t);
+        size_t step = exp64_size(&e);
+        size_t total = exp64_size(t);
+        // Every element of the first 16 bytes counts for the x86_64
+        // eightbytes; past them only whether there are more scalars.
+        for(size_t o = 0; step && o < total && (offset + o < 16 || flat->count <= EXP64_MAX_PIECES); o += step){
+            exp64_flatten(&e, offset + (int)o, flat);
+        }
+        return;
+    }
+    if(exp64_is_struct(t)){
+        struct node* body = exp64_struct_body(t);
+        if(!body){
+            flat->other = true;
+            return;
+        }
+        bool is_union = t->type == DATA_TYPE_UNION;
+        flat->has_union |= is_union;
+        struct vector* statements = body->body.statements;
+        for(int i = 0; i < vector_count(statements); i++){
+            struct node* member = *(struct node**)vector_at(statements, i);
+            if(member->type == NODE_TYPE_VARIABLE_LIST){
+                struct vector* list = member->var_list.list;
+                for(int j = 0; j < vector_count(list); j++){
+                    exp64_flatten_member(*(struct node**)vector_at(list, j), is_union, offset, flat);
+                }
+            } else {
+                exp64_flatten_member(member, is_union, offset, flat);
+            }
+        }
+        return;
+    }
+    bool fp = exp64_is_floating(t) || exp64_is_ldouble(t);
+    int size = exp64_is_ldouble(t) ? EXP64_LD_SIZE : exp64_scalar_size(t);
+    flat->has_ldouble |= exp64_is_ldouble(t);
+    if(offset / DATA_SIZE_DDWORD < 2){
+        if(fp){
+            flat->fp_in[offset / DATA_SIZE_DDWORD] = true;
+        } else {
+            flat->int_in[offset / DATA_SIZE_DDWORD] = true;
+        }
+    }
+    if(flat->count < EXP64_MAX_PIECES){
+        struct exp64_piece* leaf = &flat->leaf[flat->count];
+        leaf->fp        = fp;
+        leaf->is_signed = exp64_is_signed(t);
+        leaf->offset    = offset;
+        leaf->size      = size;
+        leaf->reg       = -1;
+    }
+    flat->count++;
+}
+
+// The register pieces of a struct with float or double members, by the
+// psABI's classification; 0 for any other struct, which keeps the
+// integer rules (registers by the word, the stack, memory):
+//   x86_64: a struct of up to 16 bytes is one or two eightbytes; one
+//     that holds only floats and doubles is of class SSE and goes in an
+//     xmm register, any other INTEGER, in a general one.
+//   AAPCS64: a homogeneous floating-point aggregate, one to four
+//     members all float or all double, goes in as many v registers
+//     (s or d), whatever its size.
+//   RISC-V LP64D: a struct of one float or double, of two, or of one
+//     and one integer member of up to 8 bytes goes in fa registers (the
+//     integer in an a register). A union is not flattened.
+// The pieces' registers are left at -1 for the caller to number.
+static int exp64_struct_pieces(struct datatype* t, struct exp64_piece* out){
+    if(!exp64_is_struct(t)){
+        return 0;
+    }
+    struct exp64_flat flat = {0};
+    exp64_flatten(t, 0, &flat);
+    if(flat.other || flat.count == 0){
+        return 0;
+    }
+    const char* abi = current_process->target->backend->name;
+    int size = (int)exp64_size(t);
+    // A long double member: class X87, so MEMORY, on x86_64
+    // (exp64_struct_x87); more than FLEN bits on riscv64, so the integer
+    // rules; an aggregate of q registers on aarch64.
+    if(flat.has_ldouble && !S_EQ(abi, "aarch64")){
+        return 0;
+    }
+    if(S_EQ(abi, "x86_64")){
+        bool sse = (flat.fp_in[0] && !flat.int_in[0]) || (flat.fp_in[1] && !flat.int_in[1]);
+        if(size > 2 * DATA_SIZE_DDWORD || !sse){
+            return 0;
+        }
+        int count = 0;
+        for(int e = 0; e * DATA_SIZE_DDWORD < size; e++){
+            struct exp64_piece* p = &out[count++];
+            p->fp        = !flat.int_in[e];
+            p->is_signed = false;
+            p->offset    = e * DATA_SIZE_DDWORD;
+            p->size      = size - p->offset < DATA_SIZE_DDWORD ? size - p->offset : DATA_SIZE_DDWORD;
+            p->reg       = -1;
+        }
+        return count;
+    }
+    bool aarch64 = S_EQ(abi, "aarch64");
+    // RISC-V flattens structs only; a union in an AAPCS64 aggregate
+    // counts as its biggest member, which the flat list does not tell,
+    // so such structs keep the integer rules here.
+    if(flat.has_union || flat.count > (aarch64 ? EXP64_MAX_PIECES : 2)){
+        return 0;
+    }
+    int fps = 0;
+    for(int i = 0; i < flat.count; i++){
+        fps += flat.leaf[i].fp;
+        if(aarch64 && flat.leaf[i].size != flat.leaf[0].size){
+            return 0;
+        }
+    }
+    if(aarch64 ? fps != flat.count : fps == 0){
+        return 0;
+    }
+    memcpy(out, flat.leaf, sizeof(struct exp64_piece) * flat.count);
+    return flat.count;
+}
+
+// Numbers the pieces' registers from *next (integer) and *next_fp,
+// when enough of both are left (max of each); returns whether they
+// were.
+static bool exp64_assign_pieces(struct exp64_piece* pieces, int count, int* next, int max, int* next_fp){
+    int ints = 0, fps = 0;
+    for(int i = 0; i < count; i++){
+        if(pieces[i].fp){
+            fps++;
+        } else {
+            ints++;
+        }
+    }
+    if(*next + ints > max || *next_fp + fps > EXP64_FP_ARG_REGISTERS){
+        return false;
+    }
+    for(int i = 0; i < count; i++){
+        pieces[i].reg = pieces[i].fp ? (*next_fp)++ : (*next)++;
+    }
+    return true;
+}
+
+// a struct with a long double member is of class MEMORY on
+// x86_64, whatever its size: on the stack, and returned through memory.
+static bool exp64_struct_x87(struct datatype* t){
+    if(!exp64_is_struct(t) || !S_EQ(current_process->target->backend->name, "x86_64")){
+        return false;
+    }
+    struct exp64_flat flat = {0};
+    exp64_flatten(t, 0, &flat);
+    return flat.has_ldouble;
+}
+
+// a result of class X87 on x86_64, which comes back in st0: a
+// long double, and a struct whose one member is a long double (other
+// structs with one are of class MEMORY).
+bool exp64_returns_x87(struct datatype* dtype){
+    if(exp64_is_ldouble(dtype)){
+        return true;
+    }
+    if(!exp64_struct_x87(dtype) || exp64_size(dtype) != EXP64_LD_SIZE){
+        return false;
+    }
+    struct exp64_flat flat = {0};
+    exp64_flatten(dtype, 0, &flat);
+    return flat.count == 1;
+}
+
+// a struct result in registers by pieces: x86_64 xmm0, xmm1
+// and rax, rdx in turn; AAPCS64 s0-s3 or d0-d3; riscv64 fa0, fa1 and
+// a0. The pieces' reg is the return register's number in its class.
+int exp64_return_pieces(struct datatype* dtype, struct exp64_piece* out){
+    int count = exp64_struct_pieces(dtype, out);
+    int next = 0, next_fp = 0;
+    exp64_assign_pieces(out, count, &next, 2, &next_fp);
+    return count;
+}
+
 // B1: a struct result of more than 16 bytes goes through memory (the
 // hidden pointer in rdi, x8 or a0); a smaller one comes back in the
-// two return registers (rax:rdx, x0:x1, a0:a1).
+// two return registers (rax:rdx, x0:x1, a0:a1). An AAPCS64
+// homogeneous floating-point aggregate of up to 32 bytes comes back in
+// v registers.
 bool exp64_returns_in_memory(struct datatype* dtype){
-    return exp64_is_struct(dtype) && exp64_size(dtype) > 2 * DATA_SIZE_DDWORD;
+    struct exp64_piece pieces[EXP64_MAX_PIECES];
+    if(exp64_struct_pieces(dtype, pieces) || exp64_returns_x87(dtype)){
+        return false;
+    }
+    return exp64_is_struct(dtype) && (exp64_size(dtype) > 2 * DATA_SIZE_DDWORD || exp64_struct_x87(dtype));
 }
 
 // B1: where each argument of a call goes, for the caller (exp64_call)
@@ -903,10 +1515,15 @@ bool exp64_returns_in_memory(struct datatype* dtype){
 // v0-7, fa0-7), counted apart from the integer ones. With those used
 // up it goes on the stack on x86_64 and aarch64, and to an integer
 // register (else the stack) on riscv64 (LP64D), which also passes the
-// variadic arguments, from `named` on, in integer registers. A struct
-// is always INTEGER class here, floating members included: right
-// between SamCompiler functions, not what gcc does with them
-//. Returns the outgoing stack words;
+// variadic arguments, from `named` on, in integer registers.
+//
+// a struct with float or double members goes in registers by
+// its pieces (exp64_struct_pieces) when enough of both kinds are left;
+// else as an integer struct would on riscv64, and whole on the stack on
+// x86_64 and aarch64 (where no floating-point register is used after
+// it: NSRN = 8), an AAPCS64 aggregate of more than 16 bytes too, by
+// value. riscv64 passes such a struct to `...` by the integer rules.
+// Returns the outgoing stack words;
 // *next_reg and *next_fp_out (when given) are the first integer and
 // floating-point registers no argument took.
 static int exp64_arg_layout(struct datatype* types, int count, int named, bool hidden, struct exp64_arg* out,
@@ -929,7 +1546,63 @@ static int exp64_arg_layout(struct datatype* types, int count, int named, bool h
         a->reg_words = 0;
         a->stack     = -1;
         a->copy      = -1;
+        a->pieces    = 0;
+        if(exp64_is_ldouble(&types[i])){
+            // a long double. x86_64: in memory (class X87) in
+            // a 16-byte aligned stack slot. AAPCS64: the next q register,
+            // else a 16-byte aligned stack slot. RISC-V: a pair of
+            // integer registers, a variadic one from an even register;
+            // a named one split between a7 and the stack when only a7 is
+            // left; else a 16-byte aligned stack slot, and after a
+            // variadic one there no register is used.
+            a->size  = EXP64_LD_SIZE;
+            a->words = 2;
+            if(aarch64 && next_fp < EXP64_FP_ARG_REGISTERS){
+                a->fp = true;
+                a->reg = next_fp++;
+                a->reg_words = 1;
+                continue;
+            }
+            if(!x86_64 && !aarch64){
+                if(i >= named){
+                    next = align_value(next, 2);
+                }
+                if(next + 2 <= max){
+                    a->reg = next;
+                    a->reg_words = 2;
+                    next += 2;
+                    continue;
+                }
+                if(next < max && i < named){
+                    a->reg = next;
+                    a->reg_words = 1;
+                    next = max;
+                    a->stack = stack++;
+                    continue;
+                }
+                next = max;
+            }
+            stack = align_value(stack, 2);
+            a->stack = stack;
+            stack += 2;
+            continue;
+        }
         int words = a->words;
+        int pieces = i < named || x86_64 || aarch64 ? exp64_struct_pieces(&types[i], a->piece) : 0;
+        if(pieces){
+            if(exp64_assign_pieces(a->piece, pieces, &next, max, &next_fp)){
+                a->pieces = pieces;
+                continue;
+            }
+            if(x86_64 || aarch64){
+                if(aarch64){
+                    next_fp = EXP64_FP_ARG_REGISTERS;
+                }
+                a->stack = stack;
+                stack += words;
+                continue;
+            }
+        }
         if(exp64_is_floating(&types[i]) && (i < named || x86_64 || aarch64)){
             a->size = types[i].size;
             if(next_fp < EXP64_FP_ARG_REGISTERS){
@@ -943,7 +1616,7 @@ static int exp64_arg_layout(struct datatype* types, int count, int named, bool h
                 continue;
             }
         }
-        if(a->size > 2 * DATA_SIZE_DDWORD){
+        if(a->size > 2 * DATA_SIZE_DDWORD || exp64_struct_x87(&types[i])){
             if(x86_64){
                 a->stack = stack;
                 stack += words;
@@ -992,7 +1665,7 @@ static bool exp64_call_is_simple(struct exp64_call* call){
     int regs = 0;
     for(int i = 0; i < call->count; i++){
         struct exp64_arg* a = &call->args[i];
-        if(a->kind == EXP64_ARG_REF || a->fp || a->slot != word){
+        if(a->kind == EXP64_ARG_REF || a->fp || a->pieces || a->slot != word){
             return false;
         }
         for(int w = 0; w < a->words; w++, word++){
@@ -1051,6 +1724,7 @@ void exp64_parameters(struct node* function, int register_home, int stack_home, 
     exp64_va_gp       = next_reg < max ? register_home + DATA_SIZE_DDWORD * next_reg : exp64_va_overflow;
     exp64_va_fp_end   = fp_home + DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS;
     exp64_va_fp       = next_fp < EXP64_FP_ARG_REGISTERS ? fp_home + DATA_SIZE_DDWORD * next_fp : exp64_va_fp_end;
+    int assembly = fp_home + DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS;
     for(int i = 0; i < count; i++){
         struct node* param = *(struct node**)vector_at(params, i);
         struct exp64_arg* a = &layout[i];
@@ -1058,13 +1732,45 @@ void exp64_parameters(struct node* function, int register_home, int stack_home, 
         if(a->kind == EXP64_ARG_REF){
             flags |= RESOLVER_DEFAULT_ENTITY_FLAG_IS_REFERENCE;
         }
-        if(a->fp){
+        if(a->fp && a->size == EXP64_LD_SIZE){
+            // a long double in a q register (aarch64).
+            ops->ld_spill_q(a->reg, assembly);
+            param->var.aoffset = assembly;
+            assembly += EXP64_LD_SIZE;
+        } else if(a->pieces){
+            // the struct is put together from the homes of
+            // its registers, in the area after the floating-point home.
+            for(int k = 0; k < a->pieces; k++){
+                struct exp64_piece* p = &a->piece[k];
+                if(p->size == EXP64_LD_SIZE){
+                    ops->ld_spill_q(p->reg, assembly + p->offset);
+                    continue;
+                }
+                ops->frame_address(assembly + p->offset);
+                ops->mov_r1();
+                ops->frame_address((p->fp ? fp_home : register_home) + DATA_SIZE_DDWORD * p->reg);
+                ops->load(p->size, false);
+                ops->store(p->size);
+            }
+            param->var.aoffset = assembly;
+            assembly += align_value(a->size, DATA_SIZE_DDWORD);
+        } else if(a->fp){
             param->var.aoffset = fp_home + DATA_SIZE_DDWORD * a->reg;
         } else {
             param->var.aoffset = a->reg >= 0 ? register_home + DATA_SIZE_DDWORD * a->reg
                                              : stack_home + DATA_SIZE_DDWORD * a->stack;
         }
         resolver_default_new_scope_entity(current_process->resolver, param, param->var.aoffset, flags);
+    }
+    exp64_va_scratch = assembly;
+    // a variadic function on aarch64 that reads a long double
+    // with va_arg keeps all eight q registers after the scratch room.
+    exp64_va_qhome = 0;
+    if(exp64_needs_qhome(function)){
+        exp64_va_qhome = assembly + (exp64_needs_scratch(function) ? EXP64_VA_SCRATCH : 0);
+        for(int k = 0; k < EXP64_FP_ARG_REGISTERS; k++){
+            ops->ld_spill_q(k, exp64_va_qhome + EXP64_LD_SIZE * k);
+        }
     }
     free(layout);
 }
@@ -1085,9 +1791,60 @@ int exp64_fp_parameter_registers(struct node* function){
         if(layout[i].fp && layout[i].reg + 1 > used){
             used = layout[i].reg + 1;
         }
+        for(int k = 0; k < layout[i].pieces; k++){
+            if(layout[i].piece[k].fp && layout[i].piece[k].reg + 1 > used){
+                used = layout[i].piece[k].reg + 1;
+            }
+        }
     }
     free(layout);
     return used;
+}
+
+static bool exp64_needs_scratch(struct node* function){
+    const char* abi = current_process->target->backend->name;
+    return (function->func.flags & FUNCTION_NODE_FLAG_STRUCT_POINTER_CAST)
+        && (S_EQ(abi, "x86_64") || S_EQ(abi, "aarch64"));
+}
+
+// a variadic aarch64 function with `(long double*)0`, which
+// va_arg of a long double has, keeps its q registers whole.
+static bool exp64_needs_qhome(struct node* function){
+    return (function->func.flags & FUNCTION_NODE_FLAG_LONG_DOUBLE_POINTER_CAST)
+        && (function->func.flags & FUNCTION_NODE_FLAG_IS_VARIADIC)
+        && S_EQ(current_process->target->backend->name, "aarch64");
+}
+
+// bytes of the floating-point home under the locals, which
+// the prologue makes when exp64_fp_parameter_registers is not 0: the
+// eight registers' slots, then a copy of each struct parameter that
+// arrived in pieces (exp64_parameters puts it together), then for a
+// function on x86_64 and aarch64 that has `(struct s*)0` (va_arg of a
+// struct does) 32 bytes where va_arg puts such a struct together. A
+// multiple of 16.
+int exp64_fp_home_size(struct node* function){
+    bool scratch = exp64_needs_scratch(function);
+    if(!exp64_fp_parameter_registers(function) && !scratch){
+        return 0;
+    }
+    int size = DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS;
+    int count = 0;
+    struct exp64_arg* layout = exp64_parameter_layout(function, &count, 0, 0, 0);
+    for(int i = 0; i < count; i++){
+        if(layout[i].pieces){
+            size += align_value(layout[i].size, DATA_SIZE_DDWORD);
+        } else if(layout[i].fp && layout[i].size == EXP64_LD_SIZE){
+            size += EXP64_LD_SIZE;
+        }
+    }
+    free(layout);
+    if(scratch){
+        size += EXP64_VA_SCRATCH;
+    }
+    if(exp64_needs_qhome(function)){
+        size += EXP64_LD_SIZE * EXP64_FP_ARG_REGISTERS;
+    }
+    return align_value(size, 16);
 }
 
 static struct datatype exp64_call(struct node* node){
@@ -1149,9 +1906,10 @@ static struct datatype exp64_call(struct node* node){
     }
 
     struct exp64_call call = { .symbol = symbol };
-    if(exp64_is_struct(&return_type)){
+    if(exp64_in_memory(&return_type)){
         call.struct_size = align_value(exp64_size(&return_type), DATA_SIZE_DDWORD);
         call.struct_in_regs = !exp64_returns_in_memory(&return_type);
+        call.ld_return = exp64_returns_x87(&return_type) || exp64_is_ldouble(&return_type);
         ops->reserve(call.struct_size);
     }
     if(!symbol){
@@ -1177,7 +1935,8 @@ static struct datatype exp64_call(struct node* node){
         } else {
             if(i < param_count){
                 exp64_convert(0, &t, &param_types[i]);
-                if(exp64_is_floating(&t) || exp64_is_floating(&param_types[i])){
+                if(exp64_is_floating(&t) || exp64_is_floating(&param_types[i])
+                   || exp64_is_ldouble(&t) || exp64_is_ldouble(&param_types[i])){
                     t = param_types[i];
                 }
             } else if(exp64_is_floating(&t) && t.size == DATA_SIZE_DWORD){
@@ -1187,7 +1946,11 @@ static struct datatype exp64_call(struct node* node){
                 exp64_convert(0, &t, &d);
                 t = d;
             }
-            ops->push(&t);
+            if(exp64_is_ldouble(&t)){
+                ops->push_struct(EXP64_LD_SIZE);
+            } else {
+                ops->push(&t);
+            }
         }
         types[i] = t;
         pushed[i] = vector_count(ledger);
@@ -1203,6 +1966,14 @@ static struct datatype exp64_call(struct node* node){
         if(call.args[i].fp && call.args[i].reg + 1 > call.fp_regs){
             call.fp_regs = call.args[i].reg + 1;
         }
+        for(int k = 0; k < call.args[i].pieces; k++){
+            if(call.args[i].piece[k].fp && call.args[i].piece[k].reg + 1 > call.fp_regs){
+                call.fp_regs = call.args[i].piece[k].reg + 1;
+            }
+        }
+    }
+    if(call.struct_in_regs && !call.ld_return){
+        call.return_pieces = exp64_return_pieces(&return_type, call.return_piece);
     }
     if(exp64_is_floating(&return_type)){
         call.float_return = return_type.size;
@@ -1241,6 +2012,9 @@ static struct datatype exp64_call(struct node* node){
 // datatype_for_number_node, which the 32-bit backend uses too.
 static struct datatype exp64_number_type(struct node* node){
     struct datatype t = datatype_for_number_node(node);
+    if(exp64_is_ldouble(&t)){
+        return datatype_long_double();
+    }
     if(exp64_is_floating(&t)){
         return datatype_floating(t.size);
     }
@@ -1259,6 +2033,9 @@ static long long exp64_number_value(struct node* node){
 }
 
 static struct datatype exp64_number(struct node* node){
+    if(node->num.flags & NUMBER_FLAG_LONG_DOUBLE){
+        return exp64_ld_number(node);
+    }
     ops->imm(0, exp64_number_value(node));
     return exp64_number_type(node);
 }
@@ -1274,6 +2051,29 @@ static struct datatype exp64_increment(struct node* node){
     struct datatype lt = exp64_address(node->unary.operand);
     if(exp64_is_struct(&lt) || exp64_is_array(&lt)){
         compiler_error(current_process, "%s needs a scalar operand\n", node->unary.op);
+    }
+    if(exp64_is_ldouble(&lt)){
+        // x + 1 into x; the postfix forms keep a copy of the
+        // old value.
+        int target = exp64_push_index();
+        int old = -1;
+        if(node->unary.flags & UNARY_FLAG_IS_POSTFIX){
+            exp64_ld_copy();
+            old = vector_count(current_function->func.frame.elements) - 1;
+        }
+        ops->imm(0, 1);
+        exp64_convert(0, &one, &lt);
+        int step = exp64_push_index();
+        exp64_ld_operate(step_op, target, step);
+        ops->mov_r1();
+        exp64_slot_load(target);
+        ops->copy(EXP64_LD_SIZE);
+        if(old >= 0){
+            ops->slot_address(vector_count(current_function->func.frame.elements) - 1 - old);
+        } else {
+            exp64_slot_load(target);
+        }
+        return lt;
     }
     if(exp64_is_floating(&lt)){
         // x + 1 - 1 need not be x in floating point, so the old value
@@ -1328,6 +2128,15 @@ static struct datatype exp64_unary(struct node* node){
         return exp64_int_type(DATA_SIZE_DWORD, true);
     }
     struct datatype t = exp64_value(node->unary.operand);
+    if(exp64_is_ldouble(&t)){
+        if(S_EQ(op, "+")){
+            return t;
+        }
+        if(!S_EQ(op, "-")){
+            compiler_error(current_process, "The operator %s does not take a long double operand\n", op);
+        }
+        return exp64_ld_negate();
+    }
     if(exp64_is_floating(&t)){
         if(S_EQ(op, "+")){
             return t;
@@ -1395,7 +2204,7 @@ static struct datatype exp64_rvalue(struct node* node, bool decay){
     } else {
         t = exp64_rvalue_of(node, decay);
     }
-    if(vector_count(ledger) > mark && !exp64_is_struct(&t)){
+    if(vector_count(ledger) > mark && !exp64_in_memory(&t)){
         ops->drop(vector_count(ledger) - mark);
     }
     return t;
@@ -1471,9 +2280,18 @@ struct node* exp64_static_local(struct resolver_entity* entity, struct node* var
     return copy;
 }
 
-// The value of `node` in R0; its type.
+// The value of `node` in R0; its type. The callers (expression
+// statements, the parts of `for`, `switch`) use no struct or long
+// double value, so the room such a value took is dropped again
+//: a `for` step such as `x /= 10` on a long double would
+// otherwise take more stack on every turn of the loop.
 struct datatype exp64_generate(struct node* node){
-    return exp64_value(node);
+    int mark = vector_count(current_function->func.frame.elements);
+    struct datatype t = exp64_value(node);
+    if(exp64_in_memory(&t) && vector_count(current_function->func.frame.elements) > mark){
+        ops->drop(vector_count(current_function->func.frame.elements) - mark);
+    }
+    return t;
 }
 
 // A `return` value: converted to the function's return type when either
@@ -1482,7 +2300,7 @@ struct datatype exp64_generate(struct node* node){
 // they were; the caller extends a narrow one.
 struct datatype exp64_return_value(struct node* node, struct datatype* rtype){
     struct datatype t = exp64_value(node);
-    if(exp64_is_floating(&t) || exp64_is_floating(rtype)){
+    if(exp64_is_floating(&t) || exp64_is_floating(rtype) || exp64_is_ldouble(&t) || exp64_is_ldouble(rtype)){
         exp64_convert(0, &t, rtype);
         return *rtype;
     }
@@ -1496,7 +2314,9 @@ void exp64_condition(struct node* node, const char* false_label){
     while(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
         node = node->parenthesis.exp;
     }
-    if(node->type != NODE_TYPE_EXPRESSION || !exp64_is_comparison(node->exp.op)){
+    // with long doubles about, a comparison is worked out as a
+    // value and tested.
+    if(node->type != NODE_TYPE_EXPRESSION || !exp64_is_comparison(node->exp.op) || current_process->uses_long_double){
         exp64_truth(node);
         ops->branch_false(0, false, false_label);
         return;
@@ -1542,8 +2362,21 @@ void exp64_initialize_local(struct node* var){
     struct datatype* t = &var->var.type;
     struct node* value = var->var.val;
     int offset = var->var.aoffset;
+    int mark = vector_count(current_function->func.frame.elements);
     struct datatype vt = exp64_value(value);
-    if(exp64_is_struct(t)){
+    if(exp64_is_ldouble(t)){
+        // the room of the value is dropped after the copy, so
+        // a `for` that declares a long double leaves nothing behind.
+        exp64_convert(0, &vt, t);
+        ops->mov_r1();
+        ops->frame_address(offset);
+        ops->copy(exp64_size(t));
+        if(vector_count(current_function->func.frame.elements) > mark){
+            ops->drop(vector_count(current_function->func.frame.elements) - mark);
+        }
+        return;
+    }
+    if(exp64_in_memory(t)){
         ops->mov_r1();
         ops->frame_address(offset);
         ops->copy(exp64_size(t));
