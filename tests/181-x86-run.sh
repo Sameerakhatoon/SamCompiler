@@ -27,7 +27,7 @@ for src in tests/golden/inputs/*.c samples/*.c; do
         continue
     fi
     if [ "$count" -eq 0 ]; then
-        file "$tmp/$base" | grep -q 'ELF 32-bit LSB executable, Intel 80386' || fail "$base is not an i386 ELF: $(file "$tmp/$base")"
+        file "$tmp/$base" | grep -Eq 'ELF 32-bit LSB (pie )?executable, Intel 80386' || fail "$base is not an i386 ELF: $(file "$tmp/$base")"
     fi
     out=$("$tmp/$base") && ec=0 || ec=$?
     [ "$ec" = "$expected" ] || failures="$failures $base(exit=$ec,want=$expected)"

@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 section .text
 global $f
@@ -6,6 +7,12 @@ $f:
 push ebp
 mov ebp, esp
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword [ebp+8]
 push dword 100
 pop ecx
@@ -36,9 +43,13 @@ sub eax, ecx
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret
@@ -48,25 +59,33 @@ $main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [$f]
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
+lea ebx, [esi+$f wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_1], ebx
-sub esp, 8
+mov dword [esi+function_call_1 wrt ..gotoff], ebx
 push dword 6
 push dword 2
 push dword 3
-call [function_call_1]
+call [esi+function_call_1 wrt ..gotoff]
 add esp, 12
-add esp, 8
 push eax
 pop eax
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret

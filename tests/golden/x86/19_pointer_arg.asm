@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 section .text
 global $set
@@ -6,6 +7,12 @@ $set:
 push ebp
 mov ebp, esp
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword [ebp+12]
 push dword [ebp+8]
 ; INDIRECTION
@@ -17,9 +24,13 @@ mov dword [edx], eax
 push dword 0
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret
@@ -30,23 +41,29 @@ push ebp
 mov ebp, esp
 sub esp, 16
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword 0
 pop eax
 mov dword [ebp-4], eax
-lea ebx, [$set]
+lea ebx, [esi+$set wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_1], ebx
-sub esp, 12
+mov dword [esi+function_call_1 wrt ..gotoff], ebx
+sub esp, 4
 push dword 12
 lea ebx, [ebp-4]
 push ebx
 pop ebx
 ; PUSH ADDRESS &
 push ebx
-call [function_call_1]
+call [esi+function_call_1 wrt ..gotoff]
 add esp, 8
-add esp, 12
+add esp, 4
 push eax
 pop eax
 push eax
@@ -54,9 +71,13 @@ add esp, 4
 push dword [ebp-4]
 pop eax
 mov ebx, [ebp-20]
+mov esi, [ebp-24]
+mov edi, [ebp-28]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 add esp, 16
 pop ebp

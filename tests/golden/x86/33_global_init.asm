@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 ; int g
 global $g
@@ -15,15 +16,21 @@ $main:
 push ebp
 mov ebp, esp
 push ebx
-push dword [$g]
-mov eax, [$k]
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
+push dword [esi+$g wrt ..gotoff]
+mov eax, [esi+$k wrt ..gotoff]
 movsx eax, al
 push eax
 pop ecx
 pop eax
 add eax, ecx
 push eax
-mov ebx, [$msg]
+mov ebx, [esi+$msg wrt ..gotoff]
 push ebx
 pop ebx
 push dword 1
@@ -40,9 +47,13 @@ add eax, ecx
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret

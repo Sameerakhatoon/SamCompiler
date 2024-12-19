@@ -114,13 +114,169 @@ static struct node* codegen_node_next(void){
     return vector_peek_ptr(current_process->node_tree_vec);
 }
 
+// position independent code. The generator below
+// writes absolute addresses (`[$g+4]`, `lea ebx, [$f]`, `mov eax,
+// str_3`, `call $f`, `fld qword [x87_const_2]`); every line of .text
+// passes through codegen_pic_line, which turns them into PIC:
+//
+// - esi holds the GOT's address for the whole function (set in the
+//   prologue, callee-saved, used by nothing else here).
+// - A symbol that binds locally (a backend label, or a C name this file
+//   defines, only a `static` one under -fPIC) is reached GOT-relative:
+//   `[esi+$g+4 wrt ..gotoff]` (R_386_GOTOFF).
+// - Any other C name may be in a shared library, or interposed: edi,
+//   the second reserved register, is loaded from its GOT entry first,
+//   `mov edi, [esi+$g wrt ..got]`, and the operand becomes `[edi+4]`.
+// - `mov reg, label` (an address as an immediate) becomes `lea`.
+// - `call $f` to such a symbol becomes `call [esi+$f wrt ..got]`.
+//
+// Calls never go through the PLT: an i386 PLT entry wants the GOT's
+// address in ebx, which every expression here uses as a scratch
+// register. A call reads the function's address from the GOT (as gcc
+// -fno-plt does) or calls a local function pc-relative, so ebx stays
+// free and the code is the same for an executable, a PIE, a static
+// link and a shared object.
+static bool codegen_in_text = false;
+
+static bool codegen_pic_ident_char(char c){
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+        || c == '_' || c == '$' || c == '.' || c == '@' || c == '?';
+}
+
+static bool codegen_pic_is_register(const char* s, size_t len){
+    static const char* registers[] = {
+        "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+        "ax", "bx", "cx", "dx", "si", "di", "bp", "sp",
+        "al", "ah", "bl", "bh", "cl", "ch", "dl", "dh", 0,
+    };
+    for(int i = 0; registers[i]; i++){
+        if(strlen(registers[i]) == len && strncmp(registers[i], s, len) == 0){
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether `symbol` (as written in the asm) is reached GOT-relative.
+// Backend labels (str_3, function_call_7, x87_tmp) are always local.
+static bool codegen_pic_binds_locally(const char* symbol, size_t len){
+    if(symbol[0] != '$'){
+        return true;
+    }
+    char name[IDENTIFIER_MAX_LENGTH + 1];
+    if(len - 1 > IDENTIFIER_MAX_LENGTH){
+        len = IDENTIFIER_MAX_LENGTH + 1;
+    }
+    memcpy(name, symbol + 1, len - 1);
+    name[len - 1] = 0;
+    return symbol_binds_locally(current_process, name);
+}
+
+static void codegen_pic_write(const char* line){
+    fprintf(current_process->ofile, "%s\n", line);
+}
+
+// Rewrite one line of .text (see above) and write it.
+static void codegen_pic_line(const char* line){
+    const char* start = line;
+    while(*start == ' ' || *start == '\t'){
+        start++;
+    }
+    if(*start == ';' || !*start){
+        codegen_pic_write(line);
+        return;
+    }
+    char out[1024];
+    // `call $f`: a direct call.
+    if(strncmp(start, "call $", 6) == 0){
+        const char* symbol = start + 5;
+        size_t len = strlen(symbol);
+        if(!codegen_pic_binds_locally(symbol, len)){
+            snprintf(out, sizeof(out), "call [esi+%s wrt ..got]", symbol);
+            codegen_pic_write(out);
+            return;
+        }
+        codegen_pic_write(line);
+        return;
+    }
+    // `mov reg, label`: the label's address as an immediate.
+    const char* comma = strchr(start, ',');
+    if(strncmp(start, "mov ", 4) == 0 && comma && !strchr(start, '[')){
+        const char* source = comma + 1;
+        while(*source == ' '){
+            source++;
+        }
+        size_t len = 0;
+        while(codegen_pic_ident_char(source[len])){
+            len++;
+        }
+        bool is_symbol = len > 0 && !(source[0] >= '0' && source[0] <= '9') && source[0] != '.'
+            && source[len] == 0 && !codegen_pic_is_register(source, len);
+        if(is_symbol){
+            snprintf(out, sizeof(out), "lea %.*s, [%s]", (int)(comma - start - 4), start + 4, source);
+            codegen_pic_line(out);
+            return;
+        }
+    }
+    // A memory operand based on a symbol: `[sym]`, `[sym+4]`.
+    const char* open = strchr(start, '[');
+    if(!open){
+        codegen_pic_write(line);
+        return;
+    }
+    const char* symbol = open + 1;
+    while(*symbol == ' '){
+        symbol++;
+    }
+    size_t len = 0;
+    while(codegen_pic_ident_char(symbol[len])){
+        len++;
+    }
+    if(len == 0 || (symbol[0] >= '0' && symbol[0] <= '9') || codegen_pic_is_register(symbol, len)){
+        codegen_pic_write(line);
+        return;
+    }
+    const char* close = strchr(symbol, ']');
+    if(!close){
+        compiler_error(current_process, "COMPILER BUG: x86 operand without `]`: %s\n", line);
+    }
+    // Only a constant may follow the symbol: esi (or edi) takes the
+    // place of the one base register an operand has.
+    const char* rest = symbol + len;
+    for(const char* c = rest; c < close; c++){
+        if(!strchr("+-0123456789 ", *c)){
+            compiler_error(current_process, "COMPILER BUG: x86 symbol operand with a register: %s\n", line);
+        }
+    }
+    if(codegen_pic_binds_locally(symbol, len)){
+        snprintf(out, sizeof(out), "%.*s[esi+%.*s wrt ..gotoff]%s",
+            (int)(open - line), line, (int)(close - symbol), symbol, close + 1);
+    } else {
+        snprintf(out, sizeof(out), "mov edi, [esi+%.*s wrt ..got]", (int)len, symbol);
+        codegen_pic_write(out);
+        snprintf(out, sizeof(out), "%.*s[edi%.*s]%s",
+            (int)(open - line), line, (int)(close - rest), rest, close + 1);
+    }
+    codegen_pic_write(out);
+}
+
 static void asm_push_args(const char* ins, va_list args){
     // The asm goes to the output file only. It used to be echoed to
     // stdout on every compile as well.
-    if(current_process->ofile){
+    if(!current_process->ofile){
+        return;
+    }
+    if(!codegen_in_text){
         vfprintf(current_process->ofile, ins, args);
         fprintf(current_process->ofile, "\n");
+        return;
     }
+    char line[1024];
+    int written = vsnprintf(line, sizeof(line), ins, args);
+    if(written < 0 || (size_t)written >= sizeof(line)){
+        compiler_error(current_process, "COMPILER BUG: x86 instruction longer than %i bytes\n", (int)sizeof(line));
+    }
+    codegen_pic_line(line);
 }
 
 static void asm_push(const char* ins, ...){
@@ -3264,6 +3420,8 @@ static void codegen_generate_statement_return(struct node* node){
     // switch), so the frame is dropped from ebp.
     size_t locals_size = C_ALIGN(function_node_stack_size(node->binded.function));
     asm_push("mov ebx, [ebp-%i]", (int)locals_size + DATA_SIZE_DWORD);
+    asm_push("mov esi, [ebp-%i]", (int)locals_size + 2 * DATA_SIZE_DWORD);
+    asm_push("mov edi, [ebp-%i]", (int)locals_size + 3 * DATA_SIZE_DWORD);
     asm_push("mov esp, ebp");
     asm_pop_ebp_no_stack_frame_restore();
     codegen_generate_ret(node->binded.function);
@@ -3397,7 +3555,8 @@ static void codegen_generate_body(struct node* node, struct history* history){
 static void codegen_generate_function_with_body(struct node* node){
     codegen_register_function(node, 0);
     // A static function stays local to the object.
-    if(!(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC)){
+    // Under -fPIC the line came first (codegen_pic_function_globals).
+    if(!(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC) && !(current_process->flags & COMPILE_PROCESS_PIC)){
         asm_push("global %s", codegen_symbol(node->func.name));
     }
     asm_push("; %s function", node->func.name);
@@ -3409,11 +3568,23 @@ static void codegen_generate_function_with_body(struct node* node){
     // cdecl makes ebx callee-saved, and every expression here uses it.
     // It goes in the slot below the locals.
     asm_push_ins_push("ebx", STACK_FRAME_ELEMENT_TYPE_UNKNOWN, "function_entry_saved_ebx");
+    // esi = the GOT's address, edi = a symbol's address
+    // read from the GOT; both callee-saved, kept under ebx. call/pop
+    // gives the address of .pic_base, and R_386_GOTPC adds the distance
+    // from there to the GOT.
+    asm_push_ins_push("esi", STACK_FRAME_ELEMENT_TYPE_UNKNOWN, "function_entry_saved_esi");
+    asm_push_ins_push("edi", STACK_FRAME_ELEMENT_TYPE_UNKNOWN, "function_entry_saved_edi");
+    asm_push("call .pic_base");
+    asm_push(".pic_base:");
+    asm_push("pop esi");
+    asm_push("add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc");
     codegen_new_scope(RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
     codegen_generate_function_arguments(function_node_argument_vec(node));
 
     codegen_generate_body(node->func.body_n, codegen_history_begin(IS_ALONE_STATEMENT));
     codegen_finish_scope();
+    asm_push_ins_pop("edi", STACK_FRAME_ELEMENT_TYPE_UNKNOWN, "function_entry_saved_edi");
+    asm_push_ins_pop("esi", STACK_FRAME_ELEMENT_TYPE_UNKNOWN, "function_entry_saved_esi");
     asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_UNKNOWN, "function_entry_saved_ebx");
     codegen_stack_add(C_ALIGN(function_node_stack_size(node)));
     asm_pop_ebp();
@@ -3658,19 +3829,47 @@ static void codegen_init_value(size_t size, long long value){
     asm_push("%s %lld", codegen_init_nasm_size(size), value);
 }
 
+// Under -fPIC every exported function is declared global, and typed,
+// before the data: `wrt ..sym` in an initializer (below) needs the
+// symbol to be global already.
+static void codegen_pic_function_globals(void){
+    if(!(current_process->flags & COMPILE_PROCESS_PIC)){
+        return;
+    }
+    struct vector* tree = current_process->node_tree_vec;
+    for(int i = 0; i < vector_count(tree); i++){
+        struct node* node = *(struct node**)vector_at(tree, i);
+        if(node->type == NODE_TYPE_FUNCTION && node->func.body_n && !(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC)){
+            asm_push("global %s:function", codegen_symbol(node->func.name));
+        }
+    }
+}
+
+// NASM writes a reference to a symbol of this file as one to its
+// section; under -fPIC an exported symbol's must name the symbol
+// (`wrt ..sym`), so the word holds the definition that wins.
 static void codegen_init_symbol(size_t size, const char* symbol){
-    asm_push("%s %s", codegen_init_nasm_size(size), codegen_symbol(symbol));
+    bool by_symbol = (current_process->flags & COMPILE_PROCESS_PIC) && symbol_defined_in_tree(current_process, symbol)
+        && !symbol_binds_locally(current_process, symbol);
+    asm_push("%s %s%s", codegen_init_nasm_size(size), codegen_symbol(symbol), by_symbol ? " wrt ..sym" : "");
 }
 
 static void codegen_init_zero(size_t count){
     asm_push("times %lu db 0", (unsigned long)count);
 }
 
-// A global's symbol is exported unless it is static.
+// A global's symbol is exported unless it is static. In a
+// shared object it is also typed and sized: a program that uses it
+// gets a copy relocation, which copies that many bytes.
 static void codegen_global_label(struct node* node){
-    if(!(node->var.type.flags & DATATYPE_FLAG_IS_STATIC)){
-        asm_push("global %s", codegen_symbol(node->var.name));
+    if(node->var.type.flags & DATATYPE_FLAG_IS_STATIC){
+        return;
     }
+    if(current_process->flags & COMPILE_PROCESS_PIC){
+        asm_push("global %s:data %lu", codegen_symbol(node->var.name), (unsigned long)variable_size(node));
+        return;
+    }
+    asm_push("global %s", codegen_symbol(node->var.name));
 }
 
 static void codegen_generate_global_initializer(struct node* node){
@@ -3807,10 +4006,12 @@ static void codegen_generate_root_node(struct node* node){
 
 static void codegen_generate_root(void){
     asm_push("section .text");
+    codegen_in_text = true;
     struct node* node = 0;
     while((node = codegen_node_next()) != 0){
         codegen_generate_root_node(node);
     }
+    codegen_in_text = false;
 }
 
 // ch110: write escape-sequence chars as their decimal ASCII value
@@ -4014,6 +4215,9 @@ int codegen_x86(struct compile_process* process){
 
     vector_set_peek_pointer(process->node_tree_vec, 0);
     codegen_new_scope(0);
+    // The functions find the GOT through it.
+    asm_push("extern _GLOBAL_OFFSET_TABLE_");
+    codegen_pic_function_globals();
     codegen_generate_data_section();
 
     vector_set_peek_pointer(process->node_tree_vec, 0);

@@ -4,8 +4,8 @@
 # by the target's gcc in every combination: both by SamCompiler, main.c
 # by SamCompiler with lib.c by gcc, and the other way round. Globals
 # and extern variables cross the objects both ways, the two static
-# helpers must not clash, and the 64-bit links are PIEs (dynamic on
-# x86_64 and under qemu with the cross sysroot); i386 links static.
+# helpers must not clash, and the links are PIEs (dynamic on x86_64
+# and under qemu with the cross sysroot, a static PIE on i386).
 # The objects carry .note.GNU-stack, so the linker does not warn about
 # an executable stack.
 . "$(dirname "$0")/lib.sh"
@@ -17,7 +17,8 @@ trap 'rm -rf "$tmp"' EXIT
 
 for target in x86 x86_64 aarch64 riscv64; do
     case $target in
-        x86)     cc="i686-linux-gnu-gcc"; link="-static"; run="" ;;
+        # a static PIE, with no text relocations.
+        x86)     cc="i686-linux-gnu-gcc"; link="-static-pie -Wl,-z,text"; run="" ;;
         x86_64)  cc="gcc";                link="-pie";    run="" ;;
         aarch64) cc="aarch64-linux-gnu-gcc"; link="-pie"; run="qemu-aarch64 -L /usr/aarch64-linux-gnu" ;;
         riscv64) cc="riscv64-linux-gnu-gcc"; link="-pie"; run="qemu-riscv64 -L /usr/riscv64-linux-gnu" ;;
@@ -52,10 +53,10 @@ for target in x86 x86_64 aarch64 riscv64; do
     done
 done
 
-# The default link (not object mode) makes a PIE on x86_64 (dynamic)
-# and aarch64 (static-pie); riscv64 stays -static (no rcrt1.o in the
-# cross glibc) and i386 is not position independent.
-for target in x86_64 aarch64; do
+# The default link (not object mode) makes a PIE on x86_64 (dynamic),
+# aarch64 and i386 (static-pie); riscv64 stays -static (no rcrt1.o in
+# the cross glibc).
+for target in x86 x86_64 aarch64; do
     ./main -target=$target tests/diff/register_names.c "$tmp/default_$target" >"$tmp/log" 2>&1 \
         || fail "$target: the default link failed: $(tail -2 "$tmp/log")"
     file "$tmp/default_$target" | grep -q 'pie executable' \

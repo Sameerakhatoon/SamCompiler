@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 section .text
 global $main
@@ -6,12 +7,22 @@ $main:
 push ebp
 mov ebp, esp
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword 8
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret

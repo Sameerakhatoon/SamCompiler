@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 section .text
 global $fib
@@ -6,6 +7,12 @@ $fib:
 push ebp
 mov ebp, esp
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword [ebp+8]
 push dword 2
 pop ecx
@@ -20,41 +27,45 @@ je .if_2
 push dword [ebp+8]
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
 jmp .if_end_1
 .if_2:
 .if_end_1:
-lea ebx, [$fib]
+lea ebx, [esi+$fib wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_3], ebx
+mov dword [esi+function_call_3 wrt ..gotoff], ebx
+sub esp, 8
 push dword [ebp+8]
 push dword 1
 pop ecx
 pop eax
 sub eax, ecx
 push eax
-call [function_call_3]
+call [esi+function_call_3 wrt ..gotoff]
 add esp, 4
+add esp, 8
 push eax
 pop eax
 push eax
-lea ebx, [$fib]
+lea ebx, [esi+$fib wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_4], ebx
-sub esp, 12
+mov dword [esi+function_call_4 wrt ..gotoff], ebx
+sub esp, 4
 push dword [ebp+8]
 push dword 2
 pop ecx
 pop eax
 sub eax, ecx
 push eax
-call [function_call_4]
+call [esi+function_call_4 wrt ..gotoff]
 add esp, 4
-add esp, 12
+add esp, 4
 push eax
 pop eax
 push eax
@@ -64,9 +75,13 @@ add eax, ecx
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret
@@ -76,21 +91,33 @@ $main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [$fib]
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
+lea ebx, [esi+$fib wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_5], ebx
+mov dword [esi+function_call_5 wrt ..gotoff], ebx
+sub esp, 8
 push dword 10
-call [function_call_5]
+call [esi+function_call_5 wrt ..gotoff]
 add esp, 4
+add esp, 8
 push eax
 pop eax
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret

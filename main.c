@@ -27,13 +27,23 @@ enum {
     MAIN_MODE_PREPROCESS,   // -E
 };
 
-static const char* main_link_cmd(const struct target* target);
+// What the link makes.
+enum {
+    MAIN_LINK_EXECUTABLE,   // the target's default (static, static-pie or PIE)
+    MAIN_LINK_DYNAMIC,      // a dynamic PIE, for a program with a .so input
+    MAIN_LINK_SHARED,       // -shared
+};
+
+static const char* main_link_cmd(const struct target* target, int kind);
 
 static const char* main_prog = "main";
 static const char* main_sysroot;
 static const char* main_own_includes;
 static bool        main_verbose;
 static pid_t       main_pid;
+// -fPIC or -shared: compile for a shared object; -shared: link one.
+static int         main_compile_flags;
+static bool        main_shared;
 
 // The asm is written to a temporary file next to the output and renamed
 // over it only once compilation succeeds, so a failed compile leaves the
@@ -103,8 +113,12 @@ static bool main_is_source(const char* path){
     return S_EQ(path, "-") || main_ends_with(path, ".c");
 }
 
+static bool main_is_shared_library(const char* path){
+    return main_ends_with(path, ".so");
+}
+
 static bool main_is_linker_input(const char* path){
-    return main_ends_with(path, ".o") || main_ends_with(path, ".a");
+    return main_ends_with(path, ".o") || main_ends_with(path, ".a") || main_is_shared_library(path);
 }
 
 // Single-quote `in` for /bin/sh so a path reaches the assembler and linker
@@ -138,18 +152,28 @@ static bool main_shell_quote(const char* in, char* out, size_t out_size){
 // the i686 cross gcc first and `gcc -m32` as its fallback. The
 // commands come from the target; the fallback is used when the first
 // word of link_cmd is not on the PATH.
-static const char* main_link_cmd(const struct target* target){
-    if(!target->link_fallback_cmd){
-        return target->link_cmd;
+// `kind` picks the target's command for an executable, a program
+// linked against a shared library, or a shared object.
+static const char* main_link_cmd(const struct target* target, int kind){
+    const char* cmd = target->link_cmd;
+    const char* fallback = target->link_fallback_cmd;
+    if(kind == MAIN_LINK_DYNAMIC && target->link_dynamic_cmd){
+        cmd = target->link_dynamic_cmd;
+    } else if(kind == MAIN_LINK_SHARED){
+        cmd = target->link_shared_cmd;
+        fallback = target->link_shared_fallback_cmd;
+    }
+    if(!fallback){
+        return cmd;
     }
     char tool[64];
     char check_cmd[128];
-    sscanf(target->link_cmd, "%63s", tool);
+    sscanf(cmd, "%63s", tool);
     snprintf(check_cmd, sizeof(check_cmd), "command -v %s >/dev/null 2>&1", tool);
     if(system(check_cmd) == 0){
-        return target->link_cmd;
+        return cmd;
     }
-    return target->link_fallback_cmd;
+    return fallback;
 }
 
 // pc_includes is found next to this binary (readlink follows a symlink
@@ -196,7 +220,7 @@ static void main_usage(FILE* out){
         "       %s [-target=T] [options] input.c output [object]\n"
         "\n"
         "Inputs ending in .c are compiled (- reads the source from standard\n"
-        "input); .o and .a files go to the linker. Without -c, -S or -E the\n"
+        "input); .o, .a and .so files go to the linker. Without -c, -S or -E the\n"
         "inputs are compiled, assembled and linked into one executable.\n"
         "\n"
         "  -o FILE          write the output to FILE (default a.out; with -c or -S,\n"
@@ -207,6 +231,9 @@ static void main_usage(FILE* out){
         "  -I DIR           search DIR for includes, before pc_includes and /usr/include\n"
         "  -D NAME[=VALUE]  define a macro (VALUE defaults to 1)\n"
         "  -U NAME          undefine a macro\n"
+        "  -fPIC, -fpic     code for a shared object: exported symbols through the GOT\n"
+        "  -shared          link a shared object (implies -fPIC); a .so input links\n"
+        "                   the program as a dynamic PIE\n"
         "  -target=T        x86 (default), x86_64, aarch64, riscv64, samos-x86_64,\n"
         "                   samos-aarch64 or samos-riscv64\n"
         "  -sysroot=DIR     the SamOS sysroot of a samos target (or SAMOS_SYSROOT)\n"
@@ -318,7 +345,7 @@ static int main_assemble(const struct target* target, const char* asm_file, cons
 }
 
 // `objects` is already quoted and space-separated.
-static int main_link(const struct target* target, const char* objects, const char* output){
+static int main_link(const struct target* target, int kind, const char* objects, const char* output){
     char quoted_output[PATH_MAX * 4 + 3];
     char quoted_sysroot[PATH_MAX * 4 + 3];
     if(!main_shell_quote(output, quoted_output, sizeof(quoted_output))){
@@ -334,7 +361,7 @@ static int main_link(const struct target* target, const char* objects, const cha
         }
         snprintf(cmd, size, target->link_cmd, quoted_sysroot, objects, quoted_output);
     } else {
-        snprintf(cmd, size, main_link_cmd(target), objects, quoted_output);
+        snprintf(cmd, size, main_link_cmd(target, kind), objects, quoted_output);
     }
     int rc = main_run(cmd);
     free(cmd);
@@ -457,12 +484,12 @@ static int main_compile_each(const struct target* target, int mode, const char**
             return 1;
         }
         if(mode == MAIN_MODE_ASSEMBLY){
-            if(main_compile_child(input, beside, 0) != 0){
+            if(main_compile_child(input, beside, main_compile_flags) != 0){
                 return 1;
             }
         } else {
             const char* asm_file = main_tmp_path(i, ".s");
-            if(!asm_file || main_compile_child(input, asm_file, 0) != 0){
+            if(!asm_file || main_compile_child(input, asm_file, main_compile_flags) != 0){
                 return 1;
             }
             int rc = main_assemble(target, asm_file, beside);
@@ -486,13 +513,17 @@ static int main_build_executable(const struct target* target, const char** input
     if(main_output_is_an_input(output, inputs, count)){
         return 1;
     }
+    int kind = main_shared ? MAIN_LINK_SHARED : MAIN_LINK_EXECUTABLE;
     size_t objects_size = 1;
     char* objects = calloc(1, objects_size);
     for(int i = 0; i < count; i++){
         const char* object = inputs[i];
+        if(kind == MAIN_LINK_EXECUTABLE && main_is_shared_library(object)){
+            kind = MAIN_LINK_DYNAMIC;
+        }
         if(main_is_source(inputs[i])){
             const char* asm_file = main_tmp_path(i, ".s");
-            if(!asm_file || main_compile_child(inputs[i], asm_file, 0) != 0){
+            if(!asm_file || main_compile_child(inputs[i], asm_file, main_compile_flags) != 0){
                 return 1;
             }
             object = main_tmp_path(i, ".o");
@@ -522,7 +553,7 @@ static int main_build_executable(const struct target* target, const char** input
     }
     // The linker creates the file itself, with the execute bits.
     unlink(beside);
-    int rc = main_link(target, objects, beside);
+    int rc = main_link(target, kind, objects, beside);
     free(objects);
     if(rc != 0){
         return rc;
@@ -532,7 +563,7 @@ static int main_build_executable(const struct target* target, const char** input
 
 // The original form: `in out [object]`, unchanged.
 static int main_legacy(const struct target* target, const char* input_file, const char* output_file, bool object){
-    int compile_flags = COMPILE_PROCESS_EXECUTE_NASM;
+    int compile_flags = COMPILE_PROCESS_EXECUTE_NASM | main_compile_flags;
     if(object){
         compile_flags |= COMPILE_PROCESS_EXPORT_AS_OBJECT;
     }
@@ -599,7 +630,7 @@ static int main_legacy(const struct target* target, const char* input_file, cons
             }
             snprintf(link_cmd, sizeof(link_cmd), target->link_cmd, quoted_sysroot, quoted_object, quoted_output);
         } else {
-            snprintf(link_cmd, sizeof(link_cmd), main_link_cmd(target), quoted_object, quoted_output);
+            snprintf(link_cmd, sizeof(link_cmd), main_link_cmd(target, MAIN_LINK_EXECUTABLE), quoted_object, quoted_output);
         }
         snprintf(nasm_cmd, sizeof(nasm_cmd), "%s && %s", asm_cmd, link_cmd);
     }
@@ -729,6 +760,11 @@ int main(int argc, char** argv){
             mode_given = true;
         } else if(S_EQ(arg, "-v")){
             main_verbose = true;
+        } else if(S_EQ(arg, "-fPIC") || S_EQ(arg, "-fpic")){
+            main_compile_flags |= COMPILE_PROCESS_PIC;
+        } else if(S_EQ(arg, "-shared")){
+            main_shared = true;
+            main_compile_flags |= COMPILE_PROCESS_PIC;
         } else {
             main_error("unknown option %s (see %s --help)", arg, main_prog);
             return 1;
@@ -737,6 +773,10 @@ int main(int argc, char** argv){
 
     if(!target->backend){
         fprintf(stderr, "Target %s has no code generator yet\n", target->name);
+        return 1;
+    }
+    if(target->samos && (main_shared || (main_compile_flags & COMPILE_PROCESS_PIC))){
+        main_error("target %s has no shared objects (-shared, -fPIC)", target->name);
         return 1;
     }
     target_set_current(target);

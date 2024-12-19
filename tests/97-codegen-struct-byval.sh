@@ -28,7 +28,7 @@ got="$(cat "$outfile")"
 assert_contains "$got" "; STRUCTURE PUSH"    "structure-push prologue comment"
 assert_contains "$got" "; END STRUCTURE PUSH" "structure-push epilogue comment"
 # Each chunk pop + store into x at its declared address.
-assert_contains "$got" 'lea ebx, [$y'         "load address of y"
+assert_contains "$got" 'lea ebx, [esi+$y'     "load address of y, GOT-relative"
 assert_contains "$got" "pop eax"              "pop chunk into eax"
-assert_contains "$got" 'mov [$x'               "store chunk into x"
+assert_contains "$got" 'mov [esi+$x'           "store chunk into x"
 pass

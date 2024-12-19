@@ -80,10 +80,14 @@ static const struct target target_x86_desc = {
     .backend           = &codegen_backend_x86,
     .asm_cmd           = "nasm -f elf32 %s -o %s",
     //
-    .link_cmd          = "i686-linux-gnu-gcc -static %s -o %s",
-    // The i386 code is not position independent (absolute addresses,
-    // no GOT), so the fallback must not make a PIE either.
-    .link_fallback_cmd = "gcc -m32 -no-pie %s -o %s",
+    // -static-pie: position independent code that
+    // still runs on an x86_64 host with no i386 loader or libc.
+    .link_cmd          = "i686-linux-gnu-gcc -static-pie %s -o %s",
+    // gcc-multilib brings the i386 loader, so the default dynamic PIE.
+    .link_fallback_cmd = "gcc -m32 %s -o %s",
+    .link_dynamic_cmd  = "i686-linux-gnu-gcc %s -o %s",
+    .link_shared_cmd   = "i686-linux-gnu-gcc -shared %s -o %s",
+    .link_shared_fallback_cmd = "gcc -m32 -shared %s -o %s",
     .run_cmd           = "",
     .macros            = target_x86_macros,
 };
@@ -106,6 +110,7 @@ static const struct target target_x86_64_desc = {
     // rip-relative, any other through the GOT.
     .link_cmd          = "gcc %s -o %s",
     .link_fallback_cmd = 0,
+    .link_shared_cmd   = "gcc -shared %s -o %s",
     .run_cmd           = "",
     .macros            = target_x86_64_macros,
 };
@@ -130,6 +135,10 @@ static const struct target target_aarch64_desc = {
     // code is still checked as position independent.
     .link_cmd          = "aarch64-linux-gnu-gcc -static-pie %s -o %s",
     .link_fallback_cmd = 0,
+    // With a shared library the program is a dynamic PIE; run it with
+    // qemu-aarch64 -L /usr/aarch64-linux-gnu.
+    .link_dynamic_cmd  = "aarch64-linux-gnu-gcc %s -o %s",
+    .link_shared_cmd   = "aarch64-linux-gnu-gcc -shared %s -o %s",
     .run_cmd           = "qemu-aarch64",
     .macros            = target_aarch64_macros,
 };
@@ -151,10 +160,16 @@ static const struct target target_riscv64_desc = {
     .backend           = &codegen_backend_riscv64,
     .asm_cmd           = "riscv64-linux-gnu-as %s -o %s",
     // -static: qemu-user then needs no riscv64 sysroot. Not -static-pie:
-    // Ubuntu's riscv64 cross glibc has no rcrt1.o. The code also links
-    // as a dynamic PIE.
+    // Ubuntu 24.04's riscv64 cross glibc (libc6-dev-riscv64-cross 2.39)
+    // has no rcrt1.o, and its libc.a no _dl_relocate_static_pie, so
+    // there is no static PIE to make. A dynamic PIE would need
+    // `qemu-riscv64 -L /usr/riscv64-linux-gnu` for every run. The code
+    // is position independent all the same: it links as a dynamic PIE
+    // and as a shared object.
     .link_cmd          = "riscv64-linux-gnu-gcc -static %s -o %s",
     .link_fallback_cmd = 0,
+    .link_dynamic_cmd  = "riscv64-linux-gnu-gcc %s -o %s",
+    .link_shared_cmd   = "riscv64-linux-gnu-gcc -shared %s -o %s",
     .run_cmd           = "qemu-riscv64",
     .macros            = target_riscv64_macros,
 };

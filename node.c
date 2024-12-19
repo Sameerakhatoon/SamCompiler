@@ -442,6 +442,8 @@ bool function_node_is_prototype(struct node* node){
 // the arena.
 #define NODE_DEFINED_FUNCTION 1
 #define NODE_DEFINED_VARIABLE 2
+// The definition is `static`: local to the object.
+#define NODE_DEFINED_STATIC   4
 struct node_defined {
     const char* name;
     int         kinds;
@@ -485,6 +487,16 @@ static bool variable_node_defines(struct node* var){
         && var->var.name;
 }
 
+static void node_defined_add_variable(struct node* var){
+    if(!variable_node_defines(var)){
+        return;
+    }
+    node_defined_add(var->var.name, NODE_DEFINED_VARIABLE);
+    if(var->var.type.flags & DATATYPE_FLAG_IS_STATIC){
+        node_defined_add(var->var.name, NODE_DEFINED_STATIC);
+    }
+}
+
 // The functions with a body and the global variables (not just
 // `extern`), in any of the shapes a global comes in: alone, in a list
 // (`int a, b;`) or after a struct or union body.
@@ -510,6 +522,9 @@ static void node_defined_build(struct compile_process* process){
         struct node* node = *(struct node**)vector_at(tree, i);
         if(node->type == NODE_TYPE_FUNCTION && node->func.body_n){
             node_defined_add(node->func.name, NODE_DEFINED_FUNCTION);
+            if(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC){
+                node_defined_add(node->func.name, NODE_DEFINED_STATIC);
+            }
         }
         struct node* var = 0;
         if(node->type == NODE_TYPE_VARIABLE){
@@ -519,15 +534,10 @@ static void node_defined_build(struct compile_process* process){
         } else if(node->type == NODE_TYPE_UNION && (node->flags & NODE_FLAG_HAS_VARIABLE_COMBINED)){
             var = node->_union.var;
         }
-        if(variable_node_defines(var)){
-            node_defined_add(var->var.name, NODE_DEFINED_VARIABLE);
-        }
+        node_defined_add_variable(var);
         if(node->type == NODE_TYPE_VARIABLE_LIST){
             for(int j = 0; j < vector_count(node->var_list.list); j++){
-                struct node* item = *(struct node**)vector_at(node->var_list.list, j);
-                if(variable_node_defines(item)){
-                    node_defined_add(item->var.name, NODE_DEFINED_VARIABLE);
-                }
+                node_defined_add_variable(*(struct node**)vector_at(node->var_list.list, j));
             }
         }
     }
@@ -556,6 +566,20 @@ bool variable_defined_in_tree(struct compile_process* process, const char* name)
 // may live in a shared library and is reached through the GOT.
 bool symbol_defined_in_tree(struct compile_process* process, const char* name){
     return function_defined_in_tree(process, name) || variable_defined_in_tree(process, name);
+}
+
+// Whether a reference to `name` can be resolved at link time relative
+// to this code (pc-relative, or GOT-relative on i386), not through a
+// GOT entry. In an executable that is any symbol this file defines. In
+// a shared object (-fPIC) only a `static` one: another object loaded
+// first (the program, an LD_PRELOAD library) may interpose an exported
+// symbol, and this code must then use that one, so it reads the
+// address from the GOT as gcc -fPIC does.
+bool symbol_binds_locally(struct compile_process* process, const char* name){
+    if(!symbol_defined_in_tree(process, name)){
+        return false;
+    }
+    return !(process->flags & COMPILE_PROCESS_PIC) || node_defined(process, name, NODE_DEFINED_STATIC);
 }
 
 struct vector* function_node_argument_vec(struct node* node){

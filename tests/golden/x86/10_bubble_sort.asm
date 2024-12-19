@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 ; cell values
 global $values
@@ -10,6 +11,12 @@ push ebp
 mov ebp, esp
 sub esp, 32
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword 0
 pop eax
 mov dword [ebp-4], eax
@@ -101,7 +108,7 @@ add eax, ecx
 push eax
 pop eax
 mov dword [ebp-12], eax
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 push dword [ebp-8]
@@ -117,7 +124,7 @@ mov eax, [eax]
 push eax
 pop eax
 mov dword [ebp-20], eax
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 push dword [ebp-12]
@@ -144,7 +151,7 @@ push eax
 pop eax
 cmp eax, 0
 je .if_10
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 push dword [ebp-8]
@@ -160,7 +167,7 @@ mov eax, [eax]
 push eax
 pop eax
 mov dword [ebp-16], eax
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 push dword [ebp-12]
@@ -174,7 +181,7 @@ push ebx
 pop eax
 mov eax, [eax]
 push eax
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 push dword [ebp-8]
@@ -189,7 +196,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword [ebp-16]
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 push dword [ebp-12]
@@ -231,9 +238,13 @@ jmp .for_loop1
 push dword 0
 pop eax
 mov ebx, [ebp-36]
+mov esi, [ebp-40]
+mov edi, [ebp-44]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 add esp, 32
 pop ebp
@@ -244,8 +255,14 @@ $main:
 push ebp
 mov ebp, esp
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword 5
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 add ebx, 0
@@ -254,7 +271,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 2
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 add ebx, 4
@@ -263,7 +280,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 8
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 add ebx, 8
@@ -272,7 +289,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 1
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 add ebx, 12
@@ -281,7 +298,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 7
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 add ebx, 16
@@ -290,7 +307,7 @@ pop edx
 pop eax
 mov dword [edx], eax
 push dword 3
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 add ebx, 20
@@ -298,18 +315,20 @@ push ebx
 pop edx
 pop eax
 mov dword [edx], eax
-lea ebx, [$bubble_sort]
+lea ebx, [esi+$bubble_sort wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_11], ebx
+mov dword [esi+function_call_11 wrt ..gotoff], ebx
+sub esp, 8
 push dword 6
-call [function_call_11]
+call [esi+function_call_11 wrt ..gotoff]
 add esp, 4
+add esp, 8
 push eax
 pop eax
 push eax
 add esp, 4
-lea ebx, [$values]
+lea ebx, [esi+$values wrt ..gotoff]
 push ebx
 pop ebx
 add ebx, 0
@@ -319,9 +338,13 @@ mov eax, [eax]
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret

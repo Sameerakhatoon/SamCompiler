@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 section .text
 global $popcount
@@ -7,6 +8,12 @@ push ebp
 mov ebp, esp
 sub esp, 16
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword 0
 pop eax
 mov dword [ebp-4], eax
@@ -50,9 +57,13 @@ jmp .while_start_3
 push dword [ebp-4]
 pop eax
 mov ebx, [ebp-20]
+mov esi, [ebp-24]
+mov edi, [ebp-28]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 add esp, 16
 pop ebp
@@ -64,25 +75,35 @@ push ebp
 mov ebp, esp
 sub esp, 16
 push ebx
-lea ebx, [$popcount]
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
+lea ebx, [esi+$popcount wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_5], ebx
+mov dword [esi+function_call_5 wrt ..gotoff], ebx
+sub esp, 8
 push dword 85
-call [function_call_5]
+call [esi+function_call_5 wrt ..gotoff]
 add esp, 4
+add esp, 8
 push eax
 pop eax
 push eax
 pop eax
 mov dword [ebp-4], eax
-lea ebx, [$popcount]
+lea ebx, [esi+$popcount wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_6], ebx
+mov dword [esi+function_call_6 wrt ..gotoff], ebx
+sub esp, 8
 push dword 7
-call [function_call_6]
+call [esi+function_call_6 wrt ..gotoff]
 add esp, 4
+add esp, 8
 push eax
 pop eax
 push eax
@@ -96,9 +117,13 @@ add eax, ecx
 push eax
 pop eax
 mov ebx, [ebp-20]
+mov esi, [ebp-24]
+mov edi, [ebp-28]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 add esp, 16
 pop ebp

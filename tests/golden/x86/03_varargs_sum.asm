@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 section .text
 global $sum
@@ -7,6 +8,12 @@ push ebp
 mov ebp, esp
 sub esp, 16
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 ; NATIVE FUNCTION va_start
 ; va_start on variable num
 lea ebx, [ebp+8]
@@ -55,9 +62,13 @@ mov dword [ebp-12], eax
 push dword 0
 pop eax
 mov ebx, [ebp-20]
+mov esi, [ebp-24]
+mov edi, [ebp-28]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 add esp, 16
 pop ebp
@@ -68,25 +79,33 @@ $main:
 push ebp
 mov ebp, esp
 push ebx
-lea ebx, [$sum]
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
+lea ebx, [esi+$sum wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_1], ebx
-sub esp, 8
+mov dword [esi+function_call_1 wrt ..gotoff], ebx
 push dword 20
 push dword 10
 push dword 2
-call [function_call_1]
+call [esi+function_call_1 wrt ..gotoff]
 add esp, 12
-add esp, 8
 push eax
 pop eax
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret

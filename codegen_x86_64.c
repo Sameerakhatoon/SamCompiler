@@ -347,12 +347,37 @@ static void x86_64_frame_address(int offset){
     asm_push("lea rax, [rbp%+i]", offset);
 }
 
+// The exported symbols this -fPIC file defines that have a slot, below.
+static struct vector* codegen_pic_slots;
+
 // reg = the address of a symbol. One this file defines is rip-relative
 // (`default rel`); any other may be in a shared library, so a PIE
-// reads its address from the GOT.
+// reads its address from the GOT. Under -fPIC an
+// exported symbol this file defines may be interposed and is read from
+// memory too, but not from the GOT: NASM 2.16 panics
+// ("intra-segment OUT_REL4ADR") on `wrt ..gotpc` to a symbol of the
+// same section, a function called from another. The file keeps its own
+// slot, `$f.got: dq $f` in .data, which the dynamic linker fills with
+// the definition that wins, as it fills a GOT entry.
 static void codegen_symbol_into(const char* reg, const char* name){
-    if(symbol_defined_in_tree(current_process, name)){
+    if(symbol_binds_locally(current_process, name)){
         asm_push("lea %s, [%s]", reg, codegen_symbol(name));
+        return;
+    }
+    if(symbol_defined_in_tree(current_process, name)){
+        bool known = false;
+        for(int i = 0; i < vector_count(codegen_pic_slots) && !known; i++){
+            known = S_EQ(*(const char**)vector_at(codegen_pic_slots, i), name);
+        }
+        if(!known){
+            vector_push(codegen_pic_slots, &name);
+            char* slot = malloc(2 * IDENTIFIER_MAX_LENGTH + 32);
+            // `wrt ..sym`: a relocation against the symbol, not the
+            // section NASM would otherwise name.
+            sprintf(slot, "%s.got: dq %s wrt ..sym", codegen_symbol(name), codegen_symbol(name));
+            vector_push(current_process->generator->custom_data_section, &slot);
+        }
+        asm_push("mov %s, [%s.got]", reg, codegen_symbol(name));
         return;
     }
     asm_push("mov %s, [rel %s wrt ..gotpc]", reg, codegen_symbol(name));
@@ -1382,7 +1407,8 @@ static void codegen_generate_body(struct node* node, struct history* history){
 // home area, so they continue it.
 static void codegen_generate_function_with_body(struct node* node){
     codegen_register_function(node, 0);
-    if(!(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC)){
+    // Under -fPIC the line came first (codegen_pic_function_globals).
+    if(!(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC) && !(current_process->flags & COMPILE_PROCESS_PIC)){
         asm_push("global %s", codegen_symbol(node->func.name));
     }
     asm_push("; %s function", node->func.name);
@@ -1565,11 +1591,18 @@ static const char* asm_keyword_for_size(size_t size, char* tmp_buf){
     return tmp_buf;
 }
 
-// a global's symbol is global unless it is static.
+// a global's symbol is global unless it is static. In a shared
+// object it is also typed and sized: a program that uses it gets a copy
+// relocation, which copies that many bytes.
 static void codegen_global_label(struct node* node){
-    if(!(node->var.type.flags & DATATYPE_FLAG_IS_STATIC)){
-        asm_push("global %s", codegen_symbol(node->var.name));
+    if(node->var.type.flags & DATATYPE_FLAG_IS_STATIC){
+        return;
     }
+    if(current_process->flags & COMPILE_PROCESS_PIC){
+        asm_push("global %s:data %lu", codegen_symbol(node->var.name), (unsigned long)variable_size(node));
+        return;
+    }
+    asm_push("global %s", codegen_symbol(node->var.name));
 }
 
 static void codegen_generate_global_variable_for_primitive(struct node* node){
@@ -1597,8 +1630,29 @@ static void codegen_init_value(size_t size, long long value){
     asm_push("%s %lld", codegen_init_nasm_size(size), value);
 }
 
+// Under -fPIC every exported function is declared global, and typed,
+// before the data: `wrt ..sym` in an initializer or a slot (below,
+// codegen_symbol_into) needs the symbol to be global already.
+static void codegen_pic_function_globals(void){
+    if(!(current_process->flags & COMPILE_PROCESS_PIC)){
+        return;
+    }
+    struct vector* tree = current_process->node_tree_vec;
+    for(int i = 0; i < vector_count(tree); i++){
+        struct node* node = *(struct node**)vector_at(tree, i);
+        if(node->type == NODE_TYPE_FUNCTION && node->func.body_n && !(node->func.rtype.flags & DATATYPE_FLAG_IS_STATIC)){
+            asm_push("global %s:function", codegen_symbol(node->func.name));
+        }
+    }
+}
+
+// NASM writes a reference to a symbol of this file as one to its
+// section; under -fPIC an exported symbol's must name the symbol
+// (`wrt ..sym`), so the word holds the definition that wins.
 static void codegen_init_symbol(size_t size, const char* symbol){
-    asm_push("%s %s", codegen_init_nasm_size(size), codegen_symbol(symbol));
+    bool by_symbol = (current_process->flags & COMPILE_PROCESS_PIC) && symbol_defined_in_tree(current_process, symbol)
+        && !symbol_binds_locally(current_process, symbol);
+    asm_push("%s %s%s", codegen_init_nasm_size(size), codegen_symbol(symbol), by_symbol ? " wrt ..sym" : "");
 }
 
 static void codegen_init_zero(size_t count){
@@ -1800,9 +1854,11 @@ int codegen_x86_64(struct compile_process* process){
     current_process = process;
     exp64_begin(&x86_64_ops, process);
     scope_create_root(process);
+    codegen_pic_slots = vector_create(sizeof(const char*));
 
     // rip-relative [name] for every global access.
     asm_push("default rel");
+    codegen_pic_function_globals();
     vector_set_peek_pointer(process->node_tree_vec, 0);
     codegen_new_scope(0);
     codegen_generate_data_section();

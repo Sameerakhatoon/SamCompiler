@@ -24,6 +24,6 @@ gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 "$bin" >/dev/null
 got="$(cat "$outfile")"
 assert_contains "$got" "'h', 'e', 'l', 'l', 'o'" "string literal expanded in .rodata"
-assert_contains "$got" "mov eax, str_"            "string label moved into eax"
+assert_contains "$got" "lea eax, [esi+str_"       "string label into eax, GOT-relative"
 assert_contains "$got" "push eax"                 "pushed as argument"
 pass

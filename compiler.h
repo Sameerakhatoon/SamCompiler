@@ -473,6 +473,12 @@ struct target {
     const char* asm_cmd;
     const char* link_cmd;
     const char* link_fallback_cmd;
+    // the same, for a program linked against a shared
+    // library (a .so input; a dynamic PIE, 0 means link_cmd) and for
+    // `-shared` (a shared object).
+    const char* link_dynamic_cmd;
+    const char* link_shared_cmd;
+    const char* link_shared_fallback_cmd;
     // Prefix for running a linked binary on the host, "" if native.
     const char* run_cmd;
 
@@ -1193,6 +1199,10 @@ enum {
     // -E: stop after the preprocessor and write the expanded tokens
     // as C text instead of asm.
     COMPILE_PROCESS_PREPROCESS_ONLY  = 0b00000100,
+    // -fPIC (or -shared): code for a shared object, where a global
+    // symbol this file defines may be interposed, so it is reached
+    // through the GOT like an undefined one.
+    COMPILE_PROCESS_PIC              = 0b00001000,
 };
 
 // ch108: entry / exit "label" book-keeping for break / continue.
@@ -1789,7 +1799,8 @@ bool          function_defined_in_tree(struct compile_process* process, const ch
 bool          variable_defined_in_tree(struct compile_process* process, const char* name);
 void          node_defined_forget(void);
 bool          symbol_defined_in_tree(struct compile_process* process, const char* name);
-size_t        function_node_stack_size(struct node* node);
+bool          symbol_binds_locally(struct compile_process* process, const char* name);
+size_t       function_node_stack_size(struct node* node);
 struct vector* function_node_argument_vec(struct node* node);
 
 struct resolver_array_data {

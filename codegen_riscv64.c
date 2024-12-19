@@ -149,9 +149,10 @@ static void codegen_symbol_into(const char* reg, const char* name){
 // reg = the address of a C function or variable. One this file defines
 // is pc-relative as above; any other may be in a shared library, so a
 // PIE reads its address from the GOT: `la` under `.option pic` is
-// auipc + ld from the symbol's GOT entry.
+// auipc + ld from the symbol's GOT entry. Under
+// -fPIC so does an exported one, which may be interposed.
 static void codegen_c_symbol_into(const char* reg, const char* name){
-    if(symbol_defined_in_tree(current_process, name)){
+    if(symbol_binds_locally(current_process, name)){
         codegen_symbol_into(reg, name);
         return;
     }
@@ -1409,10 +1410,17 @@ static const char* asm_directive_for_size(size_t size){
     return 0;
 }
 
-// a global's symbol is global unless it is static.
+// a global's symbol is global unless it is static. In a shared
+// object it is also typed and sized: a program that uses it gets a copy
+// relocation, which copies that many bytes.
 static void codegen_global_label(struct node* node){
-    if(!(node->var.type.flags & DATATYPE_FLAG_IS_STATIC)){
-        asm_push(".globl %s", node->var.name);
+    if(node->var.type.flags & DATATYPE_FLAG_IS_STATIC){
+        return;
+    }
+    asm_push(".globl %s", node->var.name);
+    if(current_process->flags & COMPILE_PROCESS_PIC){
+        asm_push(".type %s, @object", node->var.name);
+        asm_push(".size %s, %lu", node->var.name, (unsigned long)variable_size(node));
     }
 }
 

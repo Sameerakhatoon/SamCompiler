@@ -1,3 +1,4 @@
+extern _GLOBAL_OFFSET_TABLE_
 section .data
 ; scanner sc
 global $sc
@@ -9,6 +10,12 @@ $is_space:
 push ebp
 mov ebp, esp
 push ebx
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword [ebp+8]
 push dword 32
 pop ecx
@@ -19,9 +26,13 @@ movzx eax, al
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret
@@ -32,10 +43,16 @@ push ebp
 mov ebp, esp
 sub esp, 16
 push ebx
-mov ebx, [$sc]
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
+mov ebx, [esi+$sc wrt ..gotoff]
 push ebx
 pop ebx
-push dword [$sc+4]
+push dword [esi+$sc+4 wrt ..gotoff]
 pop eax
 push eax
 pop eax
@@ -61,6 +78,8 @@ je .if_2
 push dword 0
 pop eax
 mov ebx, [ebp-20]
+mov esi, [ebp-24]
+mov edi, [ebp-28]
 mov esp, ebp
 pop ebp
 ret
@@ -69,13 +88,15 @@ jmp .if_end_1
 .if_end_1:
 .entry_point_3:
 .switch_stmt_5:
-lea ebx, [$is_space]
+lea ebx, [esi+$is_space wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_6], ebx
+mov dword [esi+function_call_6 wrt ..gotoff], ebx
+sub esp, 8
 push dword [ebp-4]
-call [function_call_6]
+call [esi+function_call_6 wrt ..gotoff]
 add esp, 4
+add esp, 8
 push eax
 pop eax
 push eax
@@ -89,11 +110,11 @@ jmp .exit_point_4
 ; CASE 1
 push dword 0
 pop eax
-mov dword [$sc+12], eax
+mov dword [esi+$sc+12 wrt ..gotoff], eax
 jmp .exit_point_4
 .switch_stmt_5_case_0:
 ; CASE 0
-push dword [$sc+12]
+push dword [esi+$sc+12 wrt ..gotoff]
 pop eax
 push eax
 push dword 0
@@ -106,7 +127,7 @@ push eax
 pop eax
 cmp eax, 0
 je .if_8
-push dword [$sc+8]
+push dword [esi+$sc+8 wrt ..gotoff]
 pop eax
 push eax
 push dword 1
@@ -115,17 +136,17 @@ pop eax
 add eax, ecx
 push eax
 pop eax
-mov dword [$sc+8], eax
+mov dword [esi+$sc+8 wrt ..gotoff], eax
 push dword 1
 pop eax
-mov dword [$sc+12], eax
+mov dword [esi+$sc+12 wrt ..gotoff], eax
 jmp .if_end_7
 .if_8:
 .if_end_7:
 jmp .exit_point_4
 .switch_stmt_5_end:
 .exit_point_4:
-push dword [$sc+4]
+push dword [esi+$sc+4 wrt ..gotoff]
 pop eax
 push eax
 push dword 1
@@ -134,13 +155,17 @@ pop eax
 add eax, ecx
 push eax
 pop eax
-mov dword [$sc+4], eax
+mov dword [esi+$sc+4 wrt ..gotoff], eax
 push dword 0
 pop eax
 mov ebx, [ebp-20]
+mov esi, [ebp-24]
+mov edi, [ebp-28]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 add esp, 16
 pop ebp
@@ -151,25 +176,31 @@ $main:
 push ebp
 mov ebp, esp
 push ebx
-mov eax, str_9
+push esi
+push edi
+call .pic_base
+.pic_base:
+pop esi
+add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
+lea eax, [esi+str_9 wrt ..gotoff]
 push eax
 pop eax
-mov dword [$sc], eax
+mov dword [esi+$sc wrt ..gotoff], eax
 push dword 0
 pop eax
-mov dword [$sc+4], eax
+mov dword [esi+$sc+4 wrt ..gotoff], eax
 push dword 0
 pop eax
-mov dword [$sc+8], eax
+mov dword [esi+$sc+8 wrt ..gotoff], eax
 push dword 0
 pop eax
-mov dword [$sc+12], eax
+mov dword [esi+$sc+12 wrt ..gotoff], eax
 .entry_point_10:
 .while_start_12:
-mov ebx, [$sc]
+mov ebx, [esi+$sc wrt ..gotoff]
 push ebx
 pop ebx
-push dword [$sc+4]
+push dword [esi+$sc+4 wrt ..gotoff]
 pop eax
 push eax
 pop eax
@@ -189,13 +220,13 @@ push eax
 pop eax
 cmp eax, 0
 je .while_end_13
-lea ebx, [$scan_step]
+lea ebx, [esi+$scan_step wrt ..gotoff]
 push ebx
 pop ebx
-mov dword [function_call_14], ebx
-sub esp, 4
-call [function_call_14]
-add esp, 4
+mov dword [esi+function_call_14 wrt ..gotoff], ebx
+sub esp, 12
+call [esi+function_call_14 wrt ..gotoff]
+add esp, 12
 push eax
 pop eax
 push eax
@@ -203,14 +234,18 @@ add esp, 4
 jmp .while_start_12
 .while_end_13:
 .exit_point_11:
-push dword [$sc+8]
+push dword [esi+$sc+8 wrt ..gotoff]
 pop eax
 push eax
 pop eax
 mov ebx, [ebp-4]
+mov esi, [ebp-8]
+mov edi, [ebp-12]
 mov esp, ebp
 pop ebp
 ret
+pop edi
+pop esi
 pop ebx
 pop ebp
 ret

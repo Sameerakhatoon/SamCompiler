@@ -29,6 +29,6 @@ assert_contains "$got" "push dword 42"   "argument pushed"
 # ch187 changed the indirect call to go through a per-call .data
 # slot instead of ecx (so arguments that are themselves calls can't
 # clobber the target).
-assert_contains "$got" "call [function_call_" "indirect call via the per-call .data slot"
+assert_contains "$got" "call [esi+function_call_" "indirect call via the per-call .data slot, GOT-relative"
 assert_contains "$got" "add esp,"        "stack reclaimed after the call"
 pass
