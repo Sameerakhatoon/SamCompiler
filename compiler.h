@@ -952,6 +952,7 @@ struct symbol* symresolver_register_symbol(struct compile_process* process, cons
 // ch74: returns the function's stack_addition (bytes between EBP and
 // the first argument; typically 8 = saved EBP + return EIP).
 size_t function_node_argument_stack_addition(struct node* node);
+long   arithmetic(struct compile_process* compiler, long left_operand, long right_operand, const char* op, bool* success);
 struct node*   symresolver_node(struct symbol* sym);
 void           symresolver_build_for_node(struct compile_process* process, struct node* node);
 

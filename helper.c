@@ -288,3 +288,43 @@ int array_offset(struct datatype* dtype, int index, int index_value){
     }
     return array_multiplier(dtype, index, index_value) * datatype_element_size(dtype);
 }
+
+// ch213: arithmetic shim used by the preprocessor expression evaluator.
+// Returns the result of left op right for a fixed set of operators;
+// writes false to *success and returns 0 when op is unsupported.
+long arithmetic(struct compile_process* compiler, long left_operand, long right_operand, const char* op, bool* success){
+    *success = true;
+    int result = 0;
+    if(S_EQ(op, "*")){
+        result = left_operand * right_operand;
+    } else if(S_EQ(op, "/")){
+        result = left_operand / right_operand;
+    } else if(S_EQ(op, "+")){
+        result = left_operand + right_operand;
+    } else if(S_EQ(op, "-")){
+        result = left_operand - right_operand;
+    } else if(S_EQ(op, "==")){
+        result = left_operand == right_operand;
+    } else if(S_EQ(op, "!=")){
+        result = left_operand != right_operand;
+    } else if(S_EQ(op, ">")){
+        result = left_operand > right_operand;
+    } else if(S_EQ(op, "<")){
+        result = left_operand < right_operand;
+    } else if(S_EQ(op, ">=")){
+        result = left_operand >= right_operand;
+    } else if(S_EQ(op, "<=")){
+        result = left_operand <= right_operand;
+    } else if(S_EQ(op, "<<")){
+        result = left_operand << right_operand;
+    } else if(S_EQ(op, ">>")){
+        result = left_operand >> right_operand;
+    } else if(S_EQ(op, "&&")){
+        result = left_operand && right_operand;
+    } else if(S_EQ(op, "||")){
+        result = left_operand || right_operand;
+    } else {
+        *success = false;
+    }
+    return result;
+}
