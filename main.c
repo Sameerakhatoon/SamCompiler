@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <elf.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include "helpers/vector.h"
@@ -331,6 +332,92 @@ static const char* main_tmp_path(int index, const char* suffix){
     return main_track_tmp(path);
 }
 
+// NASM gives an undefined symbol no type, and ld rejects a TLS
+// relocation against a symbol that is not STT_TLS ("mismatches non-TLS
+// reference"). The x86 backends name every extern thread-local variable
+// they refer to in a `; tls extern NAME` line of the asm; the symbol of
+// each is made STT_TLS in the object NASM wrote. Other objects and
+// assemblers are left as they are. Returns nonzero on an error.
+static bool main_tls_extern_named(struct vector* names, const char* name){
+    for(int i = 0; i < vector_count(names); i++){
+        if(S_EQ(*(const char**)vector_at(names, i), name)){
+            return true;
+        }
+    }
+    return false;
+}
+
+static int main_mark_tls_externs(const char* asm_file, const char* object_file){
+    FILE* in = fopen(asm_file, "r");
+    if(!in){
+        return 0;
+    }
+    struct vector* names = vector_create(sizeof(const char*));
+    char line[IDENTIFIER_MAX_LENGTH + 64];
+    while(fgets(line, sizeof(line), in)){
+        if(!strncmp(line, "; tls extern ", 13)){
+            line[strcspn(line, "\r\n")] = 0;
+            char* name = strdup(line + 13);
+            vector_push(names, &name);
+        }
+    }
+    fclose(in);
+    int rc = 0;
+    if(vector_count(names)){
+        FILE* f = fopen(object_file, "r+b");
+        unsigned char* data = 0;
+        long size = 0;
+        if(!f || fseek(f, 0, SEEK_END) || (size = ftell(f)) < (long)sizeof(Elf32_Ehdr) || fseek(f, 0, SEEK_SET)
+           || !(data = malloc(size)) || fread(data, 1, size, f) != (size_t)size){
+            main_error("cannot read %s", object_file);
+            rc = 1;
+        } else if(data[EI_CLASS] == ELFCLASS64){
+            Elf64_Ehdr* eh = (Elf64_Ehdr*)data;
+            Elf64_Shdr* sh = (Elf64_Shdr*)(data + eh->e_shoff);
+            for(int s = 0; s < eh->e_shnum; s++){
+                if(sh[s].sh_type != SHT_SYMTAB){
+                    continue;
+                }
+                Elf64_Sym* sym = (Elf64_Sym*)(data + sh[s].sh_offset);
+                const char* strtab = (const char*)(data + sh[sh[s].sh_link].sh_offset);
+                for(size_t k = 0; k < sh[s].sh_size / sizeof(Elf64_Sym); k++){
+                    if(sym[k].st_shndx == SHN_UNDEF && sym[k].st_name && main_tls_extern_named(names, strtab + sym[k].st_name)){
+                        sym[k].st_info = ELF64_ST_INFO(ELF64_ST_BIND(sym[k].st_info), STT_TLS);
+                    }
+                }
+            }
+        } else {
+            Elf32_Ehdr* eh = (Elf32_Ehdr*)data;
+            Elf32_Shdr* sh = (Elf32_Shdr*)(data + eh->e_shoff);
+            for(int s = 0; s < eh->e_shnum; s++){
+                if(sh[s].sh_type != SHT_SYMTAB){
+                    continue;
+                }
+                Elf32_Sym* sym = (Elf32_Sym*)(data + sh[s].sh_offset);
+                const char* strtab = (const char*)(data + sh[sh[s].sh_link].sh_offset);
+                for(size_t k = 0; k < sh[s].sh_size / sizeof(Elf32_Sym); k++){
+                    if(sym[k].st_shndx == SHN_UNDEF && sym[k].st_name && main_tls_extern_named(names, strtab + sym[k].st_name)){
+                        sym[k].st_info = ELF32_ST_INFO(ELF32_ST_BIND(sym[k].st_info), STT_TLS);
+                    }
+                }
+            }
+        }
+        if(!rc && (fseek(f, 0, SEEK_SET) || fwrite(data, 1, size, f) != (size_t)size)){
+            main_error("cannot write %s", object_file);
+            rc = 1;
+        }
+        free(data);
+        if(f){
+            fclose(f);
+        }
+    }
+    for(int i = 0; i < vector_count(names); i++){
+        free(*(char**)vector_at(names, i));
+    }
+    vector_free(names);
+    return rc;
+}
+
 static int main_assemble(const struct target* target, const char* asm_file, const char* object_file){
     char quoted_asm[PATH_MAX * 4 + 3];
     char quoted_object[PATH_MAX * 4 + 3];
@@ -341,7 +428,8 @@ static int main_assemble(const struct target* target, const char* asm_file, cons
         return 1;
     }
     snprintf(cmd, sizeof(cmd), target->asm_cmd, quoted_asm, quoted_object);
-    return main_run(cmd);
+    int rc = main_run(cmd);
+    return rc ? rc : main_mark_tls_externs(asm_file, object_file);
 }
 
 // `objects` is already quoted and space-separated.
@@ -635,7 +723,15 @@ static int main_legacy(const struct target* target, const char* input_file, cons
         snprintf(nasm_cmd, sizeof(nasm_cmd), "%s && %s", asm_cmd, link_cmd);
     }
     printf("%s\n", nasm_cmd);
-    int rc = system(nasm_cmd);
+    fflush(stdout);
+    // Assembled, the object's extern thread-locals marked, then linked.
+    int rc = system(asm_cmd);
+    if(rc == 0 && main_mark_tls_externs(output_file, nasm_output_file)){
+        rc = 1;
+    }
+    if(rc == 0 && !object){
+        rc = system(link_cmd);
+    }
     if(rc != 0){
         printf("Issue assemblign the assembly file with NASM and linking with gcc\n");
         // system() returns a wait status; 256 truncated to an exit

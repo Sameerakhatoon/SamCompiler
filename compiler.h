@@ -328,6 +328,45 @@ void codegen_x86_native_vla_alloc(struct generator* generator, struct native_fun
 void codegen_x86_native_vla_restore(struct generator* generator, struct native_function* func, struct vector* arguments);
 struct native_function* native_function_get(struct compile_process* compiler, const char* name);
 
+// gcc's __atomic and __sync builtins (atomic.c).
+enum {
+    ATOMIC_BUILTIN_LOAD,              // __atomic_load_n(p, mo): *p
+    ATOMIC_BUILTIN_STORE,             // __atomic_store_n(p, v, mo)
+    ATOMIC_BUILTIN_EXCHANGE,          // (p, v, mo): the old *p, *p = v
+    ATOMIC_BUILTIN_CAS,               // (p, expected*, desired, weak, so, fo): stored?
+    ATOMIC_BUILTIN_CAS_VALUE,         // __sync_val_compare_and_swap(p, old, new): the old *p
+    ATOMIC_BUILTIN_CAS_BOOL,          // __sync_bool_compare_and_swap(p, old, new): stored?
+    ATOMIC_BUILTIN_FETCH_OP,          // (p, v[, mo]): the old *p, *p = *p op v
+    ATOMIC_BUILTIN_OP_FETCH,          // (p, v[, mo]): the new *p
+    ATOMIC_BUILTIN_TEST_AND_SET,      // (p, mo): the byte at p set, was it set?
+    ATOMIC_BUILTIN_CLEAR,             // (p, mo): the byte at p cleared
+    ATOMIC_BUILTIN_RELEASE,           // __sync_lock_release(p): *p = 0
+    ATOMIC_BUILTIN_FENCE,             // (mo)
+    ATOMIC_BUILTIN_SIGNAL_FENCE,      // (mo): orders nothing the compiler moves
+    ATOMIC_BUILTIN_LOCK_FREE,         // (size, p)
+    ATOMIC_BUILTIN_GENERIC_LOAD,      // __atomic_load(p, ret*, mo)
+    ATOMIC_BUILTIN_GENERIC_STORE,     // __atomic_store(p, val*, mo)
+    ATOMIC_BUILTIN_GENERIC_EXCHANGE,  // __atomic_exchange(p, val*, ret*, mo)
+    ATOMIC_BUILTIN_GENERIC_CAS,       // __atomic_compare_exchange(p, expected*, desired*, weak, so, fo)
+};
+
+struct atomic_builtin {
+    const char* name;
+    int         kind;
+    // FETCH_OP and OP_FETCH: + - & | ^ or "nand".
+    const char* op;
+    // The number of arguments.
+    int         args;
+};
+
+const struct atomic_builtin* atomic_builtin_get(const char* name);
+void atomic_builtins_register(struct compile_process* process);
+bool datatype_is_atomic(struct datatype* t);
+const char* tls_alias(struct compile_process* process, const char* name);
+void codegen_x86_native_atomic(struct generator* generator, struct native_function* func, struct vector* arguments);
+// i386's thread-local addresses (parser_thread_local_object).
+void codegen_x86_native_tls_address(struct generator* generator, struct native_function* func, struct vector* arguments);
+
 // ch200: preprocessor scaffolding. Definitions, included files, the
 // preprocessor itself - all live in their own structs so the
 // preprocessor can shuttle state across nested includes.
@@ -724,6 +763,10 @@ struct datatype {
     const char* type_str;
     size_t size;
     int    pointer_depth;
+    // _Atomic. 0 when nothing is atomic, else 1 + the pointer
+    // depth whose object is: 1 for `_Atomic int x` and the `*p` of
+    // `_Atomic int *p`, 2 for `_Atomic(int*) q` (q itself).
+    int    atomic_level;
     union {
         struct node* struct_node;
         struct node* union_node;
@@ -1479,6 +1522,24 @@ struct exp64_ops {
     // aarch64: store the q register `reg` (a long double argument) at
     // the frame offset; NULL elsewhere.
     void (*ld_spill_q)(int reg, int offset);
+    // C11 atomics, every one sequentially consistent.
+    // reg = the expression stack's slot `depth` from the top (0 is the
+    // top), which stays where it is.
+    void (*peek)(int reg, int depth);
+    void (*atomic_load)(int size, bool is_signed);              // R0 = *R0
+    void (*atomic_store)(int size);                             // *R1 = R0, R0 kept
+    // R0 = the old value at [R1] (its low `size` bytes count), which
+    // becomes old op R0: + - & | ^, "nand" ~(old & R0), "=" R0.
+    void (*atomic_rmw)(const char* op, int size);
+    // Compare and swap at the address in slot `depth`: when its `size`
+    // bytes equal those of R1 they become R0's. R0 = the bytes that
+    // were there (the low `size` count), R1 kept.
+    void (*atomic_cas)(int size, int depth);
+    void (*fence)(void);
+    // R0 = the address of this thread's `name`. defined_here:
+    // this file defines it (local-exec where the assembler has it),
+    // else initial-exec through the GOT.
+    void (*tls_address)(const char* name, bool defined_here);
 };
 
 // The floating-point argument registers every 64-bit ABI here has:
@@ -2008,6 +2069,9 @@ enum {
     DATATYPE_FLAG_IS_FUNCTION_POINTER    = 0b100000000000,
     // _Bool: an unsigned char that only ever holds 0 or 1.
     DATATYPE_FLAG_IS_BOOL                = 0b1000000000000,
+    // _Thread_local (or gcc's __thread): one object per
+    // thread, in .tdata or .tbss.
+    DATATYPE_FLAG_IS_THREAD_LOCAL        = 0b10000000000000,
 };
 
 enum {

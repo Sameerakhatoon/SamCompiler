@@ -926,6 +926,11 @@ struct resolver_entity* resolver_follow_array_bracket(struct resolver_process* r
     struct resolver_scope* scope = 0;
     struct resolver_entity* last_entity = resolver_result_peek_ignore_rule_entity(result);
     scope = last_entity->scope;
+    // A cast of a call has no scope of its own: `((int*)f())[i]` (the
+    // i386 thread-local arrays) asserted here.
+    if(!scope){
+        scope = resolver->scope.current;
+    }
     dtype = last_entity->dtype;
     if(last_entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET){
         index = last_entity->array.index + 1;

@@ -378,6 +378,12 @@ static struct datatype exp64_identifier_address(struct node* node){
                 // address of the caller's copy.
                 ops->load(DATA_SIZE_DDWORD, false);
             }
+        } else if(entity->dtype.flags & DATATYPE_FLAG_IS_THREAD_LOCAL){
+            // this thread's copy. A static local is always
+            // defined here.
+            const char* name = data ? data->base_address : entity->name;
+            bool here = !S_EQ(name, entity->name) || variable_defined_in_tree(current_process, name);
+            ops->tls_address(name, here);
         } else {
             // The symbol: the name, or a static local's own label.
             ops->symbol_address(data ? data->base_address : entity->name);
@@ -495,10 +501,27 @@ static struct datatype exp64_load(struct datatype* t, bool decay){
         return decay ? exp64_decay(t) : *t;
     }
     if(exp64_in_memory(t) || exp64_is_void(t)){
+        if(datatype_is_atomic(t)){
+            compiler_error(current_process, "An _Atomic struct, union or void object is not supported\n");
+        }
+        return *t;
+    }
+    if(datatype_is_atomic(t)){
+        ops->atomic_load(exp64_scalar_size(t), exp64_is_signed(t));
         return *t;
     }
     ops->load(exp64_scalar_size(t), exp64_is_signed(t));
     return *t;
+}
+
+// *R1 = R0 for an object of type t: an atomic store for an _Atomic one
+// (C11 6.5.16.1 with 5.1.2.4: sequentially consistent).
+static void exp64_store(struct datatype* t){
+    if(datatype_is_atomic(t)){
+        ops->atomic_store(exp64_scalar_size(t));
+        return;
+    }
+    ops->store(exp64_scalar_size(t));
 }
 
 // ---------------------------------------------------------------
@@ -739,6 +762,144 @@ static struct datatype exp64_ld_store(struct datatype* rt, struct datatype* lt){
     return *lt;
 }
 
+// ---------------------------------------------------------------
+// Atomics
+// ---------------------------------------------------------------
+
+static struct datatype exp64_void_type(void){
+    struct datatype t = {0};
+    t.type     = DATA_TYPE_VOID;
+    t.type_str = "void";
+    return t;
+}
+
+// The bytes of an atomic access to an object of type t: a scalar of 1,
+// 2, 4 or 8 bytes, which every target has atomic instructions for.
+static int exp64_atomic_size(struct datatype* t){
+    if(exp64_is_struct(t) || exp64_is_void(t) || exp64_is_array(t)){
+        compiler_error(current_process, "An atomic operation needs an integer, pointer or floating object, not a struct, union, array or void\n");
+    }
+    return exp64_scalar_size(t);
+}
+
+// The value type of an atomic object: the same type, not atomic.
+static struct datatype exp64_unqualified(struct datatype* t){
+    struct datatype u = *t;
+    u.atomic_level = 0;
+    return u;
+}
+
+// R0 (of type `from`) converted for storing in an object of type `to`:
+// as exp64_convert, and to a _Bool its test against 0 (C11 6.3.1.2).
+// Keeps nothing in R1.
+static void exp64_convert_for_store(struct datatype* from, struct datatype* to){
+    if((to->flags & DATATYPE_FLAG_IS_BOOL) && !exp64_is_pointer(to) && !exp64_is_floating(from)){
+        ops->imm(1, 0);
+        ops->compare("!=", false);
+        return;
+    }
+    exp64_convert(0, from, to);
+}
+
+// R0 = R0 op R1 for the fetch-and-op operators on an object of type t,
+// in canonical form: what the backend's atomic_rmw stored.
+static void exp64_atomic_op_value(const char* op, struct datatype* t){
+    int size = exp64_scalar_size(t);
+    int width = size == DATA_SIZE_DDWORD ? DATA_SIZE_DDWORD : DATA_SIZE_DWORD;
+    if(S_EQ(op, "nand")){
+        ops->binop("&", width, false);
+        ops->unop("~", width);
+    } else {
+        ops->binop(op, width, exp64_is_signed(t));
+    }
+    if(size < DATA_SIZE_DDWORD){
+        ops->extend(0, size, exp64_is_signed(t));
+    }
+}
+
+// `a op= v`, `++a`, `a++` on an _Atomic a whose address is in R0 (C11
+// 6.5.2.4, 6.5.16.2): one atomic read-modify-write. + - & | ^ of an
+// integer on an integer object, and + - on a pointer (the step scaled),
+// are the backend's fetch-and-op: the low bits of the result only
+// depend on the low bits of the operands. Anything else (* / % << >>,
+// a floating object or operand, a _Bool) is a compare-and-swap loop that
+// works out `old op v` in the usual arithmetic conversions and stores
+// it only if no other thread changed the object meanwhile, else tries
+// again with the value it found. right is NULL for ++ and --. The value
+// is the new one, the old one for the postfix forms.
+static struct datatype exp64_atomic_update(const char* op, struct datatype* lt, struct node* right, bool postfix){
+    int size = exp64_atomic_size(lt);
+    struct datatype t = exp64_unqualified(lt);
+    struct datatype address = exp64_pointer_to(lt);
+    ops->push(&address);                                    // [A]
+    struct datatype rt = exp64_int_type(DATA_SIZE_DWORD, true);
+    if(right){
+        rt = exp64_value(right);
+    } else {
+        ops->imm(0, 1);
+    }
+    bool integer_operand = !exp64_is_pointer(&rt) && !exp64_is_floating(&rt) && !exp64_is_struct(&rt) && !exp64_is_void(&rt);
+    bool bitwise = S_EQ(op, "&") || S_EQ(op, "|") || S_EQ(op, "^");
+    bool additive = S_EQ(op, "+") || S_EQ(op, "-");
+    bool fetch = integer_operand && !exp64_is_floating(&t) && !(t.flags & DATATYPE_FLAG_IS_BOOL)
+              && (additive || (bitwise && !exp64_is_pointer(&t)));
+    if(fetch){
+        if(exp64_is_pointer(&t)){
+            struct datatype element = exp64_deref(&t);
+            struct datatype wide = exp64_int_type(DATA_SIZE_DDWORD, true);
+            exp64_convert(0, &rt, &wide);
+            if(exp64_size(&element) > 1){
+                ops->mul_imm(0, exp64_size(&element));
+            }
+            rt = wide;
+        }
+        ops->push(&rt);                                     // [A, v]
+        ops->peek(1, 1);
+        ops->atomic_rmw(op, size);                          // R0 = old
+        if(size < DATA_SIZE_DDWORD){
+            ops->extend(0, size, exp64_is_signed(&t));
+        }
+        if(!postfix){
+            ops->peek(1, 0);
+            exp64_atomic_op_value(op, &t);
+        }
+        ops->drop(2);
+        return t;
+    }
+    ops->push(&rt);                                         // [A, v]
+    ops->peek(0, 1);
+    ops->atomic_load(size, exp64_is_signed(&t));
+    ops->mov_r1();                                          // R1 = old
+    int retry = exp64_new_label();
+    ops->label(retry);
+    ops->swap();
+    ops->push(&t);                                          // [A, v, old]
+    ops->peek(1, 1);
+    struct datatype result = exp64_arith(op, &t, &rt);
+    exp64_convert_for_store(&result, &t);                   // R0 = new
+    ops->pop(1);                                            // R1 = old, [A, v]
+    ops->atomic_cas(size, 1);                               // R0 = what was there
+    if(size < DATA_SIZE_DDWORD){
+        ops->extend(0, size, exp64_is_signed(&t));
+    }
+    // Stored when that was old; otherwise it is the old value of the
+    // next try.
+    ops->push(&t);                                          // [A, v, seen]
+    ops->compare("==", false);
+    ops->mov_r1();
+    ops->pop(0);                                            // R0 = seen, [A, v]
+    ops->swap();                                            // R0 = stored?, R1 = seen
+    ops->branch(retry, EXP64_BRANCH_IF_ZERO);
+    ops->swap();                                            // R0 = old
+    if(!postfix){
+        ops->peek(1, 0);
+        result = exp64_arith(op, &t, &rt);
+        exp64_convert_for_store(&result, &t);
+    }
+    ops->drop(2);
+    return t;
+}
+
 // `a = b` and `a op= b`. The target's address is worked out once.
 static struct datatype exp64_assignment(struct node* node){
     const char* op = node->exp.op;
@@ -780,6 +941,9 @@ static struct datatype exp64_assignment(struct node* node){
         char arith_op[4] = {0};
         strncpy(arith_op, op, strlen(op) - 1);
         lt = exp64_address(node->exp.left);
+        if(datatype_is_atomic(&lt)){
+            return exp64_atomic_update(arith_op, &lt, node->exp.right, false);
+        }
         ops->push(&lt);
         int target = vector_count(current_function->func.frame.elements) - 1;
         if(exp64_is_ldouble(&lt)){
@@ -829,7 +993,7 @@ static struct datatype exp64_assignment(struct node* node){
         exp64_convert(0, &result, &lt);
         ops->pop(1);
     }
-    ops->store(exp64_scalar_size(&lt));
+    exp64_store(&lt);
     return lt;
 }
 
@@ -1481,6 +1645,221 @@ int exp64_return_pieces(struct datatype* dtype, struct exp64_piece* out){
     return count;
 }
 
+// argument i of an atomic builtin.
+static struct node* exp64_atomic_argument(struct vector* args, int i){
+    return *(struct node**)vector_at(args, i);
+}
+
+// A memory order argument: evaluated for its side effects, if it can
+// have any, and otherwise ignored (every operation is seq_cst).
+static void exp64_atomic_order(struct vector* args, int i){
+    struct node* order = exp64_atomic_argument(args, i);
+    if(order->type != NODE_TYPE_NUMBER){
+        exp64_value(order);
+    }
+}
+
+// R0 = the value of argument i as an object of type t.
+static void exp64_atomic_operand(struct vector* args, int i, struct datatype* t){
+    struct datatype vt = exp64_value(exp64_atomic_argument(args, i));
+    exp64_convert_for_store(&vt, t);
+}
+
+// R0 = the value of the object of type t argument i points to (the
+// generic forms pass their values by address).
+static void exp64_atomic_pointed(struct vector* args, int i, struct datatype* t){
+    struct datatype pt = exp64_value(exp64_atomic_argument(args, i));
+    if(!exp64_is_pointer(&pt)){
+        compiler_error(current_process, "Argument %i of the atomic builtin must be a pointer\n", i + 1);
+    }
+    ops->load(exp64_scalar_size(t), exp64_is_signed(t));
+}
+
+// gcc's __atomic and __sync builtins (atomic.c): the object's address is
+// pushed first, [A], and every access to the object is one atomic
+// instruction (or LL/SC loop) of the backend. The value type is the
+// type the first argument points to; the builtins do not scale an
+// operand for a pointer object, as in gcc.
+static struct datatype exp64_atomic_builtin(const struct atomic_builtin* b, struct vector* args){
+    int kind = b->kind;
+    if(vector_count(args) != b->args){
+        compiler_error(current_process, "%s expects %i arguments\n", b->name, b->args);
+    }
+    struct datatype int_type = exp64_int_type(DATA_SIZE_DWORD, true);
+    if(kind == ATOMIC_BUILTIN_FENCE || kind == ATOMIC_BUILTIN_SIGNAL_FENCE){
+        if(b->args){
+            exp64_atomic_order(args, 0);
+        }
+        if(kind == ATOMIC_BUILTIN_FENCE){
+            ops->fence();
+        }
+        return exp64_void_type();
+    }
+    if(kind == ATOMIC_BUILTIN_LOCK_FREE){
+        // Every size up to 8 bytes has its instructions.
+        struct datatype ulong = exp64_int_type(DATA_SIZE_DDWORD, false);
+        struct datatype st = exp64_value(exp64_atomic_argument(args, 0));
+        exp64_convert(0, &st, &ulong);
+        ops->imm(1, DATA_SIZE_DDWORD);
+        ops->compare("<=", false);
+        return int_type;
+    }
+    // The memory orders first: the arguments after them are on the
+    // stack meanwhile.
+    int orders = kind == ATOMIC_BUILTIN_CAS || kind == ATOMIC_BUILTIN_GENERIC_CAS ? 3
+               : b->args > 1 && strncmp(b->name, "__sync_", 7) ? 1 : 0;
+    for(int i = b->args - orders; i < b->args; i++){
+        exp64_atomic_order(args, i);
+    }
+    struct datatype pt = exp64_value(exp64_atomic_argument(args, 0));
+    if(!exp64_is_pointer(&pt)){
+        compiler_error(current_process, "The first argument of %s must be a pointer\n", b->name);
+    }
+    struct datatype pointee = exp64_deref(&pt);
+    struct datatype t = exp64_unqualified(&pointee);
+    if(kind == ATOMIC_BUILTIN_TEST_AND_SET || kind == ATOMIC_BUILTIN_CLEAR){
+        // These work on the byte at p, whatever it points to.
+        t = exp64_int_type(DATA_SIZE_BYTE, false);
+    }
+    int size = exp64_atomic_size(&t);
+    if((kind == ATOMIC_BUILTIN_FETCH_OP || kind == ATOMIC_BUILTIN_OP_FETCH) && exp64_is_floating(&t)){
+        compiler_error(current_process, "%s needs an integer or pointer object\n", b->name);
+    }
+    bool is_signed = exp64_is_signed(&t);
+    ops->push(&pt);                                         // [A]
+    switch(kind){
+        case ATOMIC_BUILTIN_LOAD:
+            ops->peek(0, 0);
+            ops->atomic_load(size, is_signed);
+            ops->drop(1);
+            return t;
+        case ATOMIC_BUILTIN_STORE:
+        case ATOMIC_BUILTIN_GENERIC_STORE:
+        case ATOMIC_BUILTIN_CLEAR:
+        case ATOMIC_BUILTIN_RELEASE:
+            if(kind == ATOMIC_BUILTIN_STORE){
+                exp64_atomic_operand(args, 1, &t);
+            } else if(kind == ATOMIC_BUILTIN_GENERIC_STORE){
+                exp64_atomic_pointed(args, 1, &t);
+            } else {
+                ops->imm(0, 0);
+            }
+            ops->peek(1, 0);
+            ops->atomic_store(size);
+            ops->drop(1);
+            return exp64_void_type();
+        case ATOMIC_BUILTIN_EXCHANGE:
+        case ATOMIC_BUILTIN_TEST_AND_SET:
+            if(kind == ATOMIC_BUILTIN_EXCHANGE){
+                exp64_atomic_operand(args, 1, &t);
+            } else {
+                ops->imm(0, 1);
+            }
+            ops->peek(1, 0);
+            ops->atomic_rmw("=", size);
+            if(size < DATA_SIZE_DDWORD){
+                ops->extend(0, size, is_signed);
+            }
+            ops->drop(1);
+            if(kind == ATOMIC_BUILTIN_TEST_AND_SET){
+                ops->imm(1, 0);
+                ops->compare("!=", false);
+                return int_type;
+            }
+            return t;
+        case ATOMIC_BUILTIN_GENERIC_LOAD: {
+            struct datatype rt = exp64_value(exp64_atomic_argument(args, 1));
+            ops->push(&rt);                                 // [A, ret]
+            ops->peek(0, 1);
+            ops->atomic_load(size, is_signed);
+            ops->peek(1, 0);
+            ops->store(size);
+            ops->drop(2);
+            return exp64_void_type();
+        }
+        case ATOMIC_BUILTIN_GENERIC_EXCHANGE: {
+            struct datatype rt = exp64_value(exp64_atomic_argument(args, 2));
+            ops->push(&rt);                                 // [A, ret]
+            exp64_atomic_pointed(args, 1, &t);
+            ops->peek(1, 1);
+            ops->atomic_rmw("=", size);
+            ops->peek(1, 0);
+            ops->store(size);
+            ops->drop(2);
+            return exp64_void_type();
+        }
+        case ATOMIC_BUILTIN_FETCH_OP:
+        case ATOMIC_BUILTIN_OP_FETCH:
+            exp64_atomic_operand(args, 1, &t);
+            ops->push(&t);                                  // [A, v]
+            ops->peek(1, 1);
+            ops->atomic_rmw(b->op, size);
+            if(size < DATA_SIZE_DDWORD){
+                ops->extend(0, size, is_signed);
+            }
+            if(kind == ATOMIC_BUILTIN_OP_FETCH){
+                ops->peek(1, 0);
+                exp64_atomic_op_value(b->op, &t);
+            }
+            ops->drop(2);
+            return t;
+        case ATOMIC_BUILTIN_CAS_VALUE:
+        case ATOMIC_BUILTIN_CAS_BOOL:
+            exp64_atomic_operand(args, 1, &t);
+            ops->push(&t);                                  // [A, old]
+            exp64_atomic_operand(args, 2, &t);
+            ops->peek(1, 0);                                // R0 = new, R1 = old
+            ops->atomic_cas(size, 1);
+            if(size < DATA_SIZE_DDWORD){
+                ops->extend(0, size, is_signed);
+            }
+            ops->drop(2);
+            if(kind == ATOMIC_BUILTIN_CAS_BOOL){
+                ops->compare("==", false);
+                return int_type;
+            }
+            return t;
+        case ATOMIC_BUILTIN_CAS:
+        case ATOMIC_BUILTIN_GENERIC_CAS: {
+            // The weak form never fails spuriously here: it is the
+            // strong one. Its argument was evaluated with the orders.
+            struct datatype et = exp64_value(exp64_atomic_argument(args, 1));
+            if(!exp64_is_pointer(&et)){
+                compiler_error(current_process, "The second argument of %s must be a pointer\n", b->name);
+            }
+            ops->push(&et);                                 // [A, E]
+            if(kind == ATOMIC_BUILTIN_CAS){
+                exp64_atomic_operand(args, 2, &t);
+            } else {
+                exp64_atomic_pointed(args, 2, &t);
+            }
+            ops->push(&t);                                  // [A, E, desired]
+            ops->peek(0, 1);
+            ops->load(size, is_signed);
+            ops->mov_r1();                                  // R1 = expected
+            ops->peek(0, 0);
+            ops->atomic_cas(size, 2);                       // R0 = what was there
+            if(size < DATA_SIZE_DDWORD){
+                ops->extend(0, size, is_signed);
+            }
+            ops->push(&t);                                  // [A, E, desired, seen]
+            ops->compare("==", false);
+            int done = exp64_new_label();
+            ops->branch(done, EXP64_BRANCH_IF_NOT_ZERO);
+            // Failed: *E = what was there, the result 0.
+            ops->peek(0, 0);
+            ops->peek(1, 2);
+            ops->store(size);
+            ops->imm(0, 0);
+            ops->label(done);
+            ops->drop(4);
+            return int_type;
+        }
+    }
+    compiler_error(current_process, "BUG: atomic builtin %s\n", b->name);
+    return int_type;
+}
+
 // B1: a struct result of more than 16 bytes goes through memory (the
 // hidden pointer in rdi, x8 or a0); a smaller one comes back in the
 // two return registers (rax:rdx, x0:x1, a0:a1). An AAPCS64
@@ -1856,6 +2235,10 @@ static struct datatype exp64_call(struct node* node){
     if(callee->type == NODE_TYPE_IDENTIFIER && !resolver_get_variable(0, current_process->resolver, callee->sval)
        && !resolver_get_function(0, current_process->resolver, callee->sval)
        && symresolver_get_symbol_for_native_function(current_process, callee->sval)){
+        const struct atomic_builtin* atomic = atomic_builtin_get(callee->sval);
+        if(atomic){
+            return exp64_atomic_builtin(atomic, args);
+        }
         if(!strncmp(callee->sval, "__builtin_vla_", 14)){
             return exp64_vla(callee->sval, args);
         }
@@ -2051,6 +2434,9 @@ static struct datatype exp64_increment(struct node* node){
     struct datatype lt = exp64_address(node->unary.operand);
     if(exp64_is_struct(&lt) || exp64_is_array(&lt)){
         compiler_error(current_process, "%s needs a scalar operand\n", node->unary.op);
+    }
+    if(datatype_is_atomic(&lt)){
+        return exp64_atomic_update(step_op, &lt, 0, node->unary.flags & UNARY_FLAG_IS_POSTFIX);
     }
     if(exp64_is_ldouble(&lt)){
         // x + 1 into x; the postfix forms keep a copy of the

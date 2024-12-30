@@ -781,6 +781,97 @@ static void aarch64_ld_load_q(int reg, int off, int off2){
     asm_push("mov v%i.d[1], x11", reg);
 }
 
+// atomics with load-acquire / store-release and the
+// exclusive pairs (ldaxr/stlxr), which every ARMv8.0 core has, so no
+// LSE instructions; ldar and stlr together are sequentially consistent.
+// A slot is 16 bytes.
+static void aarch64_peek(int reg, int depth){
+    asm_push("ldr %s, [sp, #%i]", aarch64_reg(reg), CODEGEN_SLOT * depth);
+}
+
+// The b/h suffix of a byte or halfword access, and register n as wn or xn.
+static const char* aarch64_atomic_suffix(int size){
+    return size == DATA_SIZE_BYTE ? "b" : size == DATA_SIZE_WORD ? "h" : "";
+}
+
+static const char* aarch64_atomic_reg(int n, int size){
+    static char buffers[4][8];
+    static int next;
+    char* out = buffers[next++ % 4];
+    snprintf(out, sizeof(buffers[0]), "%c%i", size == DATA_SIZE_DDWORD ? 'x' : 'w', n);
+    return out;
+}
+
+static void aarch64_atomic_load(int size, bool is_signed){
+    asm_push("ldar%s %s, [x0]", aarch64_atomic_suffix(size), aarch64_atomic_reg(0, size));
+    if(is_signed && size < DATA_SIZE_DDWORD){
+        asm_push("sxt%s x0, w0", size == DATA_SIZE_BYTE ? "b" : size == DATA_SIZE_WORD ? "h" : "w");
+    }
+}
+
+static void aarch64_atomic_store(int size){
+    asm_push("stlr%s %s, [x1]", aarch64_atomic_suffix(size), aarch64_atomic_reg(0, size));
+}
+
+// An exclusive load and store loop: x2 the old value, x3 the new.
+static void aarch64_atomic_rmw(const char* op, int size){
+    const char* s = aarch64_atomic_suffix(size);
+    const char* r0 = aarch64_atomic_reg(0, size);
+    const char* r2 = aarch64_atomic_reg(2, size);
+    const char* r3 = aarch64_atomic_reg(3, size);
+    asm_push("1: ldaxr%s %s, [x1]", s, r2);
+    if(S_EQ(op, "=")){
+        asm_push("mov %s, %s", r3, r0);
+    } else if(S_EQ(op, "nand")){
+        asm_push("and %s, %s, %s", r3, r2, r0);
+        asm_push("mvn %s, %s", r3, r3);
+    } else {
+        const char* ins = S_EQ(op, "+") ? "add" : S_EQ(op, "-") ? "sub" : S_EQ(op, "&") ? "and" : S_EQ(op, "|") ? "orr" : "eor";
+        asm_push("%s %s, %s, %s", ins, r3, r2, r0);
+    }
+    asm_push("stlxr%s w4, %s, [x1]", s, r3);
+    asm_push("cbnz w4, 1b");
+    asm_push("mov x0, x2");
+}
+
+// The expected value in x1 may be sign extended: a byte or halfword is
+// compared with its low bits only (uxtb, uxth).
+static void aarch64_atomic_cas(int size, int depth){
+    const char* s = aarch64_atomic_suffix(size);
+    const char* r2 = aarch64_atomic_reg(2, size);
+    asm_push("ldr x11, [sp, #%i]", CODEGEN_SLOT * depth);
+    asm_push("1: ldaxr%s %s, [x11]", s, r2);
+    if(size < DATA_SIZE_DWORD){
+        asm_push("cmp w2, w1, %s", size == DATA_SIZE_BYTE ? "uxtb" : "uxth");
+    } else {
+        asm_push("cmp %s, %s", r2, aarch64_atomic_reg(1, size));
+    }
+    asm_push("b.ne 2f");
+    asm_push("stlxr%s w3, %s, [x11]", s, aarch64_atomic_reg(0, size));
+    asm_push("cbnz w3, 1b");
+    asm_push("2: mov x0, x2");
+}
+
+static void aarch64_fence(void){
+    asm_push("dmb ish");
+}
+
+// tpidr_el0 is the thread pointer. A variable this file
+// defines is local-exec, its offset added in two 12-bit halves; any
+// other initial-exec, its offset read from the GOT.
+static void aarch64_tls_address(const char* name, bool defined_here){
+    if(defined_here){
+        asm_push("mrs x0, tpidr_el0");
+        asm_push("add x0, x0, #:tprel_hi12:%s, lsl #12", name);
+        asm_push("add x0, x0, #:tprel_lo12_nc:%s", name);
+        return;
+    }
+    asm_push("mrs x11, tpidr_el0");
+    asm_push("adrp x0, :gottprel:%s", name);
+    asm_push("ldr x0, [x0, #:gottprel_lo12:%s]", name);
+    asm_push("add x0, x0, x11");
+}
+
 static const struct exp64_ops aarch64_ops = {
     .push           = aarch64_push,
     .push_struct    = aarch64_push_struct,
@@ -822,6 +913,13 @@ static const struct exp64_ops aarch64_ops = {
     .ld_from        = aarch64_ld_from,
     .ld_to          = aarch64_ld_to,
     .ld_spill_q     = aarch64_ld_spill_q,
+    .peek           = aarch64_peek,
+    .atomic_load    = aarch64_atomic_load,
+    .atomic_store   = aarch64_atomic_store,
+    .atomic_rmw     = aarch64_atomic_rmw,
+    .atomic_cas     = aarch64_atomic_cas,
+    .fence          = aarch64_fence,
+    .tls_address    = aarch64_tls_address,
 };
 
 // ---------------------------------------------------------------
@@ -1473,7 +1571,32 @@ static void codegen_generate_global_initializer(struct node* node){
     });
 }
 
+static void codegen_generate_global_variable_data(struct node* node);
+
+// a thread-local variable's initial image goes to .tdata, or
+// to .tbss without an initializer; each thread gets a copy of it. The
+// symbols of a TLS section are STT_TLS.
 static void codegen_generate_global_variable(struct node* node){
+    int flags = node->var.type.flags;
+    if(!(flags & DATATYPE_FLAG_IS_THREAD_LOCAL) || (flags & DATATYPE_FLAG_IS_EXTERN)){
+        codegen_generate_global_variable_data(node);
+        return;
+    }
+    if(!node->var.val){
+        asm_push(".pushsection .tbss,\"awT\",@nobits");
+        codegen_global_label(node);
+        asm_push(".balign %lu", (unsigned long)datatype_alignment(&node->var.type));
+        asm_push("%s: .zero %lu", node->var.name, (unsigned long)variable_size(node));
+        asm_push(".popsection");
+        codegen_new_scope_entity(node, 0, 0);
+        return;
+    }
+    asm_push(".pushsection .tdata,\"awT\",@progbits");
+    codegen_generate_global_variable_data(node);
+    asm_push(".popsection");
+}
+
+static void codegen_generate_global_variable_data(struct node* node){
     asm_push("// %s %s", node->var.type.type_str, node->var.name);
     if(node->var.val && node->var.val->type == NODE_TYPE_INITIALIZER){
         codegen_generate_global_initializer(node);

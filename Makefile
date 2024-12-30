@@ -1,6 +1,6 @@
 OBJECTS  = ./build/compiler.o ./build/cprocess.o ./build/validator.o \
            ./build/lexer.o ./build/lex_process.o ./build/token.o \
-           ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/resolver.o ./build/rdefault.o ./build/codegen.o ./build/codegen_x86.o ./build/codegen_x86_64.o ./build/codegen_aarch64.o ./build/codegen_riscv64.o ./build/target.o ./build/stackframe.o ./build/fixup.o ./build/array.o ./build/initializer.o ./build/exp64.o ./build/helper.o ./build/constant.o \
+           ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/resolver.o ./build/rdefault.o ./build/codegen.o ./build/codegen_x86.o ./build/codegen_x86_64.o ./build/codegen_aarch64.o ./build/codegen_riscv64.o ./build/target.o ./build/stackframe.o ./build/fixup.o ./build/array.o ./build/initializer.o ./build/exp64.o ./build/helper.o ./build/constant.o ./build/atomic.o \
            ./build/preprocessor.o ./build/native.o \
            ./build/static-include.o ./build/static-includes/stdarg.o ./build/static-includes/stddef.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o ./build/helpers/arena.o
@@ -98,6 +98,9 @@ all: ./main
 
 ./build/exp64.o: ./exp64.c ./compiler.h ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./exp64.c -o ./build/exp64.o
+
+./build/atomic.o: ./atomic.c ./compiler.h
+	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./atomic.c -o ./build/atomic.o
 
 ./build/helper.o: ./helper.c ./compiler.h ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./helper.c -o ./build/helper.o

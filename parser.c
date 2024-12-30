@@ -176,6 +176,18 @@ static struct vector*          parser_preceding_statements;
 static struct vector*          parser_function_labels;
 static struct vector*          parser_function_gotos;
 
+// the thread-local variables declared so far, on i386 only
+// (parser_thread_local_object).
+struct parser_thread_local {
+    const char*     name;
+    struct datatype type;
+};
+static struct vector*              parser_thread_locals;
+static void                        parser_note_thread_local(const char* name, struct datatype* dtype);
+static struct parser_thread_local* parser_thread_local_find(const char* name);
+static struct node*                parser_thread_local_object(struct parser_thread_local* tls);
+static struct node*                parser_thread_local_address(struct node* node);
+
 // Defined here so current_process is in scope.
 static struct parser_scope_entity* parser_scope_last_entity_stop_global_scope(void){
     return scope_last_entity_stop_at(current_process, current_process->scope.root);
@@ -196,6 +208,7 @@ static bool          is_keyword_variable_modifier(const char* val);
 static bool          parse_datatype_modifiers(struct datatype* dtype);
 static void          parse_datatype_type(struct datatype* dtype);
 static void          parse_datatype(struct datatype* dtype);
+static void          parser_ignore_int(struct datatype* dtype);
 static void          parse_variable_function_or_struct_union(struct history* history);
 static bool          parser_is_int_valid_after_datatype(struct datatype* dtype);
 static void          parser_ignore_int(struct datatype* dtype);
@@ -457,6 +470,11 @@ static void parse_single_token_to_node(void){
             bool member = parser_previous_token
                 && (token_is_operator(parser_previous_token, ".") || token_is_operator(parser_previous_token, "->"));
             struct parser_enumerator* e = member ? 0 : parser_enumerator_find(token->sval);
+            struct parser_thread_local* tls = member ? 0 : parser_thread_local_find(e && e->rename ? e->rename : token->sval);
+            if(tls){
+                node_push(parser_thread_local_object(tls));
+                break;
+            }
             if(e && e->rename){
                 node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = e->rename });
                 break;
@@ -835,6 +853,13 @@ static void parse_for_normal_unary(void){
         node_push(operand);
         return;
     }
+    // `&x` of an i386 thread-local x is the pointer its object
+    // is read through; the i386 generator loaded the value for `&*`.
+    struct node* address = S_EQ(op, "&") ? parser_thread_local_address(operand) : 0;
+    if(address){
+        node_push(address);
+        return;
+    }
     make_unary_node(op, operand);
 }
 
@@ -1183,7 +1208,21 @@ static bool is_keyword_variable_modifier(const char* val){
         || S_EQ(val, "extern")   || S_EQ(val, "__ignore_typecheck__")
         || S_EQ(val, "volatile") || S_EQ(val, "register")
         || S_EQ(val, "inline")   || S_EQ(val, "auto")
-        || S_EQ(val, "restrict");
+        || S_EQ(val, "restrict") || S_EQ(val, "_Atomic")
+        || S_EQ(val, "_Thread_local") || S_EQ(val, "__thread");
+}
+
+// `_Atomic (`: the atomic type specifier, `_Atomic(int*)`, rather than
+// the qualifier.
+static bool parser_atomic_specifier_next(void){
+    if(!token_is_keyword(token_peek_next(), "_Atomic")){
+        return false;
+    }
+    vector_save(current_process->token_vec);
+    token_next();
+    bool paren = token_is_operator(token_peek_next(), "(");
+    vector_restore(current_process->token_vec);
+    return paren;
 }
 
 // Consume a run of modifier keywords, OR-ing matching DATATYPE_FLAG_*s
@@ -1193,11 +1232,18 @@ static bool parse_datatype_modifiers(struct datatype* dtype){
     bool sign_given = false;
     struct token* token = token_peek_next();
     while(token && token->type == TOKEN_TYPE_KEYWORD){
-        if(!is_keyword_variable_modifier(token->sval)){
+        if(!is_keyword_variable_modifier(token->sval) || parser_atomic_specifier_next()){
             break;
         }
 
-        if(S_EQ(token->sval, "signed")){
+        if(S_EQ(token->sval, "_Atomic")){
+            // the qualifier makes the object at the pointer
+            // depth read so far atomic: `_Atomic int *p` is a pointer to
+            // an atomic int, `int * _Atomic p` an atomic pointer.
+            dtype->atomic_level = dtype->pointer_depth + 1;
+        } else if(S_EQ(token->sval, "_Thread_local") || S_EQ(token->sval, "__thread")){
+            dtype->flags |= DATATYPE_FLAG_IS_THREAD_LOCAL;
+        } else if(S_EQ(token->sval, "signed")){
             dtype->flags |= DATATYPE_FLAG_IS_SIGNED;
             sign_given = true;
         } else if(S_EQ(token->sval, "unsigned")){
@@ -1687,8 +1733,39 @@ static void parse_enum_specifier(void){
     expect_sym('}');
 }
 
+// Set when the type came from `_Atomic(type-name)`, whose own signedness
+// (plain char included) is settled already.
+static bool parser_type_sign_settled;
+
+// `_Atomic(type-name)`, the atomic type specifier: the type
+// in the parentheses, atomic at its own pointer depth, then the
+// declarator's stars. A storage class given before it is kept.
+static void parse_atomic_type_specifier(struct datatype* dtype){
+    expect_keyword("_Atomic");
+    expect_op("(");
+    struct datatype inner;
+    parse_datatype(&inner);
+    parser_ignore_int(&inner);
+    expect_sym(')');
+    int given = dtype->flags & ~DATATYPE_FLAG_IS_SIGNED;
+    *dtype = inner;
+    dtype->flags |= given;
+    dtype->atomic_level = inner.pointer_depth + 1;
+    int depth = parser_get_pointer_depth();
+    if(depth > 0){
+        dtype->flags |= DATATYPE_FLAG_IS_POINTER;
+        dtype->pointer_depth += depth;
+    }
+    parser_type_sign_settled = true;
+}
+
 static void parse_datatype_type(struct datatype* dtype){
     struct token* datatype_token            = 0;
+    if(parser_atomic_specifier_next()){
+        parser_last_datatype_was_enum = false;
+        parse_atomic_type_specifier(dtype);
+        return;
+    }
     struct token* datatype_secondary_token  = 0;
     // Only modifiers and no type keyword (`unsigned x`, `const n`): the
     // type is int. The name was taken as the type before and failed with
@@ -1744,8 +1821,11 @@ static void parse_datatype(struct datatype* dtype){
     bool sign_given = parse_datatype_modifiers(dtype);
     // `unsigned` or `signed` alone is an int (parser_get_datatype_tokens).
     parser_sign_given = sign_given;
+    parser_type_sign_settled = false;
     parse_datatype_type(dtype);
     parser_sign_given = false;
+    sign_given |= parser_type_sign_settled;
+    parser_type_sign_settled = false;
     sign_given |= parse_datatype_modifiers(dtype);
     // Plain char is unsigned on aarch64 and riscv64; it was
     // always signed, so `char c = 200` read back as -56 there.
@@ -2199,6 +2279,13 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
             if(datatype_is_long_double(&node->var.type)){
                 // 16 on the 64-bit targets, 4 on i386.
                 align = datatype_alignment(&node->var.type);
+            }
+            // an atomic pointer at its own size: the exclusive
+            // loads of aarch64 and riscv64 fault on a misaligned one. A
+            // plain pointer local keeps the pointee's alignment, as the
+            // locked golden output has it.
+            if(datatype_is_atomic(&node->var.type) && (node->var.type.flags & DATATYPE_FLAG_IS_POINTER)){
+                align = datatype_size(&node->var.type);
             }
             variable_node(node)->var.padding =
                 padding(upward_stack ? offset : -offset, align);
@@ -3109,6 +3196,73 @@ static struct node* parser_builtin_call(const char* name, struct node* argument)
     return node_pop();
 }
 
+// on i386 a thread-local variable has no address the
+// resolver chains can write as an operand (NASM has no local-exec
+// relocation, and the initial-exec offset is only known at run time),
+// so every use of its name becomes `(*(T*)__builtin_tls_address("name"))`
+// (an array: `((E*)__builtin_tls_address("name"))`), the shape va_arg
+// already has. codegen_x86_native_tls_address gives this thread's
+// address of the variable the name stands for where it is used.
+static void parser_note_thread_local(const char* name, struct datatype* dtype){
+    if(!(dtype->flags & DATATYPE_FLAG_IS_THREAD_LOCAL) || !S_EQ(current_process->target->backend->name, "x86")){
+        return;
+    }
+    if(!native_function_get(current_process, "__builtin_tls_address")){
+        native_create_function(current_process, "__builtin_tls_address",
+            &(struct native_function_callbacks){ .call = codegen_x86_native_tls_address });
+    }
+    struct parser_thread_local tls = { .name = name, .type = *dtype };
+    vector_push(parser_thread_locals, &tls);
+}
+
+static struct parser_thread_local* parser_thread_local_find(const char* name){
+    for(int i = vector_count(parser_thread_locals) - 1; i >= 0; i--){
+        struct parser_thread_local* tls = vector_at(parser_thread_locals, i);
+        if(S_EQ(tls->name, name)){
+            return tls;
+        }
+    }
+    return 0;
+}
+
+static struct node* parser_thread_local_object(struct parser_thread_local* tls){
+    node_create(&(struct node){ .type = NODE_TYPE_STRING, .sval = tls->name });
+    struct node* call = parser_builtin_call("__builtin_tls_address", node_pop());
+    bool array = tls->type.flags & DATATYPE_FLAG_IS_ARRAY;
+    struct datatype target = array ? datatype_array_decay(&tls->type) : parser_pointer_to(&tls->type);
+    target.flags &= ~(DATATYPE_FLAG_IS_THREAD_LOCAL | DATATYPE_FLAG_IS_STATIC | DATATYPE_FLAG_IS_EXTERN);
+    make_cast_node(&target, call);
+    make_exp_parentheses_node(node_pop());
+    if(array){
+        return node_pop();
+    }
+    make_unary_node("*", node_pop());
+    struct node* object = node_pop();
+    object->unary.indirection.depth = 1;
+    make_exp_parentheses_node(object);
+    return node_pop();
+}
+
+// The pointer inside a parser_thread_local_object, or NULL when `node`
+// is not one.
+static struct node* parser_thread_local_address(struct node* node){
+    if(node->type != NODE_TYPE_EXPRESSION_PARENTHESES){
+        return 0;
+    }
+    struct node* object = node->parenthesis.exp;
+    if(object->type != NODE_TYPE_UNARY || !S_EQ(object->unary.op, "*")
+       || object->unary.operand->type != NODE_TYPE_EXPRESSION_PARENTHESES){
+        return 0;
+    }
+    struct node* cast = object->unary.operand->parenthesis.exp;
+    if(cast->type != NODE_TYPE_CAST || cast->cast.operand->type != NODE_TYPE_EXPRESSION
+       || !S_EQ(cast->cast.operand->exp.op, "()") || cast->cast.operand->exp.left->type != NODE_TYPE_IDENTIFIER
+       || !S_EQ(cast->cast.operand->exp.left->sval, "__builtin_tls_address")){
+        return 0;
+    }
+    return object->unary.operand;
+}
+
 static void parser_vla_natives(void){
     static const char* names[] = { "__builtin_vla_save", "__builtin_vla_alloc", "__builtin_vla_restore" };
     static NATIVE_FUNCTION_CALL calls[] = { codegen_x86_native_vla_save, codegen_x86_native_vla_alloc, codegen_x86_native_vla_restore };
@@ -3298,6 +3452,7 @@ static void parse_static_local(struct datatype* dtype, struct token* name_token,
 
     struct parser_enumerator e = { .name = name_token->sval, .depth = parser_scope_depth(), .rename = name };
     vector_push(parser_enumerators, &e);
+    parser_note_thread_local(name, dtype);
     node_create(&(struct node){ .type = NODE_TYPE_BLANK });
 }
 
@@ -3366,6 +3521,15 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
     bool is_extern_local = (dtype->flags & DATATYPE_FLAG_IS_EXTERN) && name_token && parser_current_function
        && !is_global
        && !(history->flags & (HISTORY_FLAG_IS_UPWARD_STACK | HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION));
+    // one object per thread is a global, a static local or an
+    // extern; at block scope _Thread_local needs static or extern (C11
+    // 6.7.1p3), and a parameter or a member cannot have it.
+    if((dtype->flags & DATATYPE_FLAG_IS_THREAD_LOCAL)
+       && ((history->flags & (HISTORY_FLAG_IS_UPWARD_STACK | HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION))
+           || (!is_global && !is_static_local && !is_extern_local))){
+        compiler_error(current_process, "_Thread_local %s must be a global, static or extern variable\n",
+            name_token ? name_token->sval : "");
+    }
     struct vector* leaves = 0;
     if(token_next_is_operator("=")){
         token_next();
@@ -3398,7 +3562,11 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
             compiler_error(current_process, "The block scope extern %s cannot have an initializer\n", name_token->sval);
         }
         parse_extern_local(dtype, name_token);
+        parser_note_thread_local(name_token->sval, dtype);
         return;
+    }
+    if(is_global && name_token){
+        parser_note_thread_local(name_token->sval, dtype);
     }
 
     // `struct T v = w;` copies the whole struct: it becomes `v = w;`
@@ -4960,6 +5128,19 @@ int parse(struct compile_process* process){
     node_pop();  // BLANK is referenced by pointer, not via the stack.
     // ch97: spin up the parser-side fixup system.
     parser_fixup_sys = fixup_sys_new();
+    // gcc's __atomic and __sync builtins need no declaration.
+    atomic_builtins_register(process);
+    // gcc's memory order constants, __ATOMIC_RELAXED (0) to
+    // __ATOMIC_SEQ_CST (5), for the builtins and <stdatomic.h>: file
+    // scope enumerators, so the preprocessor's own definitions (which
+    // its chapter tests count) stay as they were.
+    static const char* orders[] = { "__ATOMIC_RELAXED", "__ATOMIC_CONSUME", "__ATOMIC_ACQUIRE",
+                                    "__ATOMIC_RELEASE", "__ATOMIC_ACQ_REL", "__ATOMIC_SEQ_CST", 0 };
+    for(int i = 0; orders[i]; i++){
+        struct constant order = { i, datatype_for_int() };
+        parser_enumerator_push(orders[i], &order, false);
+    }
+    parser_thread_locals = vector_create(sizeof(struct parser_thread_local));
 
     struct node* node = 0;
     vector_set_peek_pointer(process->token_vec, 0);

@@ -199,8 +199,9 @@ static bool codegen_variable_defined_here(const char* name){
 // a symbol as NASM must see it. `$` marks an identifier, so a C
 // name that is also a NASM keyword or register (abs, sp, si) works.
 static const char* codegen_symbol(const char* name){
-    // `$`, a name of up to IDENTIFIER_MAX_LENGTH and the NUL.
-    static char buffers[4][IDENTIFIER_MAX_LENGTH + 2];
+    // `$`, a name of up to IDENTIFIER_MAX_LENGTH and the NUL, or a
+    // thread-local alias (tls_alias) of one.
+    static char buffers[4][IDENTIFIER_MAX_LENGTH + 32];
     static int next;
     char* out = buffers[next++ % 4];
     snprintf(out, sizeof(buffers[0]), "$%s", name);
@@ -970,6 +971,77 @@ static void x86_64_ld_to(int kind){
     asm_push("add rsp, 16");
 }
 
+// atomics. An aligned load or store is atomic on x86; a
+// sequentially consistent store is an xchg (locked), so the loads need
+// no fence: the C11 mapping gcc uses.
+static int x86_64_atomic_count;
+
+static void x86_64_peek(int reg, int depth){
+    asm_push("mov %s, [rsp+%i]", x86_64_reg(reg), DATA_SIZE_DDWORD * depth);
+}
+
+static void x86_64_atomic_load(int size, bool is_signed){
+    codegen_load_register("rax", "rax", size, is_signed);
+}
+
+static void x86_64_atomic_store(int size){
+    asm_push("mov r11, rax");
+    asm_push("xchg %s [rcx], %s", codegen_size_keyword(size), codegen_sub_register("r11", size));
+}
+
+// + and - are lock xadd, = an xchg; & | ^ and nand a lock cmpxchg loop.
+static void x86_64_atomic_rmw(const char* op, int size){
+    const char* keyword = codegen_size_keyword(size);
+    if(S_EQ(op, "+") || S_EQ(op, "-")){
+        if(S_EQ(op, "-")){
+            asm_push("neg rax");
+        }
+        asm_push("lock xadd %s [rcx], %s", keyword, codegen_sub_register("rax", size));
+        return;
+    }
+    if(S_EQ(op, "=")){
+        asm_push("xchg %s [rcx], %s", keyword, codegen_sub_register("rax", size));
+        return;
+    }
+    int label = ++x86_64_atomic_count;
+    asm_push("mov r11, rax");
+    codegen_load_register("rax", "rcx", size, false);
+    asm_push(".atomic_%i:", label);
+    asm_push("mov rdx, rax");
+    if(S_EQ(op, "nand")){
+        asm_push("and rdx, r11");
+        asm_push("not rdx");
+    } else {
+        asm_push("%s rdx, r11", S_EQ(op, "&") ? "and" : S_EQ(op, "|") ? "or" : "xor");
+    }
+    asm_push("lock cmpxchg %s [rcx], %s", keyword, codegen_sub_register("rdx", size));
+    asm_push("jne .atomic_%i", label);
+}
+
+// cmpxchg compares with rax and leaves what was there in it.
+static void x86_64_atomic_cas(int size, int depth){
+    asm_push("mov r11, [rsp+%i]", DATA_SIZE_DDWORD * depth);
+    asm_push("mov rdx, rax");
+    asm_push("mov rax, rcx");
+    asm_push("lock cmpxchg %s [r11], %s", codegen_size_keyword(size), codegen_sub_register("rdx", size));
+}
+
+static void x86_64_fence(void){
+    asm_push("mfence");
+}
+
+// NASM has no local-exec operator (`wrt ..tpoff`), so every
+// access is initial-exec: the variable's offset from the thread pointer
+// (fs:0) out of the GOT. ld rewrites it to local-exec (a mov of the
+// constant offset) when it links an executable that defines the
+// variable. One this file defines is reached through its alias
+// (codegen_generate_thread_local).
+static void x86_64_tls_address(const char* name, bool defined_here){
+    const char* symbol = codegen_symbol(defined_here ? tls_alias(current_process, name) : name);
+    asm_push("mov rax, [rel %s wrt ..gottpoff]", symbol);
+    asm_push("add rax, [fs:0]");
+}
+
 static const struct exp64_ops x86_64_ops = {
     .push           = x86_64_push,
     .push_struct    = x86_64_push_struct,
@@ -1010,6 +1082,13 @@ static const struct exp64_ops x86_64_ops = {
     .ld_truth       = x86_64_ld_truth,
     .ld_from        = x86_64_ld_from,
     .ld_to          = x86_64_ld_to,
+    .peek           = x86_64_peek,
+    .atomic_load    = x86_64_atomic_load,
+    .atomic_store   = x86_64_atomic_store,
+    .atomic_rmw     = x86_64_atomic_rmw,
+    .atomic_cas     = x86_64_atomic_cas,
+    .fence          = x86_64_fence,
+    .tls_address    = x86_64_tls_address,
 };
 
 // ---------------------------------------------------------------
@@ -1671,8 +1750,38 @@ static void codegen_generate_global_initializer(struct node* node){
     });
 }
 
+// a thread-local variable's initial image goes to .tdata, or
+// to .tbss without an initializer; each thread gets a copy of it. The
+// symbols of a tls section are STT_TLS. The data section continues
+// after it.
+// Accesses go through the variable's hidden alias (tls_alias), which
+// NASM takes in a TLS reference also when the variable is static.
+static void codegen_generate_thread_local(struct node* node){
+    unsigned long align = datatype_alignment(&node->var.type);
+    const char* alias = codegen_symbol(tls_alias(current_process, node->var.name));
+    asm_push(node->var.val ? "section .tdata progbits alloc write tls" : "section .tbss nobits alloc write tls");
+    asm_push(node->var.val ? "align %lu, db 0" : "alignb %lu", align);
+    asm_push("global %s:hidden", alias);
+    asm_push("%s:", alias);
+    if(!node->var.val){
+        codegen_global_label(node);
+        asm_push("%s: resb %lu", codegen_symbol(node->var.name), (unsigned long)variable_size(node));
+    } else if(node->var.val->type == NODE_TYPE_INITIALIZER){
+        codegen_generate_global_initializer(node);
+    } else {
+        codegen_global_label(node);
+        codegen_generate_global_variable_for_primitive(node);
+    }
+    asm_push("section .data");
+}
+
 static void codegen_generate_global_variable(struct node* node){
     asm_push("; %s %s", node->var.type.type_str, node->var.name);
+    if((node->var.type.flags & DATATYPE_FLAG_IS_THREAD_LOCAL) && !(node->var.type.flags & DATATYPE_FLAG_IS_EXTERN)){
+        codegen_generate_thread_local(node);
+        codegen_new_scope_entity(node, 0, 0);
+        return;
+    }
     if(node->var.val && node->var.val->type == NODE_TYPE_INITIALIZER){
         codegen_generate_global_initializer(node);
         codegen_new_scope_entity(node, 0, 0);
@@ -1681,6 +1790,10 @@ static void codegen_generate_global_variable(struct node* node){
     if(node->var.type.flags & DATATYPE_FLAG_IS_EXTERN){
         if(!codegen_variable_defined_here(node->var.name)){
             asm_push("extern %s", codegen_symbol(node->var.name));
+            // the driver makes it STT_TLS in the object.
+            if(node->var.type.flags & DATATYPE_FLAG_IS_THREAD_LOCAL){
+                asm_push("; tls extern %s", node->var.name);
+            }
         }
         codegen_new_scope_entity(node, 0, 0);
         return;

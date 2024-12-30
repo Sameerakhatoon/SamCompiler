@@ -800,6 +800,131 @@ static void riscv64_ld_to(int kind){
     }
 }
 
+// atomics with the A extension, in the mapping of the RISC-V
+// psABI for sequentially consistent accesses: a load between
+// `fence rw,rw` and `fence r,rw`, a store after `fence rw,w`, and the
+// read-modify-writes as amo*.aqrl or lr/sc.aqrl loops. A byte or
+// halfword has no lr/sc of its own: the loop runs on the aligned word
+// around it and changes only its bits. A slot is 16 bytes.
+static void riscv64_peek(int reg, int depth){
+    asm_push("ld %s, %i(sp)", riscv64_reg(reg), CODEGEN_SLOT * depth);
+}
+
+static void riscv64_atomic_load(int size, bool is_signed){
+    asm_push("fence rw,rw");
+    riscv64_load(size, is_signed);
+    asm_push("fence r,rw");
+}
+
+static void riscv64_atomic_store(int size){
+    asm_push("fence rw,w");
+    riscv64_store(size);
+}
+
+// For a byte or halfword at the address in `address`: t4 = the aligned
+// word's address, t6 = the shift of the field in it, a2 = its mask
+// there, a4 = ~a2; reg1 and reg2 (when given) are moved into the field
+// as out1 and out2.
+static void riscv64_atomic_field(const char* address, int size, const char* reg1, const char* out1, const char* reg2, const char* out2){
+    asm_push("andi t6, %s, 3", address);
+    asm_push("slli t6, t6, 3");
+    asm_push("andi t4, %s, -4", address);
+    asm_push("li a2, %i", size == DATA_SIZE_BYTE ? 0xff : 0xffff);
+    asm_push("and %s, %s, a2", out1, reg1);
+    asm_push("sll %s, %s, t6", out1, out1);
+    if(reg2){
+        asm_push("and %s, %s, a2", out2, reg2);
+        asm_push("sll %s, %s, t6", out2, out2);
+    }
+    asm_push("sll a2, a2, t6");
+    asm_push("not a4, a2");
+}
+
+static const char* riscv64_atomic_ins(const char* op){
+    return S_EQ(op, "+") ? "add" : S_EQ(op, "-") ? "sub" : S_EQ(op, "&") ? "and" : S_EQ(op, "|") ? "or" : "xor";
+}
+
+static void riscv64_atomic_rmw(const char* op, int size){
+    if(size < DATA_SIZE_DWORD){
+        riscv64_atomic_field("a1", size, "a0", "a3", 0, 0);
+        asm_push("1: lr.w.aqrl t5, (t4)");
+        if(S_EQ(op, "=")){
+            asm_push("mv a5, a3");
+        } else if(S_EQ(op, "nand")){
+            asm_push("and a5, t5, a3");
+            asm_push("not a5, a5");
+        } else {
+            asm_push("%s a5, t5, a3", riscv64_atomic_ins(op));
+        }
+        asm_push("and a5, a5, a2");
+        asm_push("and a6, t5, a4");
+        asm_push("or a5, a5, a6");
+        asm_push("sc.w.aqrl a6, a5, (t4)");
+        asm_push("bnez a6, 1b");
+        asm_push("srl a0, t5, t6");
+        return;
+    }
+    const char* w = size == DATA_SIZE_DDWORD ? "d" : "w";
+    if(S_EQ(op, "nand")){
+        asm_push("1: lr.%s.aqrl t5, (a1)", w);
+        asm_push("and t6, t5, a0");
+        asm_push("not t6, t6");
+        asm_push("sc.%s.aqrl t4, t6, (a1)", w);
+        asm_push("bnez t4, 1b");
+        asm_push("mv a0, t5");
+        return;
+    }
+    if(S_EQ(op, "-")){
+        asm_push("neg a0, a0");
+    }
+    const char* amo = S_EQ(op, "=") ? "swap" : S_EQ(op, "+") || S_EQ(op, "-") ? "add" : riscv64_atomic_ins(op);
+    asm_push("amo%s.%s.aqrl a0, a0, (a1)", amo, w);
+}
+
+// The expected value in a1 may be sign extended (a word is compared as
+// lr.w loads it, sign extended); a1 is kept.
+static void riscv64_atomic_cas(int size, int depth){
+    asm_push("ld t4, %i(sp)", CODEGEN_SLOT * depth);
+    if(size < DATA_SIZE_DWORD){
+        asm_push("mv t5, t4");
+        riscv64_atomic_field("t5", size, "a1", "a3", "a0", "a5");
+        asm_push("1: lr.w.aqrl t5, (t4)");
+        asm_push("and a6, t5, a2");
+        asm_push("bne a6, a3, 2f");
+        asm_push("and a6, t5, a4");
+        asm_push("or a6, a6, a5");
+        asm_push("sc.w.aqrl a7, a6, (t4)");
+        asm_push("bnez a7, 1b");
+        asm_push("2: srl a0, t5, t6");
+        return;
+    }
+    const char* w = size == DATA_SIZE_DDWORD ? "d" : "w";
+    asm_push(size == DATA_SIZE_DDWORD ? "mv t6, a1" : "sext.w t6, a1");
+    asm_push("1: lr.%s.aqrl t5, (t4)", w);
+    asm_push("bne t5, t6, 2f");
+    asm_push("sc.%s.aqrl a2, a0, (t4)", w);
+    asm_push("bnez a2, 1b");
+    asm_push("2: mv a0, t5");
+}
+
+static void riscv64_fence(void){
+    asm_push("fence rw,rw");
+}
+
+// tp is the thread pointer. A variable this file defines is
+// local-exec, tp plus its offset; any other initial-exec, its offset
+// read from the GOT.
+static void riscv64_tls_address(const char* name, bool defined_here){
+    if(defined_here){
+        asm_push("lui a0, %%tprel_hi(%s)", name);
+        asm_push("add a0, a0, tp, %%tprel_add(%s)", name);
+        asm_push("addi a0, a0, %%tprel_lo(%s)", name);
+        return;
+    }
+    asm_push("la.tls.ie a0, %s", name);
+    asm_push("add a0, a0, tp");
+}
+
 static const struct exp64_ops riscv64_ops = {
     .push           = riscv64_push,
     .push_struct    = riscv64_push_struct,
@@ -840,6 +965,13 @@ static const struct exp64_ops riscv64_ops = {
     .ld_truth       = riscv64_ld_truth,
     .ld_from        = riscv64_ld_from,
     .ld_to          = riscv64_ld_to,
+    .peek           = riscv64_peek,
+    .atomic_load    = riscv64_atomic_load,
+    .atomic_store   = riscv64_atomic_store,
+    .atomic_rmw     = riscv64_atomic_rmw,
+    .atomic_cas     = riscv64_atomic_cas,
+    .fence          = riscv64_fence,
+    .tls_address    = riscv64_tls_address,
 };
 
 // ---------------------------------------------------------------
@@ -1482,7 +1614,32 @@ static void codegen_generate_global_initializer(struct node* node){
     });
 }
 
+static void codegen_generate_global_variable_data(struct node* node);
+
+// a thread-local variable's initial image goes to .tdata, or
+// to .tbss without an initializer; each thread gets a copy of it. The
+// symbols of a TLS section are STT_TLS.
 static void codegen_generate_global_variable(struct node* node){
+    int flags = node->var.type.flags;
+    if(!(flags & DATATYPE_FLAG_IS_THREAD_LOCAL) || (flags & DATATYPE_FLAG_IS_EXTERN)){
+        codegen_generate_global_variable_data(node);
+        return;
+    }
+    if(!node->var.val){
+        asm_push(".pushsection .tbss,\"awT\",@nobits");
+        codegen_global_label(node);
+        asm_push(".balign %lu", (unsigned long)datatype_alignment(&node->var.type));
+        asm_push("%s: .zero %lu", node->var.name, (unsigned long)variable_size(node));
+        asm_push(".popsection");
+        codegen_new_scope_entity(node, 0, 0);
+        return;
+    }
+    asm_push(".pushsection .tdata,\"awT\",@progbits");
+    codegen_generate_global_variable_data(node);
+    asm_push(".popsection");
+}
+
+static void codegen_generate_global_variable_data(struct node* node){
     asm_push("# %s %s", node->var.type.type_str, node->var.name);
     if(node->var.val && node->var.val->type == NODE_TYPE_INITIALIZER){
         codegen_generate_global_initializer(node);

@@ -445,8 +445,9 @@ static struct resolver_entity* codegen_register_function(struct node* func_node,
 // is also a register or keyword (`gs`, `eax`, `abs`) works; rdefault.c
 // writes the same prefix into the addresses (backend symbol_prefix).
 static const char* codegen_symbol(const char* name){
-    // `$`, a name of up to IDENTIFIER_MAX_LENGTH and the NUL.
-    static char buffers[4][IDENTIFIER_MAX_LENGTH + 2];
+    // `$`, a name of up to IDENTIFIER_MAX_LENGTH and the NUL, or a
+    // thread-local alias (tls_alias) of one.
+    static char buffers[4][IDENTIFIER_MAX_LENGTH + 32];
     static int next;
     char* out = buffers[next++ % 4];
     snprintf(out, sizeof(buffers[0]), "$%s", name);
@@ -971,6 +972,19 @@ static void codegen_push_assignment_value(struct datatype* dtype){
         &(struct stack_frame_data){.dtype = *dtype});
 }
 
+// [address] = eax at the width of dtype. An _Atomic object
+// takes an xchg (locked by itself: the sequentially consistent store)
+// from ecx, so eax keeps the value of the assignment.
+static void codegen_store_maybe_atomic(struct datatype* dtype, const char* mov_type, const char* address){
+    size_t size = datatype_element_size(dtype);
+    if(datatype_is_atomic(dtype)){
+        asm_push("mov ecx, eax");
+        asm_push("xchg %s [%s], %s", mov_type, address, codegen_sub_register("ecx", size));
+        return;
+    }
+    asm_push("mov %s [%s], %s", mov_type, address, codegen_sub_register("eax", size));
+}
+
 // ch140: `lhs = value`, the value already on the stack. Single-entity
 // path: store directly into the resolved base address. Multi-entity
 // path: compute the address via the access walker, pop the addr (edx)
@@ -992,7 +1006,7 @@ static void codegen_generate_plain_assignment(struct node* node, struct resolver
             return;
         }
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-        asm_push("mov %s [%s], %s", mov_type, result->base.address, reg_to_use);
+        codegen_store_maybe_atomic(dtype, mov_type, result->base.address);
     } else {
         codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
         asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
@@ -1007,9 +1021,52 @@ static void codegen_generate_plain_assignment(struct node* node, struct resolver
         reg_to_use = "eax";
         mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(dtype), &reg_to_use);
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-        asm_push("mov %s [edx], %s", mov_type, reg_to_use);
+        codegen_store_maybe_atomic(dtype, mov_type, "edx");
     }
     if(assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED){
+        codegen_push_assignment_value(dtype);
+    }
+}
+
+// `a op= v`, `++a`, `a++` on an _Atomic a at [address], the
+// operand in ecx: one atomic read-modify-write (C11 6.5.2.4, 6.5.16.2).
+// A lock cmpxchg loop works out `old op v` as the plain operator does
+// and stores it only if a still holds old, else tries again with what
+// it found. The stack is used for old across the arithmetic (which
+// takes edx), outside the ledger: it is popped before anything else.
+static void codegen_generate_atomic_read_modify_write(struct datatype* dtype, struct datatype* value_dtype, const char* op,
+                                                      const char* address, int assign_flags){
+    static int count;
+    int label = ++count;
+    size_t size = datatype_element_size(dtype);
+    bool lhs_signed = dtype->flags & DATATYPE_FLAG_IS_SIGNED;
+    const char* arith = assignment_arithmetic_operator(op);
+    struct datatype_binary types;
+    datatype_binary_types(dtype, value_dtype, arith, &types);
+    if(types.scale_right > 1){
+        asm_push("imul ecx, %zu", types.scale_right);
+    }
+    const char* reg_to_use = "edx";
+    const char* mov_type   = codegen_byte_word_or_dword_or_ddword(size, &reg_to_use);
+    codegen_load_eax(address, size, lhs_signed);
+    asm_push(".atomic_rmw_%i:", label);
+    codegen_reduce_register("eax", size, lhs_signed);
+    asm_push("push eax");
+    asm_push("push ecx");
+    codegen_gen_math_for_value("eax", "ecx", codegen_set_flag_for_operator(arith), types.operation.flags & DATATYPE_FLAG_IS_SIGNED);
+    asm_push("pop ecx");
+    asm_push("mov edx, eax");
+    asm_push("pop eax");
+    asm_push("lock cmpxchg %s [%s], %s", mov_type, address, reg_to_use);
+    asm_push("jne .atomic_rmw_%i", label);
+    if(assign_flags & CODEGEN_ASSIGN_POSTFIX){
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = *dtype});
+        return;
+    }
+    if(assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED){
+        asm_push("mov eax, edx");
         codegen_push_assignment_value(dtype);
     }
 }
@@ -1044,6 +1101,10 @@ static void codegen_generate_read_modify_write(struct node* node, struct resolve
 
     size_t size = datatype_element_size(&dtype);
     bool lhs_signed = dtype.flags & DATATYPE_FLAG_IS_SIGNED;
+    if(datatype_is_atomic(&dtype)){
+        codegen_generate_atomic_read_modify_write(&dtype, &value_dtype, op, address, assign_flags);
+        return;
+    }
     codegen_load_eax(address, size, lhs_signed);
     if(assign_flags & CODEGEN_ASSIGN_POSTFIX){
         asm_push_ins_push_with_data("eax",
@@ -1082,14 +1143,18 @@ static void codegen_generate_assignment_part(struct node* node, const char* op, 
     // A statement `x += n` on a non-pointer keeps its single instruction.
     struct resolver_entity* root_assignment_entity = resolver_result_entity_root(result);
     struct datatype* dtype = &result->last_entity->dtype;
+    // on an _Atomic object (not a _Bool) the add is locked.
+    bool atomic = datatype_is_atomic(dtype);
     if(S_EQ(op, "+=") && !(assign_flags & CODEGEN_ASSIGN_VALUE_NEEDED)
        && !(dtype->flags & DATATYPE_FLAG_IS_POINTER)
-       && !datatype_is_struct_or_union_non_pointer(dtype)){
+       && !datatype_is_struct_or_union_non_pointer(dtype)
+       && !(atomic && (dtype->flags & DATATYPE_FLAG_IS_BOOL))){
         const char* reg_to_use = "eax";
         const char* mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(dtype), &reg_to_use);
+        const char* add = atomic ? "lock add" : "add";
         if(!resolver_result_entity_next(root_assignment_entity)){
             asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-            asm_push("add %s [%s], %s", mov_type, result->base.address, reg_to_use);
+            asm_push("%s %s [%s], %s", add, mov_type, result->base.address, reg_to_use);
         } else {
             codegen_generate_entity_access_for_assignment_left_operand(result, root_assignment_entity, node, history);
             // The access walk may have learnt the stored type (`*(p + 1)`).
@@ -1097,7 +1162,7 @@ static void codegen_generate_assignment_part(struct node* node, const char* op, 
             mov_type   = codegen_byte_word_or_dword_or_ddword(datatype_element_size(dtype), &reg_to_use);
             asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
             asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
-            asm_push("add %s [edx], %s", mov_type, reg_to_use);
+            asm_push("%s %s [edx], %s", add, mov_type, reg_to_use);
         }
         return;
     }
@@ -1737,7 +1802,12 @@ static bool codegen_resolve_node_for_value(struct node* node, struct history* hi
     //     reduce-register (sign/zero extend) -> push as the typed
     //     result_value.
     struct datatype dtype;
-    assert(asm_datatype_back(&dtype));
+    // A struct used before its definition left no typed value (found by
+    // tests/322 once its seeds moved with the atomics tests): an error,
+    // not an assert.
+    if(!asm_datatype_back(&dtype)){
+        compiler_error(current_process, "x86: this expression has no value of a known type (a struct used before its definition?)\n");
+    }
     if(codegen_result_is_array_address(result, &dtype)){
         // The chain left an array's address (a whole array, or a row of
         // a multi-dimensional one): the value is that address, as a
@@ -2560,6 +2630,9 @@ static void x87_load(struct datatype* t){
 
 // The object at the address in ecx = the value of type t (st0, kept as
 // the expression's value, or eax).
+// a store to an _Atomic object is sequentially consistent: a
+// floating one is followed by mfence, an integer one is an xchg from
+// edx (eax keeps the value).
 static void x87_store(struct datatype* t){
     if(x87_is_long(t)){
         // fst has no tword form.
@@ -2569,11 +2642,27 @@ static void x87_store(struct datatype* t){
     }
     if(x87_is_floating(t)){
         asm_push("fst %s [ecx]", x87_size_keyword(t->size));
+        if(datatype_is_atomic(t)){
+            asm_push("mfence");
+        }
         return;
     }
-    const char* reg = "eax";
+    const char* reg = datatype_is_atomic(t) ? "edx" : "eax";
     const char* keyword = codegen_byte_word_or_dword_or_ddword(datatype_element_size(t), &reg);
+    if(datatype_is_atomic(t)){
+        asm_push("mov edx, eax");
+        asm_push("xchg %s [ecx], %s", keyword, reg);
+        return;
+    }
     asm_push("mov %s [ecx], %s", keyword, reg);
+}
+
+// The x87 read-modify-writes are a load and a store: not for an _Atomic
+// object.
+static void x87_no_atomic_update(struct datatype* t){
+    if(datatype_is_atomic(t)){
+        compiler_error(current_process, "x86: ++, -- or a compound assignment on an _Atomic object with a floating type or operand is not supported\n");
+    }
 }
 
 static void x87_constant(struct node* node, struct datatype* t){
@@ -2726,6 +2815,7 @@ static struct datatype x87_assign(struct node* node){
         x87_reduce(&lt);
         return lt;
     }
+    x87_no_atomic_update(&lt);
     char arith_op[4] = {0};
     strncpy(arith_op, op, strlen(op) - 1);
     const char* ins = x87_arith_ins(arith_op);
@@ -2761,6 +2851,7 @@ static struct datatype x87_assign(struct node* node){
 // stays on the stack for the postfix forms (x + 1 - 1 need not be x).
 static struct datatype x87_increment(struct node* node){
     struct datatype lt = x87_type(node->unary.operand);
+    x87_no_atomic_update(&lt);
     bool postfix = node->unary.flags & UNARY_FLAG_IS_POSTFIX;
     x87_scratch();
     x87_address(node->unary.operand);
@@ -3884,8 +3975,40 @@ static void codegen_generate_global_initializer(struct node* node){
     });
 }
 
+// a thread-local variable's initial image goes to .tdata, or
+// to .tbss without an initializer; each thread gets a copy of it. The
+// symbols of a tls section are STT_TLS. Accesses go through a hidden
+// global alias (tls_alias), which NASM takes in a TLS reference also
+// when the variable is static. The data section continues after it.
+static void codegen_generate_thread_local(struct node* node){
+    unsigned long align = datatype_alignment(&node->var.type);
+    const char* alias = codegen_symbol(tls_alias(current_process, node->var.name));
+    asm_push(node->var.val ? "section .tdata progbits alloc write tls" : "section .tbss nobits alloc write tls");
+    asm_push(node->var.val ? "align %lu, db 0" : "alignb %lu", align);
+    asm_push("global %s:hidden", alias);
+    asm_push("%s:", alias);
+    if(!node->var.val){
+        codegen_global_label(node);
+        asm_push("%s: resb %lu", codegen_symbol(node->var.name), (unsigned long)variable_size(node));
+    } else if(node->var.val->type == NODE_TYPE_INITIALIZER){
+        codegen_generate_global_initializer(node);
+    } else {
+        codegen_global_label(node);
+        if(datatype_is_struct_or_union_non_pointer(&node->var.type) || (node->var.type.flags & DATATYPE_FLAG_IS_ARRAY)){
+            compiler_error(current_process, "A struct, union or array global needs a { } initializer\n");
+        }
+        codegen_generate_global_variable_for_primitive(node);
+    }
+    asm_push("section .data");
+}
+
 static void codegen_generate_global_variable(struct node* node){
     asm_push("; %s %s", node->var.type.type_str, node->var.name);
+    if((node->var.type.flags & DATATYPE_FLAG_IS_THREAD_LOCAL) && !(node->var.type.flags & DATATYPE_FLAG_IS_EXTERN)){
+        codegen_generate_thread_local(node);
+        codegen_new_scope_entity(node, 0, 0);
+        return;
+    }
     if(node->var.val && node->var.val->type == NODE_TYPE_INITIALIZER){
         codegen_generate_global_initializer(node);
         codegen_new_scope_entity(node, 0, 0);
@@ -3896,6 +4019,10 @@ static void codegen_generate_global_variable(struct node* node){
     if(node->var.type.flags & DATATYPE_FLAG_IS_EXTERN){
         if(!variable_defined_in_tree(current_process, node->var.name)){
             asm_push("extern %s", codegen_symbol(node->var.name));
+            // the driver makes it STT_TLS in the object.
+            if(node->var.type.flags & DATATYPE_FLAG_IS_THREAD_LOCAL){
+                asm_push("; tls extern %s", node->var.name);
+            }
         }
         codegen_new_scope_entity(node, 0, 0);
         return;
@@ -4194,6 +4321,269 @@ void codegen_x86_native_vla_restore(struct generator* generator, struct native_f
     struct datatype dtype;
     datatype_set_void(&dtype);
     generator->ret(&dtype, "0");
+}
+
+// the i386 halves of gcc's atomic builtins (exp64_atomic_builtin
+// is the 64-bit one). The arguments are pushed by gen_exp and popped
+// into ebx (the object's address), ecx and edx. A load is a mov, a store
+// or exchange an xchg (locked by itself), + and - a lock xadd, anything
+// else a lock cmpxchg loop. i386 has no 8-byte integer here (long long is
+// 4 bytes), so 1, 2 and 4 byte objects.
+static int codegen_x86_atomic_count;
+
+static struct node* codegen_x86_atomic_argument(struct vector* arguments, int i){
+    return *(struct node**)vector_at(arguments, i);
+}
+
+// Generate argument i and pop it into reg.
+static void codegen_x86_atomic_pop_argument(struct generator* generator, struct vector* arguments, int i, const char* reg){
+    generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, i), 0);
+    asm_push_ins_pop(reg, STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+}
+
+// The memory order arguments from `first` on: evaluated when they can
+// have side effects, otherwise ignored (every operation is seq_cst).
+static void codegen_x86_atomic_orders(struct generator* generator, struct vector* arguments, int first){
+    for(int i = first; i < vector_count(arguments); i++){
+        if(codegen_x86_atomic_argument(arguments, i)->type != NODE_TYPE_NUMBER){
+            codegen_x86_atomic_pop_argument(generator, arguments, i, "ecx");
+        }
+    }
+}
+
+// The type of the object a pointer of type pt points to, not atomic.
+static struct datatype codegen_x86_atomic_object(struct datatype* pt, const char* name){
+    if(!(pt->flags & (DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_ARRAY))){
+        compiler_error(current_process, "The first argument of %s must be a pointer\n", name);
+    }
+    struct datatype t = *pt;
+    if(t.flags & DATATYPE_FLAG_IS_ARRAY){
+        t.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    } else if(--t.pointer_depth <= 0){
+        t.pointer_depth = 0;
+        t.flags &= ~DATATYPE_FLAG_IS_POINTER;
+    }
+    t.atomic_level = 0;
+    if(datatype_is_struct_or_union_non_pointer(&t) || (t.type == DATA_TYPE_VOID && !t.pointer_depth)){
+        compiler_error(current_process, "%s needs an integer or pointer object\n", name);
+    }
+    if(datatype_size(&t) > DATA_SIZE_DWORD){
+        compiler_error(current_process, "x86: %s on an object of %i bytes is not supported (no 8-byte integers on i386)\n",
+            name, (int)datatype_size(&t));
+    }
+    return t;
+}
+
+static int codegen_x86_atomic_size(struct datatype* t){
+    return t->flags & DATATYPE_FLAG_IS_POINTER ? DATA_SIZE_DWORD : (int)datatype_size(t);
+}
+
+// eax = eax op ecx for the fetch-and-op operators.
+static void codegen_x86_atomic_op(const char* op, const char* reg, const char* value){
+    if(S_EQ(op, "nand")){
+        asm_push("and %s, %s", reg, value);
+        asm_push("not %s", reg);
+        return;
+    }
+    const char* ins = S_EQ(op, "+") ? "add" : S_EQ(op, "-") ? "sub" : S_EQ(op, "&") ? "and" : S_EQ(op, "|") ? "or" : "xor";
+    asm_push("%s %s, %s", ins, reg, value);
+}
+
+void codegen_x86_native_atomic(struct generator* generator, struct native_function* func, struct vector* arguments){
+    const struct atomic_builtin* b = atomic_builtin_get(func->name);
+    if(vector_count(arguments) != b->args){
+        compiler_error(current_process, "%s expects %i arguments\n", b->name, b->args);
+    }
+    int kind = b->kind;
+    struct datatype void_type;
+    datatype_set_void(&void_type);
+    struct datatype int_type = datatype_for_int();
+    if(kind == ATOMIC_BUILTIN_FENCE || kind == ATOMIC_BUILTIN_SIGNAL_FENCE){
+        codegen_x86_atomic_orders(generator, arguments, 0);
+        if(kind == ATOMIC_BUILTIN_FENCE){
+            asm_push("mfence");
+        }
+        generator->ret(&void_type, "0");
+        return;
+    }
+    if(kind == ATOMIC_BUILTIN_LOCK_FREE){
+        codegen_x86_atomic_pop_argument(generator, arguments, 0, "eax");
+        asm_push("cmp eax, %i", DATA_SIZE_DWORD);
+        asm_push("setbe al");
+        asm_push("movzx eax, al");
+        generator->ret(&int_type, "eax");
+        return;
+    }
+    // The pointer stays pushed while the operands are worked out.
+    generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, 0), 0);
+    struct datatype pt = datatype_for_numeric();
+    asm_datatype_back(&pt);
+    struct datatype t = codegen_x86_atomic_object(&pt, b->name);
+    if(kind == ATOMIC_BUILTIN_TEST_AND_SET || kind == ATOMIC_BUILTIN_CLEAR){
+        t = datatype_for_int();
+        t.size = DATA_SIZE_BYTE;
+        t.type = DATA_TYPE_CHAR;
+        t.flags &= ~DATATYPE_FLAG_IS_SIGNED;
+    }
+    int size = codegen_x86_atomic_size(&t);
+    bool is_signed = (t.flags & DATATYPE_FLAG_IS_SIGNED) && !(t.flags & DATATYPE_FLAG_IS_POINTER);
+    const char* keyword = size == DATA_SIZE_BYTE ? "byte" : size == DATA_SIZE_WORD ? "word" : "dword";
+    const char* eax = codegen_sub_register("eax", size);
+    const char* edx = codegen_sub_register("edx", size);
+    int label = ++codegen_x86_atomic_count;
+    // The operands after the pointer: an __atomic builtin ends in its
+    // memory order (a compare-exchange in weak and two orders), a
+    // __sync one has none.
+    int operands = b->args - (!strncmp(b->name, "__sync_", 7) ? 0
+                 : kind == ATOMIC_BUILTIN_CAS || kind == ATOMIC_BUILTIN_GENERIC_CAS ? 3 : 1);
+    for(int i = 1; i < operands; i++){
+        generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, i), 0);
+    }
+    codegen_x86_atomic_orders(generator, arguments, operands);
+    switch(kind){
+        case ATOMIC_BUILTIN_LOAD:
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            codegen_load_eax("ebx", size, is_signed);
+            generator->ret(&t, "eax");
+            return;
+        case ATOMIC_BUILTIN_STORE:
+        case ATOMIC_BUILTIN_EXCHANGE:
+        case ATOMIC_BUILTIN_GENERIC_STORE:
+            asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            if(kind == ATOMIC_BUILTIN_GENERIC_STORE){
+                codegen_load_eax("eax", size, is_signed);
+            }
+            asm_push("xchg %s [ebx], %s", keyword, eax);
+            if(kind != ATOMIC_BUILTIN_EXCHANGE){
+                generator->ret(&void_type, "0");
+                return;
+            }
+            codegen_reduce_register("eax", size, is_signed);
+            generator->ret(&t, "eax");
+            return;
+        case ATOMIC_BUILTIN_CLEAR:
+        case ATOMIC_BUILTIN_RELEASE:
+        case ATOMIC_BUILTIN_TEST_AND_SET:
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push("mov eax, %i", kind == ATOMIC_BUILTIN_TEST_AND_SET ? 1 : 0);
+            asm_push("xchg %s [ebx], %s", keyword, eax);
+            if(kind != ATOMIC_BUILTIN_TEST_AND_SET){
+                generator->ret(&void_type, "0");
+                return;
+            }
+            asm_push("test al, al");
+            asm_push("setne al");
+            asm_push("movzx eax, al");
+            generator->ret(&int_type, "eax");
+            return;
+        case ATOMIC_BUILTIN_FETCH_OP:
+        case ATOMIC_BUILTIN_OP_FETCH:
+            asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            if(S_EQ(b->op, "+") || S_EQ(b->op, "-")){
+                asm_push("mov eax, ecx");
+                if(S_EQ(b->op, "-")){
+                    asm_push("neg eax");
+                }
+                asm_push("lock xadd %s [ebx], %s", keyword, eax);
+            } else {
+                codegen_load_eax("ebx", size, false);
+                asm_push(".atomic_%i:", label);
+                asm_push("mov edx, eax");
+                codegen_x86_atomic_op(b->op, "edx", "ecx");
+                asm_push("lock cmpxchg %s [ebx], %s", keyword, edx);
+                asm_push("jne .atomic_%i", label);
+            }
+            if(kind == ATOMIC_BUILTIN_OP_FETCH){
+                codegen_x86_atomic_op(b->op, "eax", "ecx");
+            }
+            codegen_reduce_register("eax", size, is_signed);
+            generator->ret(&t, "eax");
+            return;
+        case ATOMIC_BUILTIN_CAS_VALUE:
+        case ATOMIC_BUILTIN_CAS_BOOL:
+            asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push("lock cmpxchg %s [ebx], %s", keyword, edx);
+            if(kind == ATOMIC_BUILTIN_CAS_BOOL){
+                asm_push("sete al");
+                asm_push("movzx eax, al");
+                generator->ret(&int_type, "eax");
+                return;
+            }
+            codegen_reduce_register("eax", size, is_signed);
+            generator->ret(&t, "eax");
+            return;
+        case ATOMIC_BUILTIN_CAS:
+        case ATOMIC_BUILTIN_GENERIC_CAS:
+            // The weak form is the strong one. A failure writes what was
+            // there to *expected; mov keeps cmpxchg's ZF for the result.
+            asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            if(kind == ATOMIC_BUILTIN_GENERIC_CAS){
+                asm_push("mov %s, %s [edx]", edx, keyword);
+            }
+            asm_push("mov %s, %s [ecx]", eax, keyword);
+            asm_push("lock cmpxchg %s [ebx], %s", keyword, edx);
+            asm_push("je .atomic_%i", label);
+            asm_push("mov %s [ecx], %s", keyword, eax);
+            asm_push(".atomic_%i:", label);
+            asm_push("sete al");
+            asm_push("movzx eax, al");
+            generator->ret(&int_type, "eax");
+            return;
+        case ATOMIC_BUILTIN_GENERIC_LOAD:
+            asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push("mov %s, %s [ebx]", eax, keyword);
+            asm_push("mov %s [ecx], %s", keyword, eax);
+            generator->ret(&void_type, "0");
+            return;
+        case ATOMIC_BUILTIN_GENERIC_EXCHANGE:
+            asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push("mov %s, %s [ecx]", eax, keyword);
+            asm_push("xchg %s [ebx], %s", keyword, eax);
+            asm_push("mov %s [edx], %s", keyword, eax);
+            generator->ret(&void_type, "0");
+            return;
+    }
+    compiler_error(current_process, "BUG: atomic builtin %s\n", b->name);
+}
+
+// the address of this thread's copy of the variable a name
+// stands for here (parser_thread_local_object): its offset from the
+// thread pointer out of the GOT (initial-exec, `wrt ..tlsie`, which ld
+// turns into local-exec for an executable that defines it), plus the
+// thread pointer at gs:0. One this file defines is reached through its
+// hidden alias (tls_alias). A local of the same name that hides it is
+// not thread-local: its address.
+void codegen_x86_native_tls_address(struct generator* generator, struct native_function* func, struct vector* arguments){
+    (void)func;
+    struct node* name = codegen_x86_atomic_argument(arguments, 0);
+    struct resolver_entity* entity = resolver_get_variable(0, current_process->resolver, name->sval);
+    if(!entity){
+        compiler_error(current_process, "%s is not declared\n", name->sval);
+    }
+    struct resolver_default_entity_data* data = codegen_entity_private(entity);
+    struct datatype void_pointer;
+    datatype_set_void(&void_pointer);
+    void_pointer.pointer_depth = 1;
+    void_pointer.flags |= DATATYPE_FLAG_IS_POINTER;
+    if(!(entity->dtype.flags & DATATYPE_FLAG_IS_THREAD_LOCAL) || (data->flags & RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK)){
+        asm_push("lea eax, [%s]", data->address);
+        generator->ret(&void_pointer, "eax");
+        return;
+    }
+    const char* symbol = name->sval;
+    bool here = variable_defined_in_tree(current_process, symbol);
+    asm_push("mov eax, [%s wrt ..tlsie]", codegen_symbol(here ? tls_alias(current_process, symbol) : symbol));
+    asm_push("add eax, [gs:0]");
+    generator->ret(&void_pointer, "eax");
 }
 
 void codegen_gen_exp(struct generator* generator, struct node* node, int flags){

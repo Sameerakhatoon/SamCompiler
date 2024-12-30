@@ -699,7 +699,9 @@ static bool is_keyword(const char* str){
         || S_EQ(str, "typedef")  || S_EQ(str, "const")
         || S_EQ(str, "extern")   || S_EQ(str, "restrict")
         || S_EQ(str, "volatile") || S_EQ(str, "register")
-        || S_EQ(str, "inline")   || S_EQ(str, "auto");
+        || S_EQ(str, "inline")   || S_EQ(str, "auto")
+        || S_EQ(str, "_Atomic")  || S_EQ(str, "_Thread_local")
+        || S_EQ(str, "__thread");
 }
 
 // '<' is the wart: in `#include <stdio.h>` it opens a string literal, not
