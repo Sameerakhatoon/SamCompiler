@@ -913,9 +913,10 @@ static void riscv64_fence(void){
 
 // tp is the thread pointer. A variable this file defines is
 // local-exec, tp plus its offset; any other initial-exec, its offset
-// read from the GOT.
+// read from the GOT. Under -fPIC every one is initial-exec: a shared
+// object's block is not at a link-time offset from tp.
 static void riscv64_tls_address(const char* name, bool defined_here){
-    if(defined_here){
+    if(defined_here && !(current_process->flags & COMPILE_PROCESS_PIC)){
         asm_push("lui a0, %%tprel_hi(%s)", name);
         asm_push("add a0, a0, tp, %%tprel_add(%s)", name);
         asm_push("addi a0, a0, %%tprel_lo(%s)", name);

@@ -224,6 +224,13 @@ static void codegen_pic_line(const char* line){
         codegen_pic_write(line);
         return;
     }
+    // a thread-local's offset (`[$t wrt ..tlsie]`, which ld
+    // relaxes to a constant in an executable or a static PIE) and the
+    // thread pointer (`[gs:0]`) stay as they are.
+    if(strstr(open, "wrt ..tlsie]") || strncmp(open, "[gs:", 4) == 0){
+        codegen_pic_write(line);
+        return;
+    }
     const char* symbol = open + 1;
     while(*symbol == ' '){
         symbol++;

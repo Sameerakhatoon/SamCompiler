@@ -80,6 +80,31 @@ for target in x86 x86_64 aarch64 riscv64; do
     assert_eq 19 "$rc" "$target: thread-locals across two files"
 done
 
+# A thread-local in a shared object: initial-exec, never local-exec
+# (the object's block is not at a link-time offset from the thread
+# pointer). i386 has no PIC form of it in NASM: a text relocation there.
+printf '_Thread_local int t = 5;\nstatic _Thread_local int s = 1;\nint get(void){ s++; return ++t + s; }\n' > "$tmp/tlib.c"
+printf 'int get(void);\nint main(void){ return get() == 8 && get() == 10 ? 0 : 1; }\n' > "$tmp/tmain.c"
+for target in x86 x86_64 aarch64 riscv64; do
+    case $target in
+        x86)     cc="i686-linux-gnu-gcc"; run="/usr/i686-linux-gnu/lib/ld-linux.so.2 --library-path /usr/i686-linux-gnu/lib:$tmp" ;;
+        x86_64)  cc="gcc"; run="env LD_LIBRARY_PATH=$tmp" ;;
+        aarch64) cc="aarch64-linux-gnu-gcc qemu-aarch64"; run="qemu-aarch64 -L /usr/aarch64-linux-gnu -E LD_LIBRARY_PATH=$tmp" ;;
+        riscv64) cc="riscv64-linux-gnu-gcc qemu-riscv64"; run="qemu-riscv64 -L /usr/riscv64-linux-gnu -E LD_LIBRARY_PATH=$tmp" ;;
+    esac
+    have_tools $cc || continue
+    rm -f "$tmp/libtls.so"
+    ./main -target=$target -shared "$tmp/tlib.c" -o "$tmp/libtls.so" >"$tmp/log" 2>&1 \
+        || fail "$target: thread-local shared object: $(tail -3 "$tmp/log")"
+    ./main -target=$target "$tmp/tmain.c" "$tmp/libtls.so" -o "$tmp/tmain_$target" >"$tmp/log" 2>&1 \
+        || fail "$target: program with the thread-local shared object: $(tail -3 "$tmp/log")"
+    set +e
+    $run "$tmp/tmain_$target"
+    rc=$?
+    set -e
+    assert_eq 0 "$rc" "$target: thread-locals in a shared object"
+done
+
 printf 'int main(void){ _Thread_local int x = 1; return x; }\n' > "$tmp/bad.c"
 for target in x86 x86_64 aarch64 riscv64; do
     if ./main -target=$target "$tmp/bad.c" "$tmp/bad" >"$tmp/log" 2>&1; then

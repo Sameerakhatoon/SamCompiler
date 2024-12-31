@@ -858,9 +858,11 @@ static void aarch64_fence(void){
 
 // tpidr_el0 is the thread pointer. A variable this file
 // defines is local-exec, its offset added in two 12-bit halves; any
-// other initial-exec, its offset read from the GOT.
+// other initial-exec, its offset read from the GOT. Under -fPIC every
+// one is initial-exec: a shared object's block is not at a link-time
+// offset from the thread pointer.
 static void aarch64_tls_address(const char* name, bool defined_here){
-    if(defined_here){
+    if(defined_here && !(current_process->flags & COMPILE_PROCESS_PIC)){
         asm_push("mrs x0, tpidr_el0");
         asm_push("add x0, x0, #:tprel_hi12:%s, lsl #12", name);
         asm_push("add x0, x0, #:tprel_lo12_nc:%s", name);
