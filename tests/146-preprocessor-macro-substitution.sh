@@ -1,27 +1,23 @@
 #!/usr/bin/env bash
-# Ch217: implementing macro functions part 2. Wires up the call
-# path - identifier with `(` directly after now parses the call
-# arguments (handle_identifier_macro_call_arguments using
-# handle_identifier_macro_call_argument_parse + _parentheses for
-# nesting) and invokes preprocessor_macro_function_execute.
-#
-# macro_function_execute itself still iterates the definition
-# body and calls macro_function_push_something which (per
-# upstream) just pushes the raw definition token verbatim
-# without doing argument substitution. So `DBL(7)` with body
-# `x + x` pushes literally `x + x` into token_vec rather than
-# `7 + 7`. Real substitution lands in part 3.
+# Ch218: implementing macro functions part 3. Wires macro
+# function argument substitution. preprocessor_macro_function_
+# push_something now calls push_something_definition first and
+# only falls back to verbatim push when that returns -1.
+# token_vec_push_src_resolve_definition handles IDENTIFIER by
+# routing back through handle_identifier_for_token_vector.
+# preprocessor_evaluate_exp's macro-function-call path now
+# actually invokes preprocessor_evaluate_function_call.
 #
 # Test: feed `#define DBL(x) x + x \n int y = DBL(7);` and
-# confirm the post-preprocessor token_vec contains the literal
-# `x + x` (3 tokens) where the call was. No crash, no leftover
-# DBL identifier.
+# confirm DBL(7) expands to NUMBER(7) + NUMBER(7) (substitution
+# worked) - i.e. two NUMBER tokens with value 7 land in
+# token_vec.
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
 
-probe=$(mktemp /tmp/sam_ch217_probe.XXXXXX.c)
-bin=$(mktemp /tmp/sam_ch217_bin.XXXXXX)
+probe=$(mktemp /tmp/sam_ch218_probe.XXXXXX.c)
+bin=$(mktemp /tmp/sam_ch218_bin.XXXXXX)
 trap 'rm -f "$probe" "$bin"' EXIT
 
 cat > "$probe" <<'EOF'
@@ -40,7 +36,6 @@ void push_nl (struct vector* v){ struct token t = {0}; t.type = TOKEN_TYPE_NEWLI
 
 int main(void){
     struct compile_process* cp = compile_process_create("/dev/null", NULL, 0, NULL);
-    // #define DBL(x) x + x
     push_sym(cp->token_vec_original, '#'); push_id(cp->token_vec_original, "define");
     push_id (cp->token_vec_original, "DBL");
     push_op (cp->token_vec_original, "(");
@@ -50,7 +45,6 @@ int main(void){
     push_op (cp->token_vec_original, "+");
     push_id (cp->token_vec_original, "x");
     push_nl (cp->token_vec_original);
-    // int y = DBL(7);
     push_kw (cp->token_vec_original, "int");
     push_id (cp->token_vec_original, "y");
     push_op (cp->token_vec_original, "=");
@@ -64,23 +58,18 @@ int main(void){
     preprocessor_run(cp);
 
     int n = vector_count(cp->token_vec);
-    int x_count = 0, plus_count = 0, dbl_count = 0;
+    int seven_count = 0;
     for (int i = 0; i < n; i++){
         struct token* t = vector_at(cp->token_vec, i);
-        if (!t) continue;
-        if (t->type == TOKEN_TYPE_IDENTIFIER && t->sval){
-            if (S_EQ(t->sval, "x"))   x_count++;
-            if (S_EQ(t->sval, "DBL")) dbl_count++;
-        }
-        if (t->type == TOKEN_TYPE_OPERATOR && t->sval && S_EQ(t->sval, "+")) plus_count++;
+        if (t && t->type == TOKEN_TYPE_NUMBER && t->llnum == 7) seven_count++;
     }
-    printf("n=%d x=%d plus=%d dbl=%d\n", n, x_count, plus_count, dbl_count);
+    printf("n=%d sevens=%d\n", n, seven_count);
     return 0;
 }
 EOF
 
-gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || fail "ch217 probe failed to compile"
+gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || fail "ch218 probe failed to compile"
 got="$("$bin")"
-# Expect: int y = x + x ; -> 6 tokens, x ident appears twice, + once, no DBL.
-assert_contains "$got" "n=7 x=0 plus=1 dbl=0" "DBL(7) macro call expands. (NB: ch217 originally pushed the body verbatim; ch218 added argument substitution which retroactively makes this test expect the substituted form 7+7.)"
+# Substitution gives `int y = 7 + 7 ;` -> 7 tokens, NUMBER 7 appears twice.
+assert_contains "$got" "n=7 sevens=2" "DBL(7) expands to NUMBER(7) + NUMBER(7) - argument substitution wired"
 pass
