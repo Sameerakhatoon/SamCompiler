@@ -767,6 +767,11 @@ struct datatype {
     // depth whose object is: 1 for `_Atomic int x` and the `*p` of
     // `_Atomic int *p`, 2 for `_Atomic(int*) q` (q itself).
     int    atomic_level;
+    // Which pointer levels are const: bit i for the i-th `*`
+    // from the base type, so bit pointer_depth-1 is the pointer object
+    // itself (`int* const p`). DATATYPE_FLAG_IS_CONST is the base type's
+    // (`const int* p`, `const int x`).
+    int    pointer_const;
     union {
         struct node* struct_node;
         struct node* union_node;
@@ -1111,6 +1116,9 @@ bool datatype_is_struct_or_union(struct datatype* dtype);
 size_t datatype_size_for_array_access(struct datatype* dtype);
 size_t datatype_element_size(struct datatype* dtype);
 struct datatype datatype_array_decay(struct datatype* dtype);
+bool   datatype_is_const(struct datatype* dtype);
+bool   datatype_pointee_is_const(struct datatype* dtype);
+void   datatype_set_pointer_const(struct datatype* dtype, bool is_const);
 bool   datatype_is_whole_array(struct datatype* dtype);
 size_t datatype_alignment(struct datatype* dtype);
 

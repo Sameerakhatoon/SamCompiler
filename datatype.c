@@ -40,7 +40,61 @@ struct datatype datatype_array_decay(struct datatype* dtype){
     decayed.flags &= ~DATATYPE_FLAG_IS_ARRAY;
     decayed.flags |= DATATYPE_FLAG_IS_POINTER;
     decayed.pointer_depth++;
+    datatype_set_pointer_const(&decayed, false);
     return decayed;
+}
+
+// const per pointer level. The pointer levels of a pointer
+// type, 0 for anything else (an array of pointers has its elements').
+static int datatype_const_depth(struct datatype* dtype){
+    return (dtype->flags & DATATYPE_FLAG_IS_POINTER) && dtype->pointer_depth > 0 ? dtype->pointer_depth : 0;
+}
+
+// Whether the object of this type is const: the pointer itself for a
+// pointer (`int* const p`), the base type for anything else.
+bool datatype_is_const(struct datatype* dtype){
+    int depth = datatype_const_depth(dtype);
+    if(depth > 0){
+        return depth <= 30 && ((dtype->pointer_const >> (depth - 1)) & 1);
+    }
+    return dtype->flags & DATATYPE_FLAG_IS_CONST;
+}
+
+// Whether what a pointer points to is const (`const int* p`,
+// `int* const* q`). False for a type that is not a pointer.
+bool datatype_pointee_is_const(struct datatype* dtype){
+    int depth = datatype_const_depth(dtype);
+    if(depth == 0 || depth > 31){
+        return false;
+    }
+    if(depth == 1){
+        return dtype->flags & DATATYPE_FLAG_IS_CONST;
+    }
+    return (dtype->pointer_const >> (depth - 2)) & 1;
+}
+
+// Make the object of this type const or not, as datatype_is_const reads
+// it. Used for a member of a const struct, for the new top level of a
+// pointer made by `&` or an array decay (which is never const), and to
+// drop the bits of levels a dereference took off.
+void datatype_set_pointer_const(struct datatype* dtype, bool is_const){
+    int depth = datatype_const_depth(dtype);
+    if(depth > 0){
+        if(depth > 30){
+            return;
+        }
+        dtype->pointer_const &= (1 << depth) - 1;
+        if(is_const){
+            dtype->pointer_const |= 1 << (depth - 1);
+        } else {
+            dtype->pointer_const &= ~(1 << (depth - 1));
+        }
+        return;
+    }
+    dtype->pointer_const = 0;
+    if(is_const){
+        dtype->flags |= DATATYPE_FLAG_IS_CONST;
+    }
 }
 
 // an array not yet indexed down to one element. After a bracket
@@ -355,6 +409,7 @@ struct datatype datatype_decay(struct datatype* dtype){
     decayed.flags &= ~DATATYPE_FLAG_IS_ARRAY;
     decayed.flags |= DATATYPE_FLAG_IS_POINTER;
     decayed.pointer_depth++;
+    datatype_set_pointer_const(&decayed, false);
     return decayed;
 }
 

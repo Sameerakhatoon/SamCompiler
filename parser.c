@@ -104,8 +104,12 @@ static struct node*    parser_global_initializer_node(struct token* name_token, 
 static void            parse_compound_literal(struct datatype* dtype);
 static void            parser_wide_string_object(struct vector* units, int unit_size, bool is_wchar);
 static void            token_read_dots(size_t amount);
-static void            parser_declare_vla(struct datatype* dtype, struct token* name_token, struct node* size, struct history* history);
+static void            parser_declare_vla(struct datatype* dtype, struct token* name_token, struct vector* dims, struct history* history);
 static const char*     parser_vla_size_of(const char* name);
+static struct parser_vla* parser_vla_find(const char* name);
+static void            parser_vla_pointer_to_array(struct token* name_token, struct vector* dims, size_t element_size, bool is_parameter);
+static bool            parser_vla_active(void);
+static struct node*    parser_vla_lower(struct node* node);
 static struct node*    parser_identifier(const char* name);
 static bool            parse_function_pointer_declarator(struct datatype* dtype, struct token** name_out);
 static struct array_brackets* parse_array_brackets(struct history* history);
@@ -142,29 +146,106 @@ static const struct bitfield*  parser_initializer_bitfield;
 struct parser_vla_block {
     // The hidden local holding the stack pointer before the block's
     // first variable-length array, or NULL while it has none.
-    const char* save;
+    const char*    save;
+    // the stack pointer before each of its variable-length
+    // arrays (const char*, in order), for a goto that leaves the block
+    // or jumps back over one; and a number naming the block.
+    struct vector* saves;
+    int            id;
 };
 struct parser_vla_jump {
     bool is_loop;
     // The number of blocks open when the loop or switch began.
     int  depth;
 };
+// the shape of a multi-dimensional variable-length array, or
+// of a pointer to an array (`int (*p)[n]`, a parameter `int a[][n]`),
+// all of which are a flat `T*` here. dims counts the subscripts down to
+// an element; stride k is how many elements `[k]` steps over: a hidden
+// local evaluated at the declaration, or a constant.
+struct parser_vla_stride {
+    const char*   name;
+    unsigned long value;
+};
+struct parser_vla_info {
+    int                       dims;
+    struct parser_vla_stride* strides;
+    size_t                    element_size;
+};
 struct parser_vla {
     const char* name;
-    // The hidden local holding its size in bytes, for sizeof.
+    // The hidden local holding its size in bytes, for sizeof; NULL for a
+    // pointer to an array and for a name that hides an outer one.
     const char* size;
     int         depth;
+    // NULL for a one-dimensional array and for a hiding name.
+    struct parser_vla_info* info;
+};
+// A parameter that is a pointer to an array (`int a[][n]`, `int
+// (*a)[n]`): its strides are worked out when the body starts.
+struct parser_vla_param {
+    const char*     name;
+    // The array's dimensions, the ones after the pointer.
+    struct vector*  dims;
+    size_t          element_size;
+};
+// An expression that stands for part of such an array: `a` (level 0),
+// `a[i]` (level 1), `p + 1`. Subscripting it steps over stride[level].
+struct parser_vla_view {
+    struct node*            node;
+    struct parser_vla_info* info;
+    int                     level;
+    // The view is offset elements (NULL for 0) into base, the name of
+    // the array or pointer.
+    const char*             base;
+    struct node*            offset;
+};
+// For a goto out of a block with a variable-length array: where each
+// label is (the blocks open there and how many arrays each had), and
+// each goto, with a blank statement before it that becomes the restore.
+struct parser_vla_place {
+    int            id;
+    int            count;
+    struct vector* saves;
+};
+struct parser_vla_label {
+    const char*    name;
+    struct vector* blocks;
+};
+struct parser_vla_goto {
+    const char*    name;
+    struct vector* blocks;
+    struct node*   restore;
 };
 // variable-length arrays. parse_array_brackets may leave a
 // runtime size for parse_variable when parser_vla_allowed; the blocks
 // being parsed (struct parser_vla_block), the loops and switches being
 // parsed (struct parser_vla_jump), and the arrays in scope (struct
 // parser_vla).
-static bool                    parser_vla_allowed;
-static struct node*            parser_vla_size;
+// parse_array_brackets leaves every dimension (struct node*,
+// NULL for `[]`) in parser_vla_dims, as parser_vla_mode asks: for a
+// local or a sizeof type when one is not constant, for a parameter also
+// when there are two or more, for a pointer to an array always. A
+// pointer to an array declarator leaves its dimensions in
+// parser_vla_pointer_dims for parse_variable.
+enum {
+    PARSER_VLA_MODE_NONE,
+    PARSER_VLA_MODE_LOCAL,
+    PARSER_VLA_MODE_PARAMETER,
+    PARSER_VLA_MODE_ALWAYS,
+};
+static int                     parser_vla_mode;
 static struct vector*          parser_vla_blocks;
 static struct vector*          parser_vla_jumps;
 static struct vector*          parser_vlas;
+static struct vector*          parser_vla_dims;
+static size_t                  parser_vla_pointer_element;
+static struct vector*          parser_vla_pointer_dims;
+static struct vector*          parser_vla_params;
+static struct vector*          parser_vla_views;
+static struct vector*          parser_vla_done;
+static struct vector*          parser_vla_labels;
+static struct vector*          parser_vla_gotos;
 // Statements that belong right after the statement being parsed: the
 // stores a local's brace initializer turns into. parse_body takes them.
 static struct vector*          parser_pending_statements;
@@ -1082,6 +1163,9 @@ static void parse_for_cast(void){
     // `(int (*)(int))p`
     struct token* no_name = 0;
     parse_function_pointer_declarator(&dtype, &no_name);
+    if(parser_vla_pointer_dims){
+        compiler_error(current_process, "A cast to a pointer to an array is not supported\n");
+    }
     // `(int[]){ 1, 2 }`: the abstract declarator's brackets.
     if(token_next_is_operator("[")){
         struct array_brackets* brackets = parse_array_brackets(history_begin(0));
@@ -1110,9 +1194,12 @@ static void parse_for_cast(void){
 // with op `[]`.
 static void parse_for_array(struct history* history){
     struct node* left_node = node_peek_or_null();
-    if(left_node){
-        node_pop();
+    // `sizeof[1]`: a subscript with nothing before it reached the
+    // resolver with no entity to index and failed an assert.
+    if(!left_node || ((history->flags & EXPRESSION_IS_UNARY) && node_count() <= history->unary_operand_base)){
+        compiler_error(current_process, "Expected an expression before '['\n");
     }
+    node_pop();
     expect_op("[");
     // The index is a whole expression of its own, also inside a unary's
     // operand (`&a[i & 1]`).
@@ -1385,6 +1472,29 @@ static int parser_get_pointer_depth(void){
     return depth;
 }
 
+// The `*`s of a declarator with the qualifiers after each: `* const *
+// volatile`. Bit i of *consts is set when the i-th `*` is const
+//; volatile and restrict change nothing (see
+// is_keyword_variable_modifier). Before, a const after a `*` set the
+// declaration's single const flag, and a `*` after it was a syntax
+// error (`char* const* argv`).
+static int parser_get_pointer_levels(int* consts){
+    int depth = 0;
+    *consts = 0;
+    while(token_next_is_operator("*")){
+        token_next();
+        depth++;
+        while(token_next_is_keyword("const") || token_next_is_keyword("volatile")
+              || token_next_is_keyword("restrict")){
+            if(token_next_is_keyword("const") && depth <= 30){
+                *consts |= 1 << (depth - 1);
+            }
+            token_next();
+        }
+    }
+    return depth;
+}
+
 static bool parser_datatype_is_secondary_allowed(int expected_type){
     return expected_type == DATA_TYPE_EXPECT_PRIMITIVE;
 }
@@ -1619,6 +1729,8 @@ static struct function_prototype* parser_parameter_types(void){
         if(!parse_function_pointer_declarator(&type, &name) && token_is_identifier(token_peek_next())){
             token_next();
         }
+        // A pointer to an array passes as the pointer it is.
+        parser_vla_pointer_dims = 0;
         if(token_next_is_operator("[")){
             parse_array_brackets(history_begin(0));
             type.flags |= DATATYPE_FLAG_IS_POINTER;
@@ -1650,7 +1762,8 @@ static bool parse_function_pointer_declarator(struct datatype* dtype, struct tok
     }
 
     expect_op("(");
-    int depth = parser_get_pointer_depth();
+    int consts = 0;
+    int depth = parser_get_pointer_levels(&consts);
     struct token* name = 0;
     if(token_is_identifier(token_peek_next())){
         name = token_next();
@@ -1667,6 +1780,24 @@ static bool parse_function_pointer_declarator(struct datatype* dtype, struct tok
         parser_skip_parameters();
     }
     expect_sym(')');
+    // `T (*p)[n]...`, a pointer to an array: a flat `T*`; the
+    // dimensions go to parse_variable.
+    if(token_next_is_operator("[")){
+        if(depth != 1 || brackets){
+            compiler_error(current_process, "Only a pointer to an array, `T (*p)[n]`, is supported\n");
+        }
+        parser_vla_pointer_element = datatype_size(dtype);
+        parser_vla_mode = PARSER_VLA_MODE_ALWAYS;
+        parse_array_brackets(history_begin(0));
+        parser_vla_mode = PARSER_VLA_MODE_NONE;
+        parser_vla_pointer_dims = parser_vla_dims;
+        parser_vla_dims = 0;
+        dtype->flags |= DATATYPE_FLAG_IS_POINTER;
+        dtype->pointer_depth++;
+        datatype_set_pointer_const(dtype, consts & 1);
+        *name_out = name;
+        return true;
+    }
     // A call through the pointer converts its arguments to these
     // types and checks their number.
     struct function_prototype* prototype = parser_parameter_types();
@@ -1675,6 +1806,9 @@ static bool parse_function_pointer_declarator(struct datatype* dtype, struct tok
     *function_return = *dtype;
     dtype->flags |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_FUNCTION_POINTER;
     dtype->pointer_depth   = function_return->pointer_depth + depth;
+    if(dtype->pointer_depth <= 30){
+        dtype->pointer_const = function_return->pointer_const | (consts << function_return->pointer_depth);
+    }
     dtype->function_return = function_return;
     dtype->function_params = prototype;
     if(brackets){
@@ -1758,6 +1892,9 @@ static void parse_atomic_type_specifier(struct datatype* dtype){
     }
     parser_type_sign_settled = true;
 }
+// Whether parse_datatype_type read `signed` or `unsigned` after the type
+// keyword.
+static bool parser_type_sign_given;
 
 static void parse_datatype_type(struct datatype* dtype){
     struct token* datatype_token            = 0;
@@ -1798,12 +1935,18 @@ static void parse_datatype_type(struct datatype* dtype){
         }
     }
 
-    // `int**` etc.
-    int pointer_depth = parser_get_pointer_depth();
+    // Qualifiers between the type and its `*`s (`int const* p`,
+    // `char unsigned`) belong to the base type.
+    parser_type_sign_given = parse_datatype_modifiers(dtype);
+
+    // `int**`, `int* const*` etc.
+    int pointer_const = 0;
+    int pointer_depth = parser_get_pointer_levels(&pointer_const);
 
     // Keep the spelling so downstream can render it.
     dtype->type_str      = datatype_token->sval;
     dtype->pointer_depth = pointer_depth;
+    dtype->pointer_const = pointer_const;
     if(pointer_depth > 0){
         dtype->flags |= DATATYPE_FLAG_IS_POINTER;
     }
@@ -1826,6 +1969,7 @@ static void parse_datatype(struct datatype* dtype){
     parser_sign_given = false;
     sign_given |= parser_type_sign_settled;
     parser_type_sign_settled = false;
+    sign_given |= parser_type_sign_given;
     sign_given |= parse_datatype_modifiers(dtype);
     // Plain char is unsigned on aarch64 and riscv64; it was
     // always signed, so `char c = 200` read back as -56 there.
@@ -2185,6 +2329,10 @@ static void parse_expressionable_root(struct history* history){
     if(vector_count(parser_bitfield_names)){
         result_node = parser_lower_bitfields(result_node, !is_statement);
     }
+    // subscripts of multi-dimensional variable-length arrays.
+    if(parser_vla_active()){
+        result_node = parser_vla_lower(result_node);
+    }
     node_push(result_node);
 }
 
@@ -2491,42 +2639,56 @@ static struct node* parser_bracket_of(size_t n){
 static struct array_brackets* parse_array_brackets(struct history* history){
     struct array_brackets* brackets = array_brackets_new();
     // For this declarator only, not one inside its size expression.
-    bool vla_allowed = parser_vla_allowed;
-    parser_vla_allowed = false;
+    int mode = parser_vla_mode;
+    parser_vla_mode = PARSER_VLA_MODE_NONE;
+    struct vector* dims = vector_create(sizeof(struct node*));
+    bool runtime = false;
     while(token_next_is_operator("[")){
         expect_op("[");
+        struct node* size = 0;
         if(token_is_symbol(token_peek_next(), ']')){
+            expect_sym(']');
+        } else {
+            parse_expressionable_root(history);
+            expect_sym(']');
+            size = node_pop();
+            struct constant value;
+            if(!constant_fold(current_process, size, &value)){
+                runtime = true;
+            }
+        }
+        vector_push(dims, &size);
+    }
+
+    // A local or a parameter may have runtime
+    // sizes; a parameter with two or more dimensions is a pointer to an
+    // array, made like one with runtime sizes.
+    int count = vector_count(dims);
+    if((mode == PARSER_VLA_MODE_LOCAL && runtime)
+       || (mode == PARSER_VLA_MODE_PARAMETER && (runtime || count >= 2))
+       || mode == PARSER_VLA_MODE_ALWAYS){
+        parser_vla_dims = dims;
+        return brackets;
+    }
+    for(int i = 0; i < count; i++){
+        struct node* size = *(struct node**)vector_at(dims, i);
+        if(!size){
             // `int x[];` - empty brackets, no size. An initializer gives
             // the size (parse_variable); `int m[][3]` keeps a 0 in the
             // first dimension so the [3] still counts.
-            expect_sym(']');
-            if(!token_next_is_operator("[")){
+            if(i == count - 1){
                 break;
             }
             array_brackets_add(brackets, parser_bracket_of(0));
             continue;
         }
-        parse_expressionable_root(history);
-        expect_sym(']');
-
         // The size is a constant expression: `int a[N * 2]`, `char
-        // s[sizeof(int) + 1]`. A local may have one runtime size, a
-        // variable-length array, which parse_variable takes.
-        struct constant size;
-        if(vla_allowed && vector_count(brackets->n_brackets) == 0
-           && !constant_fold(current_process, node_peek(), &size)){
-            parser_vla_size = node_pop();
-            if(token_next_is_operator("[")){
-                compiler_error(current_process, "Only a one-dimensional variable-length array is supported\n");
-            }
-            break;
-        }
-        struct node* exp_node = parser_fold_required(node_pop(), "An array size");
+        // s[sizeof(int) + 1]`.
+        struct node* exp_node = parser_fold_required(size, "An array size");
         make_bracket_node(exp_node);
-
-        struct node* bracket_node = node_pop();
-        array_brackets_add(brackets, bracket_node);
+        array_brackets_add(brackets, node_pop());
     }
+    vector_free(dims);
     return brackets;
 }
 
@@ -3064,6 +3226,10 @@ static struct node* parser_object_at(const char* name, size_t offset, struct dat
         address = node_pop();
     }
     struct datatype target = parser_pointer_to(type);
+    // An initializer may set a const object: `const int a[2] = {1, 2};`
+    // was rejected as an assignment to one.
+    target.flags &= ~DATATYPE_FLAG_IS_CONST;
+    target.pointer_const = 0;
     make_cast_node(&target, address);
     make_exp_parentheses_node(node_pop());
     make_unary_node("*", node_pop());
@@ -3280,70 +3446,534 @@ static void parser_hidden_local(struct token* name, struct datatype* type){
     vector_push(parser_preceding_statements, &var_node);
 }
 
-static void parser_declare_vla(struct datatype* dtype, struct token* name_token, struct node* size, struct history* history){
-    static int count = 0;
-    int number = count++;
+// Numbers the hidden locals of every array.
+static int parser_vla_number;
+
+// unsigned long, the type of sizes and strides.
+static struct datatype parser_vla_size_type(void){
+    struct datatype size_type = datatype_for_int();
+    size_type.type = DATA_TYPE_LONG;
+    size_type.type_str = "long";
+    size_type.size = current_process->target->long_size;
+    size_type.flags = 0;
+    return size_type;
+}
+
+static struct node* parser_vla_number_node(unsigned long value){
+    struct constant c = { value, parser_vla_size_type() };
+    return constant_node(&c);
+}
+
+// `(unsigned long)(expr)`
+static struct node* parser_vla_as_size(struct node* expr){
+    struct datatype size_type = parser_vla_size_type();
+    make_exp_parentheses_node(expr);
+    make_cast_node(&size_type, node_pop());
+    return node_pop();
+}
+
+static struct node* parser_vla_binary(struct node* left, struct node* right, const char* op){
+    make_exp_node(left, right, op);
+    return node_pop();
+}
+
+static struct node* parser_vla_parens(struct node* node){
+    make_exp_parentheses_node(node);
+    return node_pop();
+}
+
+// `name = value;` after the declaration.
+static void parser_vla_assign_later(const char* name, struct node* value){
+    struct node* store = parser_vla_binary(parser_identifier(name), value, "=");
+    vector_push(parser_pending_statements, &store);
+}
+
+static struct node* parser_vla_stride_node(struct parser_vla_stride* stride){
+    return stride->name ? parser_identifier(stride->name) : parser_vla_number_node(stride->value);
+}
+
+// The strides of an array whose dimensions are `dims` (the first may be
+// NULL: a pointer to an array, a parameter): stride k is the product of
+// the dimensions after k, a constant while they all are, else a hidden
+// local set right after the declaration, so each size is evaluated once
+// (from the last dimension to the first).
+static struct parser_vla_info* parser_vla_info_new(struct vector* dims, size_t element_size, int number){
+    struct parser_vla_info* info = calloc(1, sizeof(struct parser_vla_info));
+    info->dims = vector_count(dims);
+    info->element_size = element_size;
+    info->strides = calloc(info->dims, sizeof(struct parser_vla_stride));
+    struct datatype size_type = parser_vla_size_type();
+    unsigned long product = 1;
+    const char* product_name = 0;
+    for(int k = info->dims - 2; k >= 0; k--){
+        struct node* dim = *(struct node**)vector_at(dims, k + 1);
+        if(!dim){
+            compiler_error(current_process, "Only the first dimension of an array may be left out\n");
+        }
+        struct constant value;
+        if(!product_name && constant_fold(current_process, dim, &value)){
+            if(value.value <= 0){
+                compiler_error(current_process, "An array size must be greater than 0\n");
+            }
+            product *= (unsigned long)value.value;
+            info->strides[k].value = product;
+            continue;
+        }
+        char format[48];
+        snprintf(format, sizeof(format), "__vla_stride_%%i_%i", k);
+        struct token* name = parser_hidden_name(format, number);
+        parser_hidden_local(name, &size_type);
+        struct node* previous = product_name ? parser_identifier(product_name) : parser_vla_number_node(product);
+        parser_vla_assign_later(name->sval, parser_vla_binary(previous, parser_vla_as_size(dim), "*"));
+        info->strides[k].name = name->sval;
+        product_name = name->sval;
+    }
+    // The last subscript steps over single elements.
+    info->strides[info->dims - 1].value = 1;
+    return info;
+}
+
+// `T a[d0][d1]...;` in a block, some size not
+// constant: `T* a` pointing at d0 * d1 * ... * sizeof(T) bytes taken off
+// the stack. A multi-dimensional one keeps its strides (parser_vla_info)
+// for the subscripts. Each array saves the stack pointer before it
+// (__vla_save_N), for a goto that jumps back over it; the block gives
+// its first one back at its end, and break and continue too.
+static void parser_declare_vla(struct datatype* dtype, struct token* name_token, struct vector* dims, struct history* history){
+    int number = parser_vla_number++;
     if(token_next_is_operator("=")){
         compiler_error(current_process, "The variable-length array %s cannot be initialized\n", name_token->sval);
     }
     if(!vector_count(parser_vla_blocks)){
         compiler_error(current_process, "A variable-length array must be in a block\n");
     }
+    struct node* first = *(struct node**)vector_at(dims, 0);
+    if(!first){
+        compiler_error(current_process, "The variable-length array %s needs a size\n", name_token->sval);
+    }
     parser_vla_natives();
     struct datatype element = *dtype;
-    struct datatype size_type = datatype_for_int();
-    size_type.type = DATA_TYPE_LONG;
-    size_type.type_str = "long";
-    size_type.size = current_process->target->long_size;
-    size_type.flags = 0;
+    struct datatype size_type = parser_vla_size_type();
+    struct parser_vla_info* info = 0;
+    if(vector_count(dims) > 1){
+        info = parser_vla_info_new(dims, datatype_size(&element), number);
+    }
 
-    // __vla_size_N = (unsigned long)(n) * sizeof(T);
+    // __vla_size_N = (unsigned long)(d0) * stride0 * sizeof(T);
     struct token* size_name = parser_hidden_name("__vla_size_%i", number);
     parser_hidden_local(size_name, &size_type);
-    struct constant element_size = { datatype_size(&element), size_type };
-    make_cast_node(&size_type, size);
-    make_exp_parentheses_node(node_pop());
-    make_exp_node(node_pop(), constant_node(&element_size), "*");
-    make_exp_node(parser_identifier(size_name->sval), node_pop(), "=");
-    struct node* set_size = node_pop();
-
-    // The block's first: __vla_save_N = __builtin_vla_save();
-    struct parser_vla_block* block = vector_back(parser_vla_blocks);
-    struct node* save = 0;
-    if(!block->save){
-        struct token* save_name = parser_hidden_name("__vla_save_%i", number);
-        parser_hidden_local(save_name, &size_type);
-        block->save = save_name->sval;
-        make_exp_node(parser_identifier(save_name->sval), parser_builtin_call("__builtin_vla_save", 0), "=");
-        save = node_pop();
+    struct node* bytes = parser_vla_as_size(first);
+    if(info){
+        bytes = parser_vla_binary(bytes, parser_vla_stride_node(&info->strides[0]), "*");
     }
+    parser_vla_assign_later(size_name->sval,
+        parser_vla_binary(bytes, parser_vla_number_node(datatype_size(&element)), "*"));
+
+    // __vla_save_N = __builtin_vla_save();
+    struct parser_vla_block* block = vector_back(parser_vla_blocks);
+    struct token* save_name = parser_hidden_name("__vla_save_%i", number);
+    parser_hidden_local(save_name, &size_type);
+    if(!block->save){
+        block->save = save_name->sval;
+    }
+    if(!block->saves){
+        block->saves = vector_create(sizeof(const char*));
+    }
+    vector_push(block->saves, &save_name->sval);
+    parser_vla_assign_later(save_name->sval, parser_builtin_call("__builtin_vla_save", 0));
 
     // T* a; a = __builtin_vla_alloc(__vla_size_N);
     struct datatype pointer = parser_pointer_to(&element);
     make_variable_node_and_register(history, &pointer, name_token, 0);
-    make_exp_node(parser_identifier(name_token->sval),
-        parser_builtin_call("__builtin_vla_alloc", parser_identifier(size_name->sval)), "=");
-    struct node* allocate = node_pop();
-    vector_push(parser_pending_statements, &set_size);
-    if(save){
-        vector_push(parser_pending_statements, &save);
-    }
-    vector_push(parser_pending_statements, &allocate);
+    parser_vla_assign_later(name_token->sval,
+        parser_builtin_call("__builtin_vla_alloc", parser_identifier(size_name->sval)));
 
-    struct parser_vla vla = { .name = name_token->sval, .size = size_name->sval, .depth = parser_scope_depth() };
+    struct parser_vla vla = { .name = name_token->sval, .size = size_name->sval, .depth = parser_scope_depth(), .info = info };
     vector_push(parser_vlas, &vla);
+}
+
+// `name` is a pointer to an array with dimensions `dims`
+// (`T (*p)[n][m]`, or the parameter `T p[][n][m]`), already declared a
+// flat `T*`. A local's strides are set right after its declaration, a
+// parameter's when the function body starts.
+static void parser_vla_pointer_to_array(struct token* name_token, struct vector* dims, size_t element_size, bool is_parameter){
+    struct vector* all = vector_create(sizeof(struct node*));
+    struct node* none = 0;
+    vector_push(all, &none);
+    for(int i = 0; i < vector_count(dims); i++){
+        vector_push(all, vector_at(dims, i));
+    }
+    if(is_parameter){
+        struct parser_vla_param param = { .name = name_token->sval, .dims = all, .element_size = element_size };
+        vector_push(parser_vla_params, &param);
+        return;
+    }
+    struct parser_vla vla = { .name = name_token->sval, .depth = parser_scope_depth(),
+        .info = parser_vla_info_new(all, element_size, parser_vla_number++) };
+    vector_push(parser_vlas, &vla);
+}
+
+// The parameters that are pointers to arrays, at the start of the
+// function body: their strides.
+static void parser_vla_begin_parameters(void){
+    for(int i = 0; i < vector_count(parser_vla_params); i++){
+        struct parser_vla_param* param = vector_at(parser_vla_params, i);
+        struct parser_vla vla = { .name = param->name, .depth = parser_scope_depth(),
+            .info = parser_vla_info_new(param->dims, param->element_size, parser_vla_number++) };
+        vector_push(parser_vlas, &vla);
+    }
+    vector_clear(parser_vla_params);
+}
+
+// The array (or pointer to an array, or a name hiding one) `name`
+// stands for here, or NULL.
+static struct parser_vla* parser_vla_find(const char* name){
+    for(int i = vector_count(parser_vlas) - 1; i >= 0; i--){
+        struct parser_vla* vla = vector_at(parser_vlas, i);
+        if(S_EQ(vla->name, name)){
+            return vla;
+        }
+    }
+    return 0;
 }
 
 // The hidden local holding sizeof of the variable-length array `name`
 // in scope, or NULL.
 static const char* parser_vla_size_of(const char* name){
-    for(int i = vector_count(parser_vlas) - 1; i >= 0; i--){
+    struct parser_vla* vla = parser_vla_find(name);
+    return vla ? vla->size : 0;
+}
+
+// ---- subscripts of a multi-dimensional array ----
+//
+// After an expression is parsed, parser_vla_lower rewrites what uses a
+// multi-dimensional array or a pointer to an array (a "view": `a`,
+// `a[i]`, `p + 1`, at the level of subscripts taken so far):
+//
+//     a[i]       (a + ((i) * stride0))        a view at level 1
+//     a[i][j]    a[(i) * stride0 + (j)]       the element
+//     *a         (a)                          a view at level 1
+//     p + k      p + (k) * stride0            (also -, += and -=)
+//     p++        p += stride0
+//     p - q      (p - q) / stride0
+//
+// A view keeps the array's name and its offset in elements, so an
+// element is always a subscript of the flat `T*` variable itself, the
+// form all four backends handle (x86's access chains included); the
+// rest are plain pointer expressions. Rewritten nodes are remembered
+// (parser_vla_done) so an expression lowered again (an inner one is
+// lowered when its own parse ends, then within the outer one) is not
+// scaled twice.
+
+static bool parser_vla_active(void){
+    for(int i = 0; i < vector_count(parser_vlas); i++){
         struct parser_vla* vla = vector_at(parser_vlas, i);
-        if(S_EQ(vla->name, name)){
-            return vla->size;
+        if(vla->size || vla->info){
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool parser_vla_is_done(struct node* node){
+    for(int i = vector_count(parser_vla_done) - 1; i >= 0; i--){
+        if(*(struct node**)vector_at(parser_vla_done, i) == node){
+            return true;
+        }
+    }
+    return false;
+}
+
+static struct node* parser_vla_mark_done(struct node* node){
+    vector_push(parser_vla_done, &node);
+    return node;
+}
+
+static struct node* parser_vla_view_new(struct node* node, struct parser_vla_info* info, int level,
+                                        const char* base, struct node* offset){
+    struct parser_vla_view view = { node, info, level, base, offset };
+    vector_push(parser_vla_views, &view);
+    return node;
+}
+
+static bool parser_vla_view_of(struct node* node, struct parser_vla_view* out){
+    while(node){
+        for(int i = vector_count(parser_vla_views) - 1; i >= 0; i--){
+            struct parser_vla_view* view = vector_at(parser_vla_views, i);
+            if(view->node == node){
+                *out = *view;
+                return true;
+            }
+        }
+        if(node->type != NODE_TYPE_EXPRESSION_PARENTHESES){
+            break;
+        }
+        node = node->parenthesis.exp;
+    }
+    if(node && node->type == NODE_TYPE_IDENTIFIER){
+        struct parser_vla* vla = parser_vla_find(node->sval);
+        if(vla && vla->info){
+            *out = (struct parser_vla_view){ node, vla->info, 0, node->sval, 0 };
+            return true;
+        }
+    }
+    return false;
+}
+
+// A view whose arithmetic steps over more than one element.
+static bool parser_vla_view_scales(struct parser_vla_view* view){
+    return view->level + 1 < view->info->dims;
+}
+
+// `(value) * stride[level]`
+static struct node* parser_vla_scaled(struct node* value, struct parser_vla_info* info, int level){
+    struct parser_vla_stride* stride = &info->strides[level];
+    if(!stride->name && stride->value == 1){
+        return parser_vla_parens(value);
+    }
+    return parser_vla_binary(parser_vla_parens(value), parser_vla_stride_node(stride), "*");
+}
+
+// offset op more, either of which may be NULL (0).
+static struct node* parser_vla_offset(struct node* offset, struct node* more, const char* op){
+    if(!more){
+        return offset;
+    }
+    if(!offset){
+        return S_EQ(op, "+") ? more : parser_vla_binary(parser_vla_number_node(0), more, op);
+    }
+    return parser_vla_binary(offset, more, op);
+}
+
+// The view at `level` that is `offset` elements into `base`: as a value
+// the pointer `(base + offset)`; at the last level the element
+// `base[offset]`, a subscript of the pointer variable itself, the form
+// every backend handles best.
+static struct node* parser_vla_view_at(struct parser_vla_info* info, int level, const char* base, struct node* offset){
+    if(level < info->dims){
+        struct node* value = offset
+            ? parser_vla_mark_done(parser_vla_binary(parser_identifier(base), parser_vla_parens(offset), "+"))
+            : parser_identifier(base);
+        return parser_vla_view_new(parser_vla_parens(value), info, level, base, offset);
+    }
+    make_bracket_node(offset ? offset : parser_vla_number_node(0));
+    struct node* element = parser_vla_mark_done(parser_vla_binary(parser_identifier(base), node_pop(), "[]"));
+    return element;
+}
+
+// view[index]
+static struct node* parser_vla_subscript(struct parser_vla_view* view, struct node* index){
+    struct node* offset = parser_vla_offset(view->offset, parser_vla_scaled(index, view->info, view->level), "+");
+    return parser_vla_view_at(view->info, view->level + 1, view->base, offset);
+}
+
+static struct node* parser_vla_lower(struct node* node);
+
+static struct node* parser_vla_lower_unary(struct node* node){
+    node->unary.operand = parser_vla_lower(node->unary.operand);
+    struct parser_vla_view view;
+    if(op_is_indirection(node->unary.op) && parser_vla_view_of(node->unary.operand, &view)){
+        int depth = node->unary.indirection.depth > 0 ? node->unary.indirection.depth : 1;
+        int level = view.level + depth;
+        if(level > view.info->dims){
+            return node;
+        }
+        return parser_vla_view_at(view.info, level, view.base, view.offset);
+    }
+    if(op_is_address(node->unary.op)){
+        struct node* operand = node->unary.operand;
+        while(operand->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            operand = operand->parenthesis.exp;
+        }
+        // `&a` of a variable-length array is its address, the pointer
+        // a holds, not where that pointer is kept.
+        if(operand->type == NODE_TYPE_IDENTIFIER){
+            struct parser_vla* vla = parser_vla_find(operand->sval);
+            if(vla && vla->size){
+                return operand;
+            }
+        }
+        // `&a[i]` points at the row a[i], which is where it starts.
+        if(parser_vla_view_of(node->unary.operand, &view) && view.level > 0){
+            return parser_vla_view_at(view.info, view.level - 1, view.base, view.offset);
+        }
+        return node;
+    }
+    if(is_increment_operator(node->unary.op) && parser_vla_view_of(node->unary.operand, &view)
+       && parser_vla_view_scales(&view)){
+        const char* op = S_EQ(node->unary.op, "++") ? "+=" : "-=";
+        struct node* step = parser_vla_mark_done(
+            parser_vla_binary(node->unary.operand, parser_vla_stride_node(&view.info->strides[view.level]), op));
+        if(!(node->unary.flags & UNARY_FLAG_IS_POSTFIX)){
+            return step;
+        }
+        // The old value: the new one stepped back.
+        return parser_vla_parens(parser_vla_mark_done(parser_vla_binary(parser_vla_parens(step),
+            parser_vla_stride_node(&view.info->strides[view.level]), S_EQ(op, "+=") ? "-" : "+")));
+    }
+    return node;
+}
+
+static struct node* parser_vla_lower_expression(struct node* node){
+    const char* op = node->exp.op;
+    node->exp.left = parser_vla_lower(node->exp.left);
+    if(is_access_node(node)){
+        return node;
+    }
+    node->exp.right = parser_vla_lower(node->exp.right);
+    if(parser_vla_is_done(node)){
+        return node;
+    }
+    struct parser_vla_view view;
+    if(is_array_node(node) && node->exp.right && node->exp.right->type == NODE_TYPE_BRACKET
+       && parser_vla_view_of(node->exp.left, &view)){
+        return parser_vla_subscript(&view, node->exp.right->bracket.inner);
+    }
+    struct parser_vla_view left, right;
+    bool left_view  = parser_vla_view_of(node->exp.left, &left) && parser_vla_view_scales(&left);
+    bool right_view = parser_vla_view_of(node->exp.right, &right) && parser_vla_view_scales(&right);
+    if(S_EQ(op, "-") && left_view && right_view && left.level == right.level){
+        // Rows between two pointers into the same array.
+        parser_vla_mark_done(node);
+        struct parser_vla_stride* stride = &left.info->strides[left.level];
+        return parser_vla_parens(parser_vla_binary(parser_vla_parens(node), parser_vla_stride_node(stride), "/"));
+    }
+    if((S_EQ(op, "+") || S_EQ(op, "-") || S_EQ(op, "+=") || S_EQ(op, "-=")) && left_view && !right_view){
+        struct node* scaled = parser_vla_scaled(node->exp.right, left.info, left.level);
+        node->exp.right = scaled;
+        parser_vla_mark_done(node);
+        if(S_EQ(op, "+=") || S_EQ(op, "-=")){
+            return node;
+        }
+        return parser_vla_view_new(node, left.info, left.level, left.base, parser_vla_offset(left.offset, scaled, op));
+    }
+    if(S_EQ(op, "+") && right_view && !left_view){
+        struct node* scaled = parser_vla_scaled(node->exp.left, right.info, right.level);
+        node->exp.left = scaled;
+        parser_vla_mark_done(node);
+        return parser_vla_view_new(node, right.info, right.level, right.base, parser_vla_offset(right.offset, scaled, "+"));
+    }
+    return node;
+}
+
+static struct node* parser_vla_lower(struct node* node){
+    if(!node){
+        return node;
+    }
+    switch(node->type){
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            node->parenthesis.exp = parser_vla_lower(node->parenthesis.exp);
+            return node;
+        case NODE_TYPE_CAST:
+            node->cast.operand = parser_vla_lower(node->cast.operand);
+            return node;
+        case NODE_TYPE_TENARY:
+            node->tenary.true_node  = parser_vla_lower(node->tenary.true_node);
+            node->tenary.false_node = parser_vla_lower(node->tenary.false_node);
+            return node;
+        case NODE_TYPE_BRACKET:
+            node->bracket.inner = parser_vla_lower(node->bracket.inner);
+            return node;
+        case NODE_TYPE_UNARY:
+            return parser_vla_lower_unary(node);
+        case NODE_TYPE_EXPRESSION:
+            return parser_vla_lower_expression(node);
+    }
+    return node;
+}
+
+// sizeof of a view: the bytes of one row at its level.
+static struct node* parser_vla_view_size(struct parser_vla_view* view){
+    struct parser_vla_stride* stride = &view->info->strides[view->level - 1];
+    return parser_vla_binary(parser_vla_stride_node(stride), parser_vla_number_node(view->info->element_size), "*");
+}
+
+// ---- a goto out of a block with a variable-length array ----
+
+static int parser_vla_block_ids;
+
+// Where the parse is: the open blocks and how many arrays each has.
+static struct vector* parser_vla_place_here(void){
+    struct vector* places = vector_create(sizeof(struct parser_vla_place));
+    for(int i = 0; i < vector_count(parser_vla_blocks); i++){
+        struct parser_vla_block* block = vector_at(parser_vla_blocks, i);
+        struct parser_vla_place place = { block->id, block->saves ? vector_count(block->saves) : 0, block->saves };
+        vector_push(places, &place);
+    }
+    return places;
+}
+
+static void parser_vla_note_label(const char* name){
+    struct parser_vla_label label = { name, parser_vla_place_here() };
+    vector_push(parser_vla_labels, &label);
+}
+
+// A goto: a blank statement before it, which becomes the restore once
+// the label is known, when some open block has an array.
+static void parser_vla_note_goto(const char* name){
+    struct vector* places = parser_vla_place_here();
+    bool any = false;
+    for(int i = 0; i < vector_count(places); i++){
+        any |= ((struct parser_vla_place*)vector_at(places, i))->count > 0;
+    }
+    if(!any){
+        vector_free(places);
+        return;
+    }
+    node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+    struct node* restore = node_pop();
+    vector_push(parser_preceding_statements, &restore);
+    struct parser_vla_goto jump = { name, places, restore };
+    vector_push(parser_vla_gotos, &jump);
+}
+
+// The save to give the stack back to for a goto from `from` to `to`:
+// in a block both are in, the first array declared after the label
+// (a jump back over it); else the first array of the outermost block
+// the goto leaves. NULL when it frees nothing.
+static const char* parser_vla_goto_save(struct vector* from, struct vector* to){
+    int i = 0;
+    for(; i < vector_count(from) && i < vector_count(to); i++){
+        struct parser_vla_place* f = vector_at(from, i);
+        struct parser_vla_place* t = vector_at(to, i);
+        if(f->id != t->id){
+            break;
+        }
+        if(f->count > t->count){
+            return *(const char**)vector_at(f->saves, t->count);
+        }
+    }
+    for(; i < vector_count(from); i++){
+        struct parser_vla_place* f = vector_at(from, i);
+        if(f->count > 0){
+            return *(const char**)vector_at(f->saves, 0);
         }
     }
     return 0;
+}
+
+// At the end of a function body, every goto's labels are known.
+static void parser_vla_finish_gotos(void){
+    for(int i = 0; i < vector_count(parser_vla_gotos); i++){
+        struct parser_vla_goto* jump = vector_at(parser_vla_gotos, i);
+        for(int l = 0; l < vector_count(parser_vla_labels); l++){
+            struct parser_vla_label* label = vector_at(parser_vla_labels, l);
+            if(!S_EQ(label->name, jump->name)){
+                continue;
+            }
+            const char* save = parser_vla_goto_save(jump->blocks, label->blocks);
+            if(save){
+                struct node* call = parser_builtin_call("__builtin_vla_restore", parser_identifier(save));
+                struct node* blank = jump->restore;
+                call->binded = blank->binded;
+                *blank = *call;
+            }
+        }
+    }
+    vector_clear(parser_vla_gotos);
+    vector_clear(parser_vla_labels);
+    vector_clear(parser_vla_views);
+    vector_clear(parser_vla_done);
 }
 
 // Before a break or continue: give back the stack of the blocks it
@@ -3476,23 +4106,67 @@ static void parse_extern_local(struct datatype* dtype, struct token* name_token)
 static void parse_variable(struct datatype* dtype, struct token* name_token, struct history* history){
     struct node* value_node = 0;
 
+    bool plain_object = name_token
+        && !(dtype->flags & (DATATYPE_FLAG_IS_STATIC | DATATYPE_FLAG_IS_EXTERN))
+        && !(history->flags & (HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION));
+    bool is_parameter = parser_current_function && (history->flags & HISTORY_FLAG_IS_UPWARD_STACK);
+    bool is_block_local = parser_current_function && !is_parameter
+        && current_process->scope.current != current_process->scope.root;
+    // A local that hides a variable-length array of an outer block.
+    if(is_block_local && name_token && parser_vla_find(name_token->sval)){
+        struct parser_vla hide = { .name = name_token->sval, .depth = parser_scope_depth() };
+        vector_push(parser_vlas, &hide);
+    }
+
+    // `T (*p)[n]...`, a pointer to an array, is a flat `T*`
+    // whose subscripts step over the array's rows.
+    if(parser_vla_pointer_dims && !name_token && is_parameter){
+        // An unnamed parameter of a prototype: only its type matters.
+        parser_vla_pointer_dims = 0;
+    }
+    if(parser_vla_pointer_dims){
+        struct vector* dims = parser_vla_pointer_dims;
+        parser_vla_pointer_dims = 0;
+        if(!plain_object || !(is_parameter || is_block_local)){
+            compiler_error(current_process, "A pointer to an array is only supported as a local or a parameter\n");
+        }
+        if(token_next_is_operator("[")){
+            compiler_error(current_process, "An array of pointers to arrays is not supported\n");
+        }
+        parser_vla_pointer_to_array(name_token, dims, parser_vla_pointer_element, is_parameter);
+    }
+
     // ch44: array brackets, e.g. `int x[4][3];`
     if(token_next_is_operator("[")){
-        parser_vla_allowed = parser_current_function && name_token
-            && current_process->scope.current != current_process->scope.root
-            && !(dtype->flags & (DATATYPE_FLAG_IS_STATIC | DATATYPE_FLAG_IS_EXTERN))
-            && !(history->flags & (HISTORY_FLAG_IS_UPWARD_STACK | HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION));
-        struct array_brackets* brackets = parse_array_brackets(history);
-        parser_vla_allowed = false;
-        if(parser_vla_size){
-            struct node* size = parser_vla_size;
-            parser_vla_size = 0;
-            parser_declare_vla(dtype, name_token, size, history);
-            return;
+        if(plain_object && is_block_local){
+            parser_vla_mode = PARSER_VLA_MODE_LOCAL;
+        } else if(plain_object && is_parameter){
+            parser_vla_mode = PARSER_VLA_MODE_PARAMETER;
         }
-        dtype->array.brackets = brackets;
-        dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
-        dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
+        struct array_brackets* brackets = parse_array_brackets(history);
+        parser_vla_mode = PARSER_VLA_MODE_NONE;
+        if(parser_vla_dims){
+            struct vector* dims = parser_vla_dims;
+            parser_vla_dims = 0;
+            if(!is_parameter){
+                parser_declare_vla(dtype, name_token, dims, history);
+                return;
+            }
+            // A parameter `T a[n][m]` is `T (*a)[m]` (C11 6.7.6.3p7).
+            struct vector* inner = vector_create(sizeof(struct node*));
+            for(int i = 1; i < vector_count(dims); i++){
+                vector_push(inner, vector_at(dims, i));
+            }
+            size_t element_size = datatype_size(dtype);
+            *dtype = parser_pointer_to(dtype);
+            if(vector_count(inner)){
+                parser_vla_pointer_to_array(name_token, inner, element_size, true);
+            }
+        } else {
+            dtype->array.brackets = brackets;
+            dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
+            dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
+        }
     }
 
     // a bit-field member, `int x : 3;` or `unsigned : 0;`.
@@ -3707,7 +4381,7 @@ static struct vector* parse_identifier_list_parameters(struct history* history){
             struct datatype type = base;
             if(!first){
                 type.flags &= ~DATATYPE_FLAG_IS_POINTER;
-                type.pointer_depth = parser_get_pointer_depth();
+                type.pointer_depth = parser_get_pointer_levels(&type.pointer_const);
                 if(type.pointer_depth > 0){
                     type.flags |= DATATYPE_FLAG_IS_POINTER;
                 }
@@ -3716,6 +4390,9 @@ static struct vector* parse_identifier_list_parameters(struct history* history){
             struct token* name = 0;
             if(!parse_function_pointer_declarator(&type, &name)){
                 name = token_next();
+            }
+            if(parser_vla_pointer_dims){
+                compiler_error(current_process, "A pointer to an array is not supported in an old-style parameter declaration\n");
             }
             if(!token_is_identifier(name)){
                 compiler_error(current_process, "Expected a parameter name in the declarations but found %s\n", parser_token_text(name));
@@ -3786,6 +4463,7 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
     }
 
     expect_op("(");
+    vector_clear(parser_vla_params);
     if(parser_next_is_identifier_list()){
         arguments_vector = parse_identifier_list_parameters(history_begin(0));
     } else {
@@ -3813,9 +4491,11 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
         struct node* body_node = node_pop();
         function_node->func.body_n = body_node;
         parser_check_gotos(name_token->sval);
+        parser_vla_finish_gotos();
     } else {
         expect_sym(';');
     }
+    vector_clear(parser_vla_params);
 
     parser_current_function = 0;
     // ch149: close the resolver-side scope first.
@@ -3909,6 +4589,9 @@ static void parse_statement(struct history* history){
                     compiler_error(current_process, "Label %s is defined twice\n", name->sval);
                 }
                 vector_push(parser_function_labels, &label);
+            }
+            if(parser_current_function){
+                parser_vla_note_label(label);
             }
             node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = label });
             make_label_node(node_pop());
@@ -4129,8 +4812,15 @@ static void parse_body_multiple_statements(size_t* variable_size,
     struct node* largest_align_eligible_var_node = 0;
 
     expect_sym('{');
-    struct parser_vla_block vla_block = { 0 };
+    struct parser_vla_block vla_block = { .id = ++parser_vla_block_ids };
     vector_push(parser_vla_blocks, &vla_block);
+    // a function's parameters that are pointers to arrays get
+    // their strides first.
+    if(vector_count(parser_vla_params) && vector_count(parser_vla_blocks) == 1 && parser_current_function){
+        parser_vla_begin_parameters();
+        parser_take_preceding_statements(body_vec, history, variable_size);
+        parser_take_pending_statements(body_vec);
+    }
 
     while(!token_next_is_symbol('}')){
         parse_statement(history_down(history, history->flags));
@@ -4459,6 +5149,7 @@ static void parse_variable_function_or_struct_union(struct history* history){
     struct datatype base_dtype = dtype;
     base_dtype.flags &= ~DATATYPE_FLAG_IS_POINTER;
     base_dtype.pointer_depth = 0;
+    base_dtype.pointer_const = 0;
     struct datatype first_dtype = dtype;
     parse_variable(&first_dtype, name_token, history);
 
@@ -4474,7 +5165,7 @@ static void parse_variable_function_or_struct_union(struct history* history){
         while(token_is_operator(token_peek_next(), ",")){
             token_next();
             struct datatype peer_dtype = base_dtype;
-            int depth = parser_get_pointer_depth();
+            int depth = parser_get_pointer_levels(&peer_dtype.pointer_const);
             if(depth > 0){
                 peer_dtype.flags |= DATATYPE_FLAG_IS_POINTER;
                 peer_dtype.pointer_depth = depth;
@@ -4620,6 +5311,11 @@ static void parse_goto(struct history* history){
     const char* name = parser_label_name(label->sval);
     if(parser_function_gotos){
         vector_push(parser_function_gotos, &name);
+    }
+    // a goto out of a block with a variable-length array (or
+    // back over one) gives the stack back.
+    if(parser_current_function){
+        parser_vla_note_goto(name);
     }
     node_create(&(struct node){ .type = NODE_TYPE_IDENTIFIER, .sval = name });
     struct node* label_node = node_pop();
@@ -4880,6 +5576,31 @@ static void parse_sizeof(struct history* history){
     if(after_paren && after_paren->type == TOKEN_TYPE_KEYWORD
        && (keyword_is_datatype(after_paren->sval) || is_keyword_variable_modifier(after_paren->sval))){
         parse_datatype(&dtype);
+        // `sizeof(int[4])`, and in a function `sizeof(int[n][m])`
+        //, worked out when it runs.
+        if(token_next_is_operator("[")){
+            parser_vla_mode = parser_current_function ? PARSER_VLA_MODE_LOCAL : PARSER_VLA_MODE_NONE;
+            struct array_brackets* brackets = parse_array_brackets(history_begin(0));
+            parser_vla_mode = PARSER_VLA_MODE_NONE;
+            if(parser_vla_dims){
+                struct vector* dims = parser_vla_dims;
+                parser_vla_dims = 0;
+                struct node* bytes = parser_vla_number_node(datatype_size(&dtype));
+                for(int i = 0; i < vector_count(dims); i++){
+                    struct node* dim = *(struct node**)vector_at(dims, i);
+                    if(!dim){
+                        compiler_error(current_process, "sizeof of an array type needs its size\n");
+                    }
+                    bytes = parser_vla_binary(bytes, parser_vla_as_size(dim), "*");
+                }
+                expect_sym(')');
+                node_push(parser_vla_parens(bytes));
+                return;
+            }
+            dtype.array.brackets = brackets;
+            dtype.array.size     = array_brackets_calculate_size(&dtype, brackets);
+            dtype.flags         |= DATATYPE_FLAG_IS_ARRAY;
+        }
         expect_sym(')');
     } else {
         size_t count_before = node_count();
@@ -4900,6 +5621,15 @@ static void parse_sizeof(struct history* history){
         if(vla_size){
             node_push(parser_identifier(vla_size));
             return;
+        }
+        // So is a row of one, `sizeof a[i]`, `sizeof *p`.
+        if(parser_vla_active()){
+            operand = parser_vla_lower(operand);
+            struct parser_vla_view view;
+            if(parser_vla_view_of(operand, &view) && view.level > 0){
+                node_push(parser_vla_parens(parser_vla_view_size(&view)));
+                return;
+            }
         }
         if(!parser_expression_type(operand, &dtype)){
             compiler_error(current_process, "Cannot work out the size of this sizeof operand\n");
@@ -5117,6 +5847,14 @@ int parse(struct compile_process* process){
     parser_vla_blocks = vector_create(sizeof(struct parser_vla_block));
     parser_vla_jumps  = vector_create(sizeof(struct parser_vla_jump));
     parser_vlas       = vector_create(sizeof(struct parser_vla));
+    parser_vla_mode         = PARSER_VLA_MODE_NONE;
+    parser_vla_dims         = 0;
+    parser_vla_pointer_dims = 0;
+    parser_vla_params = vector_create(sizeof(struct parser_vla_param));
+    parser_vla_views  = vector_create(sizeof(struct parser_vla_view));
+    parser_vla_done   = vector_create(sizeof(struct node*));
+    parser_vla_labels = vector_create(sizeof(struct parser_vla_label));
+    parser_vla_gotos  = vector_create(sizeof(struct parser_vla_goto));
     parser_enumerators = vector_create(sizeof(struct parser_enumerator));
     parser_pending_statements = vector_create(sizeof(struct node*));
     parser_preceding_statements = vector_create(sizeof(struct node*));

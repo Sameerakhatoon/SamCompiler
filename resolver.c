@@ -1167,7 +1167,11 @@ static void resolver_finalize_result_flags(struct resolver_process* resolver, st
             flags &= ~(RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE
                      | RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE);
         }
-        if(entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET){
+        // A subscript after a member or another subscript (`sp->list[0]`,
+        // `a[1][0]`) does not decide how the root is pushed: the entity
+        // before it loads the pointer. `sp->list[0] = x` pushed
+        // sp's value and then loaded through it once more.
+        if(entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET && entity->prev == result->entity){
             // Subscripting a pointer loads the pointer's value first. An
             // array whose elements are pointers (`int* v[2]`) is still an
             // array and is addressed like any other.
@@ -1179,9 +1183,10 @@ static void resolver_finalize_result_flags(struct resolver_process* resolver, st
                 flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX;
                 flags &= ~RESOLVER_RESULT_FLAG_FIRST_ENTITY_PUSH_VALUE;
             }
-            if(entity->flags & RESOLVER_ENTITY_FLAG_IS_POINTER_ARRAY_ENTITY){
-                flags |= RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
-            }
+        }
+        if(entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET
+           && (entity->flags & RESOLVER_ENTITY_FLAG_IS_POINTER_ARRAY_ENTITY)){
+            flags |= RESOLVER_RESULT_FLAG_FINAL_INDIRECTION_REQUIRED_FOR_VALUE;
         }
         if(entity->type == RESOLVER_ENTITY_TYPE_GENERAL){
             flags |= RESOLVER_RESULT_FLAG_FIRST_ENTITY_LOAD_TO_EBX

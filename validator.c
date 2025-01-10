@@ -202,6 +202,8 @@ static struct vtype vtype_deref(struct vtype* v)
         t.pointer_depth = 0;
         t.flags &= ~DATATYPE_FLAG_IS_POINTER;
     }
+    // Keep the const of the level now on top, drop the one taken off.
+    datatype_set_pointer_const(&t, datatype_is_const(&t));
     return vtype_of(&t);
 }
 
@@ -269,18 +271,28 @@ static void validate_conversion(struct node* at, struct datatype* to_type, struc
     {
         compiler_node_error(at, "%s: incompatible types, %s from %s", what, vtype_name(&to), vtype_name(from));
     }
+    // a pointer to const stored in a pointer to non-const, as
+    // gcc warns. An explicit cast says the program means it (gcc warns
+    // only with -Wcast-qual).
+    struct vtype source = vtype_decay(from);
+    if (vtype_is_pointer(&to.t) && !vtype_is_function_pointer(&to.t) && !from->function
+        && vtype_is_pointer(&source.t) && !vtype_is_function_pointer(&source.t)
+        && datatype_pointee_is_const(&source.t) && !datatype_pointee_is_const(&to.t))
+    {
+        compiler_node_warning(at, "%s discards the 'const' qualifier from the pointer target type", what);
+    }
 }
 
 // An assignment, ++ or -- of `node`, whose type is v. A const object
-// (const at the last level: `const int x`, `*p` for a `const int* p`)
-// cannot change. A28: the store was silently dropped.
+// cannot change: `const int x`, `*p` for a `const int* p`, and `p` for
+// an `int* const p`. A28: the store was silently dropped.
 static void validate_modifiable(struct node* node, struct vtype* v)
 {
-    if (!v->known || v->function || vtype_is_array(&v->t) || vtype_is_pointer(&v->t))
+    if (!v->known || v->function || vtype_is_array(&v->t))
     {
         return;
     }
-    if (v->t.flags & DATATYPE_FLAG_IS_CONST)
+    if (datatype_is_const(&v->t))
     {
         if (node->type == NODE_TYPE_IDENTIFIER)
         {
@@ -523,12 +535,11 @@ static struct vtype validate_member(struct node* node)
         compiler_node_error(node, "%s has no member named %s", vtype_name(&aggregate), member_name->sval);
     }
     struct vtype result = vtype_of(&member->var.type);
-    // A member of a const struct is const; only for a scalar or struct
-    // member, since a single const flag cannot say which level of a
-    // pointer it applies to.
-    if ((aggregate.t.flags & DATATYPE_FLAG_IS_CONST) && !vtype_is_pointer(&result.t) && !vtype_is_array(&result.t))
+    // A member of a const struct is const: the pointer itself for a
+    // pointer member, the elements of an array member.
+    if (datatype_is_const(&aggregate.t))
     {
-        result.t.flags |= DATATYPE_FLAG_IS_CONST;
+        datatype_set_pointer_const(&result.t, true);
     }
     return result;
 }
@@ -586,7 +597,8 @@ static struct vtype validate_exp_node(struct node* node)
     {
         struct vtype left = validate_expression(node->exp.left);
         struct vtype right = validate_expression(node->exp.right);
-        validate_modifiable(node->exp.left, &left);
+        // A member access made by the parser has no position of its own.
+        validate_modifiable(node->exp.left->pos.line ? node->exp.left : node, &left);
         if (S_EQ(op, "="))
         {
             validate_conversion(node, &left.t, &right, "Assignment");
@@ -688,6 +700,7 @@ static struct vtype validate_unary(struct node* node)
         v.string = false;
         v.t.flags |= DATATYPE_FLAG_IS_POINTER;
         v.t.pointer_depth++;
+        datatype_set_pointer_const(&v.t, false);
         return v;
     }
     if (is_increment_operator(op))

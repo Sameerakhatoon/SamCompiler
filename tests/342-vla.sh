@@ -18,9 +18,7 @@ expect_error(){
     done
 }
 
-printf 'int main(void){ int n = 2; int m[n][n]; return 0; }\n' > "$tmp/two.c"
-expect_error two "Only a one-dimensional variable-length array is supported"
-
+# More than one dimension is supported now (tests/381).
 printf 'int main(void){ int n = 2; int a[n] = { 1 }; return 0; }\n' > "$tmp/init.c"
 expect_error init "The variable-length array a cannot be initialized"
 
