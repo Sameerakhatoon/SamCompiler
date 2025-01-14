@@ -127,6 +127,9 @@ struct token {
 
     // For tokens inside parens, e.g. "(5+10+20)", the original substring.
     const char* between_brackets;
+
+    // Anything between function call arguments. ABC(hello world)
+    const char* between_arguments;
 };
 
 // Forward decls for the lexer types so the function-pointer typedefs below
@@ -159,6 +162,7 @@ struct lex_process {
     // e.g. "((50))".
     int                           current_expression_count;
     struct buffer*                parentheses_buffer;
+    struct buffer*                argument_string_buffer;
     struct lex_process_functions* function;
 
     // Opaque blob owned by the caller; the lexer never touches it.
