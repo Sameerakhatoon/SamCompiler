@@ -886,6 +886,14 @@ static void codegen_generate_normal_unary(struct node* node, struct history* his
             &(struct stack_frame_data){.dtype = last_dtype});
     } else if(S_EQ(node->unary.op, "*")){
         codegen_generate_unary_indirection(node, history);
+    } else if(S_EQ(node->unary.op, "!")){
+        // ch222: logical not. sete on flags after cmp, zero-extend, push.
+        asm_push("cmp eax, 0");
+        asm_push("sete al");
+        asm_push("movzx eax, al");
+        asm_push_ins_push_with_data("eax",
+            STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = last_dtype});
     }
 }
 
