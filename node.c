@@ -152,7 +152,11 @@ struct node* node_from_symbol(struct compile_process* process, const char* name)
 }
 
 struct node* struct_node_for_name(struct compile_process* process, const char* name){
-    struct node* node = node_from_symbol(process, name);
+    struct node* node = 0;
+    struct symbol* sym = symresolver_get_tag(process, name);
+    if(sym){
+        node = node_from_sym(sym);
+    }
     if(!node){
         return 0;
     }
@@ -163,7 +167,11 @@ struct node* struct_node_for_name(struct compile_process* process, const char* n
 }
 
 struct node* union_node_for_name(struct compile_process* process, const char* name){
-    struct node* node = node_from_symbol(process, name);
+    struct node* node = 0;
+    struct symbol* sym = symresolver_get_tag(process, name);
+    if(sym){
+        node = node_from_sym(sym);
+    }
     if(!node){
         return 0;
     }

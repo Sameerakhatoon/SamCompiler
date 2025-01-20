@@ -11,6 +11,8 @@ char*  strdup(const char* s);
 char*  strchr(const char* s, int c);
 char*  strrchr(const char* s, int c);
 char*  strstr(const char* hay, const char* needle);
+char*  strpbrk(const char* s, const char* accept);
+char*  strerror(int number);
 void*  memcpy(void* dst, const void* src, size_t n);
 void*  memmove(void* dst, const void* src, size_t n);
 void*  memset(void* dst, int c, size_t n);

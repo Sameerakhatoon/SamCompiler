@@ -31,7 +31,7 @@ static struct node*            current_function;
 static struct vector*          validator_function_locals;
 static bool                    validator_function_has_asm;
 // Where an error in the statement being checked goes on.
-static jmp_buf*                validator_recovery;
+static struct compiler_recovery* validator_recovery;
 
 // ch257: forward decls so validate_statement can call back into
 // validate_variable / validate_body without ordering pain.
@@ -71,7 +71,7 @@ void validate_destruct(struct compile_process* process)
     vector_set_peek_pointer(process->node_tree_vec, 0);
 }
 
-static void validator_set_recovery(jmp_buf* point)
+static void validator_set_recovery(struct compiler_recovery* point)
 {
     validator_recovery = point;
     compiler_set_recovery(point);
@@ -87,6 +87,15 @@ void validate_symbol_unique(const char* name, const char* type_of_symbol, struct
     if (sym)
     {
         compiler_node_error(node, "Cannot define %s you have already defined a symbol with the name %s", type_of_symbol, name);
+    }
+}
+
+// A struct or union tag defined twice in the same scope.
+static void validate_tag_unique(const char* name, const char* type_of_symbol, struct node* node)
+{
+    if (symresolver_get_tag(validator_current_compile_process, name))
+    {
+        compiler_node_error(node, "Cannot define %s you have already defined a %s with the name %s", type_of_symbol, type_of_symbol, name);
     }
 }
 
@@ -431,6 +440,12 @@ static struct vtype validate_call(struct node* node)
 // not see into (an anonymous struct or union).
 static struct node* validate_find_member(struct node* body, const char* name, bool* unsure)
 {
+    // Through anonymous struct and union members too.
+    struct node* found = struct_member_named(body->body.statements, name);
+    if (found)
+    {
+        return found;
+    }
     struct vector* statements = body->body.statements;
     for (int i = 0; i < vector_count(statements); i++)
     {
@@ -473,7 +488,7 @@ static struct node* validate_aggregate_body(struct datatype* t)
     struct node* aggregate = t->struct_node;
     if ((!aggregate || !node_is_struct_or_union(aggregate) || !aggregate->_struct.body_n) && t->type_str)
     {
-        struct symbol* sym = symresolver_get_symbol_any(validator_current_compile_process, t->type_str);
+        struct symbol* sym = symresolver_get_tag_any(validator_current_compile_process, t->type_str);
         aggregate = sym ? symresolver_node(sym) : 0;
     }
     if (!aggregate || !node_is_struct_or_union(aggregate))
@@ -909,10 +924,10 @@ static void validate_statement_recovering(struct node* node)
     }
     struct resolver_process* resolver = validator_current_compile_process->resolver;
     struct resolver_scope* scope = resolver->scope.current;
-    jmp_buf* outer = validator_recovery;
-    jmp_buf point;
+    struct compiler_recovery* outer = validator_recovery;
+    struct compiler_recovery point;
     validator_set_recovery(&point);
-    if (!setjmp(point))
+    if (!setjmp(point.env))
     {
         validate_statement(node);
     }
@@ -1161,9 +1176,9 @@ void validate_structure_node(struct node* node)
 {
     if (!(node->flags & NODE_FLAG_IS_FORWARD_DECLARATION) && !validate_after_forward_declaration(node->_struct.name))
     {
-        validate_symbol_unique(node->_struct.name, "struct", node);
+        validate_tag_unique(node->_struct.name, "struct", node);
     }
-    symresolver_register_symbol(validator_current_compile_process, node->_struct.name, SYMBOL_TYPE_NODE, node);
+    symresolver_register_tag(validator_current_compile_process, node->_struct.name, node);
     if (node->_struct.var && node->_struct.var->type == NODE_TYPE_VARIABLE)
     {
         validate_global_variable(node->_struct.var);
@@ -1174,7 +1189,7 @@ void validate_structure_node(struct node* node)
 // defines x once.
 static bool validate_after_forward_declaration(const char* name)
 {
-    struct symbol* sym = symresolver_get_symbol(validator_current_compile_process, name);
+    struct symbol* sym = symresolver_get_tag(validator_current_compile_process, name);
     return sym && sym->type == SYMBOL_TYPE_NODE
         && (((struct node*)sym->data)->flags & NODE_FLAG_IS_FORWARD_DECLARATION);
 }
@@ -1183,9 +1198,9 @@ void validate_union_node(struct node* node)
 {
     if (!(node->flags & NODE_FLAG_IS_FORWARD_DECLARATION))
     {
-        validate_symbol_unique(node->_union.name, "union", node);
+        validate_tag_unique(node->_union.name, "union", node);
     }
-    symresolver_register_symbol(validator_current_compile_process, node->_union.name, SYMBOL_TYPE_NODE, node);
+    symresolver_register_tag(validator_current_compile_process, node->_union.name, node);
     if (node->_union.var && node->_union.var->type == NODE_TYPE_VARIABLE)
     {
         validate_global_variable(node->_union.var);
@@ -1237,9 +1252,9 @@ int validate_tree(struct compile_process* process)
     {
         // An error in a declaration ends it; the next one is checked.
         struct resolver_scope* scope = resolver->scope.current;
-        jmp_buf point;
+        struct compiler_recovery point;
         validator_set_recovery(&point);
-        if (!setjmp(point))
+        if (!setjmp(point.env))
         {
             validate_node(node);
         }

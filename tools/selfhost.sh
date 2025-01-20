@@ -2,8 +2,8 @@
 # Try SamCompiler on its own sources (x86_64, assembled with nasm) and
 # print, per source file, "ok" or the first error. The libc headers are
 # the short declaration-only ones in tools/selfhost/include, then
-# pc_includes; glibc's own headers are not used. What still fails, and
-# why, is.
+# pc_includes; glibc's own headers are not used. All of them compile
+#; tests/370-self-host.sh links and runs the result.
 #
 # Usage: bash tools/selfhost.sh [file.c ...]
 

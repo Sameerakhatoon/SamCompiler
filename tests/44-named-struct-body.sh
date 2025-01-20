@@ -24,7 +24,7 @@ int main(void){
     lex(lp);
     cp->token_vec = lex_process_tokens(lp);
     parse(cp);
-    struct symbol* s = symresolver_get_symbol(cp, "dog");
+    struct symbol* s = symresolver_get_tag(cp, "dog");
     if(!s){ printf("FAIL no sym\n"); return 1; }
     struct node* nd = s->data;
     printf("name=%s body_size=%zu stmts=%d\n",

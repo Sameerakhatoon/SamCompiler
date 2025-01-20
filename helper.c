@@ -115,9 +115,7 @@ struct node* variable_struct_or_union_largest_variable_node(struct node* var_nod
     return body_largest_variable_node(variable_struct_or_union_body_node(var_node));
 }
 
-// The member called `name` among a body's statements, looking inside
-// `int a, b;` lists too; NULL if there is none.
-struct node* struct_member_named(struct vector* statements, const char* name){
+static struct node* struct_member_direct(struct vector* statements, const char* name){
     vector_set_peek_pointer(statements, 0);
     struct node* statement = vector_peek_ptr(statements);
     while(statement){
@@ -140,8 +138,54 @@ struct node* struct_member_named(struct vector* statements, const char* name){
     return 0;
 }
 
+// The member called `name` among a body's statements, looking inside
+// `int a, b;` lists too; NULL if there is none. The members of an
+// anonymous struct or union member are members too (C11 6.7.2.1p13):
+// one found through it comes back as a copy whose aoffset is from the
+// start of this body. Copies are kept per (anonymous member, name).
+struct struct_member_alias {
+    struct node*                anonymous;
+    const char*                 name;
+    struct node*                copy;
+    struct struct_member_alias* next;
+};
+static struct struct_member_alias* struct_member_aliases;
+
+struct node* struct_member_named(struct vector* statements, const char* name){
+    struct node* member = struct_member_direct(statements, name);
+    if(member){
+        return member;
+    }
+    for(int i = 0; i < vector_count(statements); i++){
+        struct node* anonymous = *(struct node**)vector_at(statements, i);
+        if(anonymous->type != NODE_TYPE_VARIABLE || !(anonymous->flags & NODE_FLAG_ANONYMOUS_MEMBER)){
+            continue;
+        }
+        struct node* body = variable_struct_or_union_body_node(anonymous);
+        struct node* inner = body ? struct_member_named(body->body.statements, name) : 0;
+        if(!inner){
+            continue;
+        }
+        for(struct struct_member_alias* alias = struct_member_aliases; alias; alias = alias->next){
+            if(alias->anonymous == anonymous && S_EQ(alias->name, name)){
+                return alias->copy;
+            }
+        }
+        struct struct_member_alias* alias = calloc(1, sizeof(struct struct_member_alias));
+        alias->anonymous = anonymous;
+        alias->name      = inner->var.name;
+        alias->copy      = malloc(sizeof(struct node));
+        *alias->copy     = *inner;
+        alias->copy->var.aoffset += anonymous->var.aoffset;
+        alias->next      = struct_member_aliases;
+        struct_member_aliases = alias;
+        return alias->copy;
+    }
+    return 0;
+}
+
 int struct_offset(struct compile_process* compile_proc, const char* struct_name, const char* var_name, struct node** var_node_out, int last_pos, int flags){
-    struct symbol* struct_sym = symresolver_get_symbol(compile_proc, struct_name);
+    struct symbol* struct_sym = symresolver_get_tag(compile_proc, struct_name);
     // A member of a struct not defined yet (`static struct s v;` before
     // `struct s {...}`) failed these asserts.
     if(!struct_sym || struct_sym->type != SYMBOL_TYPE_NODE || !node_is_struct_or_union(struct_sym->data)){

@@ -173,9 +173,9 @@ struct lex_process_functions compiler_lex_functions = {
 
 static int      compiler_errors;
 static int      compiler_warnings;
-static jmp_buf* compiler_recovery;
+static struct compiler_recovery* compiler_recovery;
 
-void compiler_set_recovery(jmp_buf* point){
+void compiler_set_recovery(struct compiler_recovery* point){
     compiler_recovery = point;
 }
 
@@ -215,7 +215,7 @@ static void compiler_report(const char* kind, struct pos* pos, const char* msg, 
 static void compiler_fail(void){
     compiler_errors++;
     if(compiler_recovery){
-        longjmp(*compiler_recovery, 1);
+        longjmp(compiler_recovery->env, 1);
     }
     compiler_finish_errors();
 }

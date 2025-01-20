@@ -31,7 +31,7 @@ int main(void){
         int n = vector_count(nd->_struct.body_n->body.statements);
         printf("body_stmts=%d body_size=%zu\n", n, nd->_struct.body_n->body.size);
     }
-    struct symbol* s = symresolver_get_symbol(cp, "abc");
+    struct symbol* s = symresolver_get_tag(cp, "abc");
     printf("sym_found=%d\n", s != 0);
     return 0;
 }

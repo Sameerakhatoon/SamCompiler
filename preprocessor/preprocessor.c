@@ -103,6 +103,7 @@ void preprocessor_handle_token(struct compile_process *compiler, struct token *t
 int preprocessor_parse_evaluate(struct compile_process *compiler, struct vector *token_vec);
 int preprocessor_evaluate(struct compile_process *compiler, struct preprocessor_node *root_node);
 struct preprocessor_definition *preprocessor_get_definition(struct preprocessor *preprocessor, const char *name);
+struct preprocessor_definition *preprocessor_get_definition_other_kind(struct preprocessor *preprocessor, struct preprocessor_definition *definition);
 
 int preprocessor_evaluate_unary(struct compile_process *compiler, struct preprocessor_node *node)
 {
@@ -725,7 +726,9 @@ void preprocessor_definition_remove(struct preprocessor *preprocessor, const cha
     struct preprocessor_definition *current_definition = vector_peek_ptr(preprocessor->definitions);
     while (current_definition)
     {
-        if (S_EQ(current_definition->name, name))
+        // A typedef is not a macro: `#define` or `#undef` of its name
+        // leaves it (preprocessor_get_definition_other_kind).
+        if (S_EQ(current_definition->name, name) && current_definition->type != PREPROCESSOR_DEFINITION_TYPEDEF)
         {
             // Remove the definition
             vector_pop_last_peek(preprocessor->definitions);
@@ -795,6 +798,34 @@ struct preprocessor_definition *preprocessor_get_definition(struct preprocessor 
     }
 
     return definition;
+}
+
+// For a typedef, a function-like macro of the same name; for such a
+// macro, a typedef of the same name; otherwise NULL.
+struct preprocessor_definition *preprocessor_get_definition_other_kind(struct preprocessor *preprocessor, struct preprocessor_definition *definition)
+{
+    int want;
+    if (definition->type == PREPROCESSOR_DEFINITION_TYPEDEF)
+    {
+        want = PREPROCESSOR_DEFINITION_MACRO_FUNCTION;
+    }
+    else if (definition->type == PREPROCESSOR_DEFINITION_MACRO_FUNCTION)
+    {
+        want = PREPROCESSOR_DEFINITION_TYPEDEF;
+    }
+    else
+    {
+        return NULL;
+    }
+    for (int i = 0; i < vector_count(preprocessor->definitions); i++)
+    {
+        struct preprocessor_definition *other = *(struct preprocessor_definition **)vector_at(preprocessor->definitions, i);
+        if (other->type == want && S_EQ(other->name, definition->name))
+        {
+            return other;
+        }
+    }
+    return NULL;
 }
 
 struct vector *preprocessor_definition_value_for_standard(struct preprocessor_definition *definition)
@@ -1476,9 +1507,51 @@ void preprocessor_handle_typedef_token(struct compile_process *compiler, struct 
         }
     }
 
+    // `typedef long buf[8];`: the name is the identifier before the
+    // trailing `[...]` groups. It comes out and buf stands for `long [8]`;
+    // the parser reads brackets right after a type as part of the type
+    // (parse_datatype), so `buf b[2];` is `long [8] b[2]`, b an array
+    // of 2 arrays of 8 longs.
+    const char* array_name = NULL;
+    if (!function_pointer_name)
+    {
+        int i = vector_count(token_vec) - 1;
+        while (i >= 0 && token_is_symbol(vector_at(token_vec, i), ']'))
+        {
+            int level = 0;
+            for (; i >= 0; i--)
+            {
+                struct token* t = vector_at(token_vec, i);
+                if (token_is_symbol(t, ']'))
+                {
+                    level++;
+                }
+                else if (token_is_operator(t, "["))
+                {
+                    level--;
+                    if (level == 0)
+                    {
+                        break;
+                    }
+                }
+            }
+            i--;
+        }
+        struct token* candidate = i >= 0 && i < vector_count(token_vec) - 1 ? vector_at(token_vec, i) : NULL;
+        if (candidate && candidate->type == TOKEN_TYPE_IDENTIFIER)
+        {
+            array_name = candidate->sval;
+            vector_pop_at(token_vec, i);
+        }
+    }
+
     if (function_pointer_name)
     {
         td.definiton_name = function_pointer_name;
+    }
+    else if (array_name)
+    {
+        td.definiton_name = array_name;
     }
     else
     {
@@ -1758,6 +1831,11 @@ int preprocessor_macro_function_execute(struct compile_process *compiler, const 
     if (!definition)
     {
         compiler_error(compiler, "Trying to call unknown macro function %s", function_name);
+    }
+    // A typedef of the same name, defined first, is not the macro.
+    if (definition->type == PREPROCESSOR_DEFINITION_TYPEDEF && preprocessor_get_definition_other_kind(preprocessor, definition))
+    {
+        definition = preprocessor_get_definition_other_kind(preprocessor, definition);
     }
 
     if (!preprocessor_is_macro_function(definition))
@@ -2177,13 +2255,23 @@ int preprocessor_handle_identifier_for_token_vector(struct compile_process *comp
         return -1;
     }
 
+    // A function-like macro and a typedef may share a name (compiler.h's
+    // GENERATOR_END_EXPRESSION): the name followed by `(` is the macro,
+    // anywhere else the typedef. They share one table, so look for the
+    // other kind too.
+    bool is_call = token_is_operator(vector_peek_no_increment(src_vec), "(");
+    struct preprocessor_definition *other = preprocessor_get_definition_other_kind(compiler->preprocessor, definition);
+    if (other && (other->type == PREPROCESSOR_DEFINITION_TYPEDEF) != is_call)
+    {
+        definition = other;
+    }
+
     if (definition->type == PREPROCESSOR_DEFINITION_TYPEDEF)
     {
         preprocessor_token_vec_push_src_to_dst(compiler, preprocessor_definition_value(definition), dst_vec);
         return 0;
     }
 
-    bool is_call = token_is_operator(vector_peek_no_increment(src_vec), "(");
     if (definition->type == PREPROCESSOR_DEFINITION_MACRO_FUNCTION || (definition->type == PREPROCESSOR_DEFINITION_NATIVE_CALLBACK && is_call))
     {
         if (!is_call)

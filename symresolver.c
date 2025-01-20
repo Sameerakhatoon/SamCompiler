@@ -14,9 +14,14 @@ static void symresolver_build_for_union_node(struct compile_process* process, st
 // (vector) it belongs to, because each function body gets its own.
 #define SYMRESOLVER_HASH_SIZE 4096
 
+// Struct and union tags are a name space of their own (C11 6.2.3): `struct
+// fixup_config` and a function fixup_config() are two names. A tag's
+// entry is marked `tag`; it is in the hash only, not in a table vector,
+// so the name lookups below never see it.
 struct symresolver_entry {
     struct vector*            table;
     struct symbol*            sym;
+    bool                      tag;
     struct symresolver_entry* next;
 };
 
@@ -78,17 +83,55 @@ void symresolver_end_table(struct compile_process* process){
     vector_pop(process->symbols.tables);
 }
 
-struct symbol* symresolver_get_symbol(struct compile_process* process, const char* name){
+static struct symbol* symresolver_find(struct vector* table, const char* name, bool tag){
     if(!name){
         return 0;
     }
     struct symresolver_entry* entry = symresolver_hash[symresolver_hash_name(name)];
     for(; entry; entry = entry->next){
-        if(entry->table == process->symbols.table && S_EQ(entry->sym->name, name)){
+        if(entry->table == table && entry->tag == tag && S_EQ(entry->sym->name, name)){
             return entry->sym;
         }
     }
     return 0;
+}
+
+struct symbol* symresolver_get_symbol(struct compile_process* process, const char* name){
+    return symresolver_find(process->symbols.table, name, false);
+}
+
+// The struct or union with this tag in the current table.
+struct symbol* symresolver_get_tag(struct compile_process* process, const char* name){
+    return symresolver_find(process->symbols.table, name, true);
+}
+
+// The tag in the current table or, failing that, in the saved ones,
+// newest first (see symresolver_get_symbol_any).
+struct symbol* symresolver_get_tag_any(struct compile_process* process, const char* name){
+    struct symbol* symbol = symresolver_get_tag(process, name);
+    for(int i = vector_count(process->symbols.tables) - 1; !symbol && i >= 0; i--){
+        symbol = symresolver_find(*(struct vector**)vector_at(process->symbols.tables, i), name, true);
+    }
+    return symbol;
+}
+
+// A struct or union node under its tag; NULL when the tag is taken.
+struct symbol* symresolver_register_tag(struct compile_process* process, const char* tag, struct node* node){
+    if(symresolver_get_tag(process, tag)){
+        return 0;
+    }
+    struct symbol* sym = calloc(1, sizeof(struct symbol));
+    sym->name = tag;
+    sym->type = SYMBOL_TYPE_NODE;
+    sym->data = node;
+    struct symresolver_entry* entry = calloc(1, sizeof(struct symresolver_entry));
+    unsigned bucket = symresolver_hash_name(tag);
+    entry->table = process->symbols.table;
+    entry->sym   = sym;
+    entry->tag   = true;
+    entry->next  = symresolver_hash[bucket];
+    symresolver_hash[bucket] = entry;
+    return sym;
 }
 
 // The symbol in the current table or, failing that, in the saved ones,
@@ -162,7 +205,7 @@ static void symresolver_build_for_structure_node(struct compile_process* process
         // Forward declarations don't register; the real one will.
         return;
     }
-    symresolver_register_symbol(process, node->_struct.name, SYMBOL_TYPE_NODE, node);
+    symresolver_register_tag(process, node->_struct.name, node);
 }
 
 // ch99: register the union in the symbol table the same way as
@@ -171,7 +214,7 @@ static void symresolver_build_for_union_node(struct compile_process* process, st
     if(node->flags & NODE_FLAG_IS_FORWARD_DECLARATION){
         return;
     }
-    symresolver_register_symbol(process, node->_union.name, SYMBOL_TYPE_NODE, node);
+    symresolver_register_tag(process, node->_union.name, node);
 }
 
 void symresolver_build_for_node(struct compile_process* process, struct node* node){

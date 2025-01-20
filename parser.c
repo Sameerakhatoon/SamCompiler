@@ -297,6 +297,9 @@ static void          parse_expressionable_root(struct history* history);
 static void          make_variable_node(struct datatype* dtype, struct token* name_token, struct node* value_node);
 static void          make_variable_node_and_register(struct history* history, struct datatype* dtype, struct token* name_token, struct node* value_node);
 static void          parse_variable(struct datatype* dtype, struct token* name_token, struct history* history);
+// The variable whose initializer is being read, and its type.
+static const char*     parser_declaring_name;
+static struct datatype parser_declaring_type;
 static void          make_variable_list_node(struct vector* var_list_vec);
 static void          expect_sym(char c);
 static void          parse_keyword(struct history* history);
@@ -974,6 +977,10 @@ static struct node* parser_hoist_postfix(struct node* exp_node){
         return exp_node;
     }
     exp_node->exp.right  = right->unary.operand;
+    // `v.t.flags++`: the inner level came back lifted, (t.flags)++, so
+    // this one is v . (t.flags); reorder it into (v.t).flags. It was
+    // left as it was, and the validator found no member name.
+    parser_reorder_expression(&exp_node);
     right->unary.operand = exp_node;
     return right;
 }
@@ -1589,7 +1596,7 @@ static void parser_datatype_init_type_and_size_for_primitive(struct token* datat
 
 // Look up a previously-defined struct by name; returns body size or 0.
 static size_t size_of_struct(const char* struct_name){
-    struct symbol* sym = symresolver_get_symbol(current_process, struct_name);
+    struct symbol* sym = symresolver_get_tag(current_process, struct_name);
     if(!sym){
         return 0;
     }
@@ -1604,7 +1611,7 @@ static size_t size_of_struct(const char* struct_name){
 
 // ch99: union version of size_of_struct.
 static size_t size_of_union(const char* union_name){
-    struct symbol* sym = symresolver_get_symbol(current_process, union_name);
+    struct symbol* sym = symresolver_get_tag(current_process, union_name);
     if(!sym){
         return 0;
     }
@@ -1731,8 +1738,14 @@ static struct function_prototype* parser_parameter_types(void){
         }
         // A pointer to an array passes as the pointer it is.
         parser_vla_pointer_dims = 0;
-        if(token_next_is_operator("[")){
-            parse_array_brackets(history_begin(0));
+        if(token_next_is_operator("[") || (type.flags & DATATYPE_FLAG_IS_ARRAY)){
+            if(token_next_is_operator("[")){
+                parse_array_brackets(history_begin(0));
+            }
+            // An array typedef's brackets (parse_datatype) go too.
+            type.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+            type.array.brackets = 0;
+            type.array.size     = 0;
             type.flags |= DATATYPE_FLAG_IS_POINTER;
             type.pointer_depth++;
         }
@@ -1979,6 +1992,42 @@ static void parse_datatype(struct datatype* dtype){
     if(dtype->flags & DATATYPE_FLAG_IS_BOOL){
         dtype->flags &= ~DATATYPE_FLAG_IS_SIGNED;
     }
+    // Brackets right after the type are part of it: an array typedef
+    // (`typedef long buf[8];` makes `buf b;` read `long [8] b`, see
+    // preprocessor_handle_typedef_token) or the abstract declarator of
+    // `sizeof(int[3])` and `(int[]){ 1, 2 }`. A declarator's own
+    // brackets go in front of these (parser_join_brackets).
+    if(token_next_is_operator("[")){
+        struct array_brackets* brackets = parse_array_brackets(history_begin(0));
+        dtype->array.brackets = brackets;
+        dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
+        dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
+        if(token_next_is_operator("*")){
+            compiler_error(current_process, "A pointer to an array type is not supported\n");
+        }
+    }
+}
+
+static struct node* parser_bracket_of(size_t n);
+
+// The declarator's own brackets, then those its type already has from an
+// array typedef: `buf b[2]` with `typedef long buf[8]` is long[2][8].
+// `buf b[]` keeps a 0 first dimension for the initializer to fill.
+static struct array_brackets* parser_join_brackets(struct array_brackets* own, struct datatype* dtype){
+    if(!(dtype->flags & DATATYPE_FLAG_IS_ARRAY) || !dtype->array.brackets){
+        return own;
+    }
+    struct array_brackets* joined = array_brackets_new();
+    if(!vector_count(own->n_brackets)){
+        array_brackets_add(joined, parser_bracket_of(0));
+    }
+    struct vector* lists[2] = { own->n_brackets, dtype->array.brackets->n_brackets };
+    for(int l = 0; l < 2; l++){
+        for(int i = 0; i < vector_count(lists[l]); i++){
+            array_brackets_add(joined, *(struct node**)vector_at(lists[l], i));
+        }
+    }
+    return joined;
 }
 
 // A _Bool object, not a pointer to one or an array of them.
@@ -2028,6 +2077,57 @@ static bool parser_is_bool_value(struct node* node){
         && node->exp.right->type == NODE_TYPE_NUMBER && node->exp.right->llnum == 0;
 }
 
+// The places of a call's arguments, the comma operators taken apart.
+static void parser_argument_slots(struct node** slot, struct vector* out){
+    struct node* node = *slot;
+    if(!node || node->type == NODE_TYPE_BLANK){
+        return;
+    }
+    if(node->type == NODE_TYPE_EXPRESSION && S_EQ(node->exp.op, ",")){
+        parser_argument_slots(&node->exp.left, out);
+        parser_argument_slots(&node->exp.right, out);
+        return;
+    }
+    vector_push(out, &slot);
+}
+
+// An argument for a _Bool parameter of a function called by name is 0
+// or 1 too: `f(flags & 0x800)` passed the low byte on x86, where the
+// call does not convert its arguments.
+static void parser_convert_bool_arguments(struct node* call){
+    if(call->exp.left->type != NODE_TYPE_IDENTIFIER){
+        return;
+    }
+    struct node* function = 0;
+    struct vector* tree = current_process->node_tree_vec;
+    for(int i = vector_count(tree) - 1; i >= 0 && !function; i--){
+        struct node* candidate = *(struct node**)vector_at(tree, i);
+        if(candidate->type == NODE_TYPE_FUNCTION && S_EQ(candidate->func.name, call->exp.left->sval)){
+            function = candidate;
+        }
+    }
+    if(!function && parser_current_function && S_EQ(parser_current_function->func.name, call->exp.left->sval)){
+        function = parser_current_function;
+    }
+    struct vector* params = function ? function->func.args.vector : 0;
+    if(!params){
+        return;
+    }
+    struct node** right = &call->exp.right;
+    if(*right && (*right)->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        right = &(*right)->parenthesis.exp;
+    }
+    struct vector* slots = vector_create(sizeof(struct node**));
+    parser_argument_slots(right, slots);
+    for(int i = 0; i < vector_count(slots) && i < vector_count(params); i++){
+        struct node** slot = *(struct node***)vector_at(slots, i);
+        struct node* param = *(struct node**)vector_at(params, i);
+        if(param->type == NODE_TYPE_VARIABLE && parser_is_bool_object(&param->var.type) && !parser_is_bool_value(*slot)){
+            *slot = parser_bool_value(*slot);
+        }
+    }
+}
+
 // Assignments to a _Bool store 0 or 1: `b = x` becomes `b = (x) != 0`
 // and `b op= x` becomes `b = (b op x) != 0`. This runs on the finished
 // expression, where the tree is in its final shape; while the operator
@@ -2057,6 +2157,10 @@ static void parser_convert_bool_assignments(struct node* node){
     }
     parser_convert_bool_assignments(node->exp.left);
     parser_convert_bool_assignments(node->exp.right);
+    if(S_EQ(node->exp.op, "()")){
+        parser_convert_bool_arguments(node);
+        return;
+    }
     struct datatype left_type;
     if(!is_node_assignment(node) || parser_is_bool_value(node->exp.right)
        || !parser_expression_type(node->exp.left, &left_type) || !parser_is_bool_object(&left_type)){
@@ -2146,19 +2250,8 @@ static struct node* parser_bitfield_member(struct node* node){
     if(!datatype_is_struct_or_union(&type) || !su || !su->_struct.body_n){
         return 0;
     }
-    struct vector* statements = su->_struct.body_n->body.statements;
-    for(int i = 0; i < vector_count(statements); i++){
-        struct node* statement = *(struct node**)vector_at(statements, i);
-        struct vector* list = statement->type == NODE_TYPE_VARIABLE_LIST ? statement->var_list.list : 0;
-        int count = list ? vector_count(list) : 1;
-        for(int j = 0; j < count; j++){
-            struct node* member = list ? *(struct node**)vector_at(list, j) : statement;
-            if(member->type == NODE_TYPE_VARIABLE && member->var.name && S_EQ(member->var.name, node->exp.right->sval)){
-                return member->var.bitfield.is_bitfield ? member : 0;
-            }
-        }
-    }
-    return 0;
+    struct node* member = struct_member_named(su->_struct.body_n->body.statements, node->exp.right->sval);
+    return member && member->var.bitfield.is_bitfield ? member : 0;
 }
 
 // The unit the bit-field `member` lives in, through the access `node`.
@@ -2407,11 +2500,11 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
             offset = (int)datatype_size(&variable_node(last_entity->node)->var.type);
             // on the register-argument targets every argument
             // was spilled into its own 8-byte home-area slot, so step
-            // by whole slots. x86 keeps the exact type size (its
-            // output is locked).
-            if(current_process->target->max_reg_args > 0){
-                offset = align_value(offset, current_process->target->arg_slot_size);
-            }
+            // by whole slots. On x86 every argument is pushed as at
+            // least 4 bytes too; stepping by the type size put the
+            // parameter after a char or short one at the wrong
+            // address (`f(char a, char b)` read b from a+1).
+            offset = align_value(offset, current_process->target->arg_slot_size);
         }
     }
 
@@ -2860,6 +2953,7 @@ static size_t parse_designator(struct datatype* type, struct vector* members){
         }
         return index->llnum;
     }
+    int designator_start = current_process->token_vec->pindex;
     expect_op(".");
     struct token* name = token_next();
     if(!members || !token_is_identifier(name)){
@@ -2868,6 +2962,17 @@ static size_t parse_designator(struct datatype* type, struct vector* members){
     for(int i = 0; i < vector_count(members); i++){
         struct node* member = *(struct node**)vector_at(members, i);
         if(member->var.name && S_EQ(member->var.name, name->sval)){
+            return i;
+        }
+    }
+    // `.llnum = 1` naming a member of an anonymous struct or union
+    // member: select that member and read `.llnum` again as the next
+    // designator, inside it (parse_designation_rest).
+    for(int i = 0; i < vector_count(members); i++){
+        struct node* member = *(struct node**)vector_at(members, i);
+        struct node* body = (member->flags & NODE_FLAG_ANONYMOUS_MEMBER) ? variable_struct_or_union_body_node(member) : 0;
+        if(body && struct_member_named(body->body.statements, name->sval)){
+            vector_set_peek_pointer(current_process->token_vec, designator_start);
             return i;
         }
     }
@@ -2987,13 +3092,19 @@ static void parse_initializer_value(struct datatype* type, size_t offset, struct
     // A struct initialized from a struct value, or brace elision into a
     // struct member: an expression of struct type is a value; anything
     // else fills the members.
+    int value_start = current_process->token_vec->pindex;
     parse_expressionable_root(history_begin(HISTORY_FLAG_NO_COMMA_OPERATOR));
     struct node* value = node_pop();
     if(datatype_is_struct_or_union(type) && !(type->flags & DATATYPE_FLAG_IS_POINTER)){
         struct datatype value_type;
         if(!parser_expression_type(value, &value_type) || !datatype_is_struct_or_union(&value_type)
            || (value_type.flags & DATATYPE_FLAG_IS_POINTER)){
-            compiler_error(current_process, "Expected { or a struct value to initialize a struct member\n");
+            // Not a struct value: the members take it, as in `struct {
+            // struct p a; int b; } x = { 0 };` (C11 6.7.9p20). That was
+            // "Expected { or a struct value". Read it again for them.
+            vector_set_peek_pointer(current_process->token_vec, value_start);
+            parse_initializer_elements(type, offset, leaves, false);
+            return;
         }
     }
     if(parser_is_bool_object(type)){
@@ -4163,10 +4274,25 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
                 parser_vla_pointer_to_array(name_token, inner, element_size, true);
             }
         } else {
+            brackets = parser_join_brackets(brackets, dtype);
             dtype->array.brackets = brackets;
             dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
             dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
         }
+    }
+
+    // A parameter declared as an array of T is a pointer to T (C11
+    // 6.7.6.3p7): `long b[4]`, `long b[]` and an array typedef's `buf b`.
+    // The parameter was laid out and read as the whole array before. A
+    // pointer to an array (`int m[][3]`) has no type here, so a
+    // multi-dimensional parameter keeps its array type.
+    if((history->flags & HISTORY_FLAG_IS_UPWARD_STACK) && (dtype->flags & DATATYPE_FLAG_IS_ARRAY)
+       && (!dtype->array.brackets || vector_count(dtype->array.brackets->n_brackets) <= 1)){
+        dtype->flags        &= ~DATATYPE_FLAG_IS_ARRAY;
+        dtype->array.brackets = 0;
+        dtype->array.size     = 0;
+        dtype->flags         |= DATATYPE_FLAG_IS_POINTER;
+        dtype->pointer_depth++;
     }
 
     // a bit-field member, `int x : 3;` or `unsigned : 0;`.
@@ -4205,8 +4331,14 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
             name_token ? name_token->sval : "");
     }
     struct vector* leaves = 0;
+    const char*     outer_declaring_name = parser_declaring_name;
+    struct datatype outer_declaring_type = parser_declaring_type;
     if(token_next_is_operator("=")){
         token_next();
+        // The name is in scope from the end of its declarator (C11
+        // 6.2.1p7): `struct s* p = calloc(1, sizeof(*p));`.
+        parser_declaring_name = name_token ? name_token->sval : 0;
+        parser_declaring_type = *dtype;
         bool string_for_array = parser_is_string_array(dtype);
         if(token_next_is_symbol('{') || string_for_array){
             // A brace initializer, or `char s[] = "hi"`, which stored the
@@ -4226,6 +4358,8 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
             }
         }
     }
+    parser_declaring_name = outer_declaring_name;
+    parser_declaring_type = outer_declaring_type;
 
     if(is_static_local){
         parse_static_local(dtype, name_token, value_node);
@@ -4935,12 +5069,12 @@ static void parse_struct_or_union_attached_variable(struct datatype* dtype, stru
     if(token_is_identifier(token_peek_next())){
         struct token* var_name = token_next();
         su_node->flags |= NODE_FLAG_HAS_VARIABLE_COMBINED;
-        // If the struct was anonymous, the variable name becomes the
-        // type name too (so other declarations can refer to it).
+        // An untagged struct keeps its hidden tag. It used to take the
+        // variable's name as its tag, so the member `struct { ... } scope;`
+        // of compile_process replaced `struct scope` (C has no such
+        // rule: the type has no name).
         if(dtype->flags & DATATYPE_FLAG_STRUCT_UNION_NO_NAME){
-            dtype->type_str     = var_name->sval;
             dtype->flags       &= ~DATATYPE_FLAG_STRUCT_UNION_NO_NAME;
-            su_node->_struct.name = var_name->sval;
         }
         // parse_variable reads `[N]` and `= ...` too: `union u {...} g =
         // { 1 };` and `struct s {...} a[2];`. The declaring context's
@@ -5059,6 +5193,65 @@ static void parse_forward_declaration(struct datatype* dtype){
     parse_struct(dtype, history_begin(0));
 }
 
+// A file-scope object declared twice without `extern`, `static bool x;`
+// then `static bool x;` again (tentative definitions, C11 6.9.2): one
+// object. Each declaration was a definition, a label twice in the asm.
+// The one with the initializer, else the first, stays; the other
+// becomes a blank statement (the resolver keeps both, by the same name).
+// The file-scope definitions so far by name, so 20,000 globals do not
+// make 200 million comparisons (tests/352). parse() clears it.
+struct parser_global_definition {
+    struct compile_process*          process;
+    struct node*                     node;
+    struct parser_global_definition* next;
+};
+static struct parser_global_definition* parser_global_definitions[4096];
+
+static void parser_merge_tentative_definition(void){
+    struct node* var = node_peek_or_null();
+    if(!var || var->type != NODE_TYPE_VARIABLE || current_process->scope.current != current_process->scope.root
+       || (var->var.type.flags & DATATYPE_FLAG_IS_EXTERN)){
+        return;
+    }
+    struct parser_global_definition** definitions = parser_global_definitions;
+    unsigned hash = 2166136261u;
+    for(const unsigned char* c = (const unsigned char*)var->var.name; c && *c; c++){
+        hash = (hash ^ *c) * 16777619u;
+    }
+    hash %= 4096;
+    struct parser_global_definition* previous = definitions[hash];
+    while(previous && (previous->process != current_process || !S_EQ(previous->node->var.name, var->var.name))){
+        previous = previous->next;
+    }
+    if(!previous){
+        struct parser_global_definition* entry = calloc(1, sizeof(struct parser_global_definition));
+        entry->process = current_process;
+        entry->node    = var;
+        entry->next    = definitions[hash];
+        definitions[hash] = entry;
+        return;
+    }
+    if(var->var.val && previous->node->var.val){
+        compiler_error(current_process, "%s is defined twice\n", var->var.name);
+    }
+    if(!var->var.val){
+        node_pop();
+        node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+        return;
+    }
+    // This one has the initializer: the earlier one gives way.
+    struct vector* tree = current_process->node_tree_vec;
+    for(int i = vector_count(tree) - 1; i >= 0; i--){
+        struct node** slot = vector_at(tree, i);
+        if(*slot == previous->node){
+            node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+            *slot = node_pop();
+            break;
+        }
+    }
+    previous->node = var;
+}
+
 static void parse_variable_function_or_struct_union(struct history* history){
     struct datatype dtype;
     parse_datatype(&dtype);
@@ -5077,6 +5270,23 @@ static void parse_variable_function_or_struct_union(struct history* history){
             // A local `struct S {...} v;` is the declaration of v; the
             // type is already registered.
             node_push(su_node->_struct.var);
+            return;
+        }
+        if((dtype.flags & DATATYPE_FLAG_STRUCT_UNION_NO_NAME)
+           && (history->flags & (HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION))){
+            // `union { int a; long b; };` inside a struct or union is an
+            // anonymous member (C11 6.7.2.1p13): laid out like a named
+            // one under a hidden name, and its members are found through
+            // it (struct_member_named).
+            static int anonymous_count = 0;
+            char* name = malloc(32);
+            sprintf(name, "__anonymous_member_%i", anonymous_count++);
+            struct token* name_token = calloc(1, sizeof(struct token));
+            name_token->type = TOKEN_TYPE_IDENTIFIER;
+            name_token->sval = name;
+            name_token->pos  = current_process->pos;
+            make_variable_node_and_register(history, &dtype, name_token, 0);
+            node_peek()->flags |= NODE_FLAG_ANONYMOUS_MEMBER;
             return;
         }
         node_push(su_node);
@@ -5152,6 +5362,7 @@ static void parse_variable_function_or_struct_union(struct history* history){
     base_dtype.pointer_const = 0;
     struct datatype first_dtype = dtype;
     parse_variable(&first_dtype, name_token, history);
+    parser_merge_tentative_definition();
 
     // ch43: `int a, b, c;` - gather any comma-separated peers into a
     // NODE_TYPE_VARIABLE_LIST.
@@ -5211,10 +5422,10 @@ static struct node* parse_else_or_else_if(struct history* history){
     token_next();   // eat "else"
 
     if(token_next_is_keyword("if")){
-        parse_if_stmt(history_down(history, 0));
+        parse_if_stmt(history_down(history, history->flags));
         return node_pop();
     }
-    return parse_else(history_down(history, 0));
+    return parse_else(history_down(history, history->flags));
 }
 
 // ch78/79: parse `if (cond) <body> [else if ... | else ...]`.
@@ -5450,6 +5661,12 @@ static bool parser_expression_type(struct node* node, struct datatype* out);
 // that reaches an element keeps the array's flags in the resolver; for
 // sizeof and the operators around it that is the element type.
 static bool parser_resolved_type(struct node* node, struct datatype* out){
+    // The variable whose initializer this is: not registered yet, but
+    // its name is in scope (parse_variable).
+    if(node->type == NODE_TYPE_IDENTIFIER && parser_declaring_name && S_EQ(node->sval, parser_declaring_name)){
+        *out = parser_declaring_type;
+        return true;
+    }
     // The name an access chain starts from must exist: the resolver
     // follows `zz[0]` into a NULL entity and segfaulted.
     struct node* root = node;
@@ -5481,6 +5698,22 @@ static bool parser_resolved_type(struct node* node, struct datatype* out){
 // operand of sizeof is not evaluated (C11 6.5.3.4), so only its type is
 // needed, and the parser can work it out: variables are registered with
 // the resolver as they are declared.
+// A call in the member and subscript chain `node` starts with.
+static bool parser_has_call(struct node* node){
+    while(node){
+        if(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            node = node->parenthesis.exp;
+        } else if(node->type == NODE_TYPE_EXPRESSION && S_EQ(node->exp.op, "()")){
+            return true;
+        } else if(node->type == NODE_TYPE_EXPRESSION && (is_access_operator(node->exp.op) || S_EQ(node->exp.op, "[]"))){
+            node = node->exp.left;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
 static bool parser_expression_type(struct node* node, struct datatype* out){
     switch(node->type){
         case NODE_TYPE_NUMBER:
@@ -5528,6 +5761,31 @@ static bool parser_expression_type(struct node* node, struct datatype* out){
         }
         case NODE_TYPE_EXPRESSION: {
             const char* op = node->exp.op;
+            // A call of a function by name: its return type. The resolver
+            // does not know the functions while the parser runs.
+            if(S_EQ(op, "()") && parser_call_type(node, out)){
+                return true;
+            }
+            // A member of a call's result, `node_peek()->flags`: the
+            // resolver cannot follow the call, so the member is looked up
+            // in the type parser_call_type gives.
+            if(is_access_operator(op) && node->exp.right->type == NODE_TYPE_IDENTIFIER && parser_has_call(node->exp.left)){
+                struct datatype base;
+                if(!parser_expression_type(node->exp.left, &base)){
+                    return false;
+                }
+                if(S_EQ(op, "->")){
+                    base = *datatype_pointer_reduce(&base, 1);
+                }
+                struct node* su = datatype_is_struct_or_union(&base) ? base.struct_node : 0;
+                struct node* member = su && su->_struct.body_n
+                    ? struct_member_named(su->_struct.body_n->body.statements, node->exp.right->sval) : 0;
+                if(!member){
+                    return false;
+                }
+                *out = member->var.type;
+                return true;
+            }
             if(is_access_operator(op) || S_EQ(op, "[]") || S_EQ(op, "()")){
                 return parser_resolved_type(node, out);
             }
@@ -5842,6 +6100,7 @@ int parse(struct compile_process* process){
     parser_last_token = 0;
     parser_previous_token = 0;
     parser_saw_bool = false;
+    memset(parser_global_definitions, 0, sizeof(parser_global_definitions));
     parser_bitfield_width = -1;
     parser_bitfield_names = vector_create(sizeof(const char*));
     parser_vla_blocks = vector_create(sizeof(struct parser_vla_block));

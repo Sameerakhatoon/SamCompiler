@@ -660,7 +660,12 @@ void compiler_error_at(struct pos* pos, const char* msg, ...);
 // too. compiler_finish_errors prints the totals ("2 errors and 1
 // warning generated.") and exits with -1 when there was an error.
 #include <setjmp.h>
-void compiler_set_recovery(jmp_buf* point);
+// The jmp_buf is wrapped so a pointer to it is a pointer to a struct:
+// SamCompiler compiles itself and has no pointer to an array.
+struct compiler_recovery {
+    jmp_buf env;
+};
+void compiler_set_recovery(struct compiler_recovery* point);
 int  compiler_error_count(void);
 void compiler_finish_errors(void);
 
@@ -745,6 +750,9 @@ enum {
     // A bit-field access the parser has lowered: it stands for the
     // whole unit the bit-field lives in.
     NODE_FLAG_BITFIELD_UNIT          = 0b00010000,
+    // On a struct or union member: an anonymous struct or union
+    // (C11 6.7.2.1p13), whose members are members of the enclosing one.
+    NODE_FLAG_ANONYMOUS_MEMBER       = 0b00100000,
 };
 
 // Datatype shape is needed before struct node because var nodes embed
@@ -1667,6 +1675,10 @@ struct symbol* symresolver_get_symbol(struct compile_process* process, const cha
 struct symbol* symresolver_get_symbol_any(struct compile_process* process, const char* name);
 struct symbol* symresolver_register_symbol(struct compile_process* process, const char* sym_name, int type, void* data);
 struct symbol* symresolver_get_symbol_for_native_function(struct compile_process* process, const char* name);
+// Struct and union tags, a name space apart from the other names.
+struct symbol* symresolver_get_tag(struct compile_process* process, const char* name);
+struct symbol* symresolver_get_tag_any(struct compile_process* process, const char* name);
+struct symbol* symresolver_register_tag(struct compile_process* process, const char* tag, struct node* node);
 struct symbol* symresolver_register_symbol(struct compile_process* process, const char* sym_name, int type, void* data);
 void           symresolver_free_all(void);
 

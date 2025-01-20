@@ -332,6 +332,26 @@ static void exp64_convert(int reg, struct datatype* from, struct datatype* to){
         }
         return;
     }
+    if((to->flags & DATATYPE_FLAG_IS_BOOL) && !exp64_is_pointer(to) && !(from->flags & DATATYPE_FLAG_IS_BOOL)
+       && !exp64_is_void(from) && !exp64_is_struct(from)){
+        // To _Bool: 0 or 1 (C11 6.3.1.2), not the low byte, so an
+        // argument `count(0x200)` for a _Bool parameter is 1. R1 is kept
+        // on the stack meanwhile.
+        struct datatype word = exp64_int_type(DATA_SIZE_DDWORD, false);
+        if(reg){
+            ops->swap();
+        }
+        ops->swap();
+        ops->push(&word);
+        ops->swap();
+        ops->imm(1, 0);
+        ops->compare("!=", false);
+        ops->pop(1);
+        if(reg){
+            ops->swap();
+        }
+        return;
+    }
     int size = exp64_scalar_size(to);
     if(size >= DATA_SIZE_DDWORD){
         return;
@@ -417,7 +437,9 @@ static int exp64_member(struct datatype* t, const char* member, struct datatype*
         compiler_error(current_process, "%s has no member %s\n", t->type_str, member);
     }
     *member_type = member_node->var.type;
-    return t->type == DATA_TYPE_UNION ? 0 : offset;
+    // A union member is at 0, unless it is inside an anonymous struct
+    // member of the union (struct_member_named).
+    return offset;
 }
 
 // ---------------------------------------------------------------

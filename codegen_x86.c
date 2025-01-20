@@ -2236,7 +2236,7 @@ static struct node* x87_member(struct datatype* t, const char* name){
     if(!datatype_is_struct_or_union(t) || !t->type_str){
         return 0;
     }
-    struct symbol* sym = symresolver_get_symbol(current_process, t->type_str);
+    struct symbol* sym = symresolver_get_tag(current_process, t->type_str);
     if(!sym || sym->type != SYMBOL_TYPE_NODE){
         return 0;
     }

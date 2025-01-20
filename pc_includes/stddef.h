@@ -7,14 +7,15 @@
 
 // size_t and NULL, which freestanding code (the SamOS stdlib
 // headers) takes from here. size_t as in stdlib.h; two blocks, not
-// #else.
+// #else. size_t is unsigned (C11 7.19);
+// it was int or long, so `(size_t)-1 / 2` was 0.
 #ifndef SAMCC_SIZE_T
 #define SAMCC_SIZE_T
 #ifndef __LP64__
-typedef int size_t;
+typedef unsigned int size_t;
 #endif
 #ifdef __LP64__
-typedef long size_t;
+typedef unsigned long size_t;
 #endif
 #endif
 
