@@ -296,6 +296,16 @@ struct preprocessor {
 struct preprocessor* preprocessor_create(struct compile_process* compiler);
 int                  preprocessor_run(struct compile_process* compiler);
 
+// ch227: native preprocessor definitions (e.g. __LINE__) plug in via
+// these helpers from preprocessor/native.c.
+void                  preprocessor_create_definitions(struct preprocessor* preprocessor);
+struct token*         preprocessor_previous_token(struct compile_process* compiler);
+struct vector*        preprocessor_build_value_vector_for_integer(int value);
+struct preprocessor_definition* preprocessor_definition_create_native(const char* name,
+    PREPROCESSOR_DEFINITION_NATIVE_CALL_EVALUATE evaluate,
+    PREPROCESSOR_DEFINITION_NATIVE_CALL_VALUE    value,
+    struct preprocessor* preprocessor);
+
 struct compile_process {
     // Flags controlling how this file should be compiled.
     int flags;
