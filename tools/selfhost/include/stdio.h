@@ -20,6 +20,7 @@ FILE*  fopen(const char* path, const char* mode);
 int    fclose(FILE* stream);
 size_t fread(void* ptr, size_t size, size_t count, FILE* stream);
 size_t fwrite(const void* ptr, size_t size, size_t count, FILE* stream);
+char*  fgets(char* s, int size, FILE* stream);
 int    getc(FILE* stream);
 int    fgetc(FILE* stream);
 int    fputc(int c, FILE* stream);
@@ -38,4 +39,10 @@ int    vsprintf(char* out, const char* fmt, va_list args);
 int    vsnprintf(char* out, size_t size, const char* fmt, va_list args);
 int    sscanf(const char* in, const char* fmt, ...);
 int    rename(const char* from, const char* to);
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+int    fseek(FILE* stream, long offset, int whence);
+long   ftell(FILE* stream);
+void   rewind(FILE* stream);
 #endif
