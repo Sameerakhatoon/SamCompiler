@@ -193,6 +193,7 @@ int preprocessor_evaluate(struct compile_process *compiler, struct preprocessor_
 int preprocessor_handle_identifier_for_token_vector(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec, struct token *token);
 struct vector *preprocessor_definition_value(struct preprocessor_definition *definition);
 void preprocessor_token_vec_push_src_resolve_definition(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec, struct token *token);
+void preprocessor_token_vec_push_src_resolve_definitions(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec);
 struct preprocessor_definition *preprocessor_get_definition(struct preprocessor *preprocessor, const char *name);
 void preprocessor_macro_function_push_something(struct compile_process *compiler, struct preprocessor_definition *definition, struct preprocessor_function_arguments *arguments, struct token *arg_token, struct vector *definition_token_vec, struct vector *value_vec_target);
 
@@ -1605,7 +1606,10 @@ void preprocessor_handle_typedef_token(struct compile_process *compiler, struct 
             {
                 vector_pop(token_vec);
             }
-            preprocessor_token_vec_push_src(compiler, token_vec);
+            // The body was read without expanding anything: its macros
+            // (`unsigned char e_ident[EI_NIDENT];` in <elf.h>) and the
+            // typedef names of its members expand on the way out.
+            preprocessor_token_vec_push_src_resolve_definitions(compiler, token_vec, compiler->token_vec);
             preprocessor_token_push_semicolon(compiler);
         }
         token_vec = value_vec;
