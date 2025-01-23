@@ -1655,6 +1655,11 @@ static void codegen_generate_entity_access_for_entity(struct resolver_result* re
 
 static void codegen_generate_entity_access(struct resolver_result* result, struct resolver_entity* root_assignment_entity, struct node* top_most_node, struct history* history){
     (void)top_most_node;
+    // The resolver has no entity for some roots: `(c ? s : t).m`, a
+    // member of a conditional expression, crashed here.
+    if(!root_assignment_entity){
+        compiler_error(current_process, "x86: this expression is not supported (a member of a conditional expression?)\n");
+    }
     // ch237: native function dispatch. When the root entity is a
     // RESOLVER_ENTITY_TYPE_NATIVE_FUNCTION, pull the registered
     // native_function and hand off to its callback with the call

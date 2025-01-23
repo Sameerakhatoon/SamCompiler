@@ -1072,20 +1072,28 @@ static struct datatype exp64_ternary(struct node* node){
     }
     int no_label = exp64_new_label();
     int end_label = exp64_new_label();
-    if(exp64_is_ldouble(&yt) || exp64_is_ldouble(&nt)){
+    if(exp64_in_memory(&yt) || exp64_in_memory(&nt)){
         // the result goes to room made before the branches,
-        // so both leave the expression stack the same.
-        t = datatype_long_double();
-        ops->reserve(EXP64_LD_SIZE);
+        // so both leave the expression stack the same. A struct too:
+        // each branch's call result had its own room, and the stack
+        // after the join counted both.
+        bool is_struct = exp64_is_struct(&t);
+        if(!is_struct){
+            t = datatype_long_double();
+        }
+        int size = is_struct ? (int)exp64_size(&t) : EXP64_LD_SIZE;
+        ops->reserve(align_value(size, DATA_SIZE_DDWORD));
         int room = vector_count(current_function->func.frame.elements) - 1;
         exp64_truth(node->exp.left);
         ops->branch(no_label, EXP64_BRANCH_IF_ZERO);
         for(int side = 0; side < 2; side++){
             struct datatype vt = exp64_value(side ? no : yes);
-            exp64_convert(0, &vt, &t);
+            if(!is_struct){
+                exp64_convert(0, &vt, &t);
+            }
             ops->mov_r1();
             ops->slot_address(vector_count(current_function->func.frame.elements) - 1 - room);
-            ops->copy(EXP64_LD_SIZE);
+            ops->copy(size);
             int above = vector_count(current_function->func.frame.elements) - 1 - room;
             if(above){
                 ops->drop(above);
