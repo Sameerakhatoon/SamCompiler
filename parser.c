@@ -1905,6 +1905,10 @@ static void parse_atomic_type_specifier(struct datatype* dtype){
     }
     parser_type_sign_settled = true;
 }
+// Set while parse_sizeof reads its type name: the brackets after it
+// are left for parse_sizeof, which knows a VLA type.
+static bool parser_sizeof_type_brackets;
+
 // Whether parse_datatype_type read `signed` or `unsigned` after the type
 // keyword.
 static bool parser_type_sign_given;
@@ -1996,8 +2000,9 @@ static void parse_datatype(struct datatype* dtype){
     // (`typedef long buf[8];` makes `buf b;` read `long [8] b`, see
     // preprocessor_handle_typedef_token) or the abstract declarator of
     // `sizeof(int[3])` and `(int[]){ 1, 2 }`. A declarator's own
-    // brackets go in front of these (parser_join_brackets).
-    if(token_next_is_operator("[")){
+    // brackets go in front of these (parser_join_brackets). sizeof reads
+    // its own (parse_sizeof): `sizeof(int[n][m])` may be a VLA type.
+    if(token_next_is_operator("[") && !parser_sizeof_type_brackets){
         struct array_brackets* brackets = parse_array_brackets(history_begin(0));
         dtype->array.brackets = brackets;
         dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
@@ -5833,7 +5838,9 @@ static void parse_sizeof(struct history* history){
     }
     if(after_paren && after_paren->type == TOKEN_TYPE_KEYWORD
        && (keyword_is_datatype(after_paren->sval) || is_keyword_variable_modifier(after_paren->sval))){
+        parser_sizeof_type_brackets = true;
         parse_datatype(&dtype);
+        parser_sizeof_type_brackets = false;
         // `sizeof(int[4])`, and in a function `sizeof(int[n][m])`
         //, worked out when it runs.
         if(token_next_is_operator("[")){
