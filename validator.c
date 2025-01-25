@@ -571,11 +571,10 @@ static bool validate_is_comparison(const char* op)
         || S_EQ(op, "<=") || S_EQ(op, ">=");
 }
 
-static struct vtype validate_binary(struct node* node)
+// The type of `left op right`, both operands checked already.
+static struct vtype validate_binary_operands(struct node* node, struct vtype left, struct vtype right)
 {
     const char* op = node->exp.op;
-    struct vtype left = validate_expression(node->exp.left);
-    struct vtype right = validate_expression(node->exp.right);
     // A struct is no operand of arithmetic or a comparison: x86 failed
     // a stack frame assert on `*(p + 1) + 1` with p a struct pointer.
     if (vtype_is_struct(&left) || vtype_is_struct(&right))
@@ -603,6 +602,42 @@ static struct vtype validate_binary(struct node* node)
         return vtype_int();
     }
     return vtype_unknown();
+}
+
+// An operator validate_binary handles: not an assignment, a comma, a
+// conditional, a call, a member access or a subscript.
+static bool validate_is_plain_binary(struct node* node)
+{
+    if (!node || node->type != NODE_TYPE_EXPRESSION)
+    {
+        return false;
+    }
+    const char* op = node->exp.op;
+    return !(S_EQ(op, "=") || validate_is_compound_assignment(op) || S_EQ(op, ",") || S_EQ(op, "?")
+        || is_parentheses_node(node) || is_access_node(node) || is_array_node(node));
+}
+
+// `a + b + c + ...` nests down the left. The left operands are walked
+// with a loop, innermost first as the recursion did, so a long sum
+// (tests/352's 8,000 terms) does not use three stack frames a term.
+static struct vtype validate_binary(struct node* node)
+{
+    struct vector* spine = vector_create(sizeof(struct node*));
+    struct node* innermost = node;
+    while (validate_is_plain_binary(innermost))
+    {
+        vector_push(spine, &innermost);
+        innermost = innermost->exp.left;
+    }
+    struct vtype left = validate_expression(innermost);
+    for (int i = vector_count(spine) - 1; i >= 0; i--)
+    {
+        struct node* binary = *(struct node**)vector_at(spine, i);
+        struct vtype right = validate_expression(binary->exp.right);
+        left = validate_binary_operands(binary, left, right);
+    }
+    vector_free(spine);
+    return left;
 }
 
 static struct vtype validate_exp_node(struct node* node)
