@@ -60,16 +60,18 @@ int main(void){
     int has_dirs = p->include_dirs != NULL;
     int has_orig = p->token_vec_original != NULL;
     int has_tok  = p->token_vec != NULL;
-    int defs_empty = p->preprocessor && vector_count(p->preprocessor->definitions) == 0;
-    int inc_empty  = p->preprocessor && vector_count(p->preprocessor->includes) == 0;
-    printf("pp=%d dirs=%d orig=%d tok=%d defs0=%d inc0=%d\n",
-        has_pp, has_dirs, has_orig, has_tok, defs_empty, inc_empty);
+    // ch227 lands the __LINE__ native built-in so a fresh
+    // preprocessor's definitions vector now has count == 1 (not 0).
+    int defs_one  = p->preprocessor && vector_count(p->preprocessor->definitions) == 1;
+    int inc_empty = p->preprocessor && vector_count(p->preprocessor->includes) == 0;
+    printf("pp=%d dirs=%d orig=%d tok=%d defs1=%d inc0=%d\n",
+        has_pp, has_dirs, has_orig, has_tok, defs_one, inc_empty);
     return 0;
 }
 EOF
 
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || fail "ch200 probe failed to compile"
 got="$("$bin")"
-assert_contains "$got" "pp=1 dirs=1 orig=1 tok=1 defs0=1 inc0=1" \
+assert_contains "$got" "pp=1 dirs=1 orig=1 tok=1 defs1=1 inc0=1" \
     "compile_process_create wires the preprocessor + include_dirs + token vectors"
 pass
