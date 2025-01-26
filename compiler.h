@@ -358,6 +358,15 @@ struct compile_process {
 int                     compile_file(const char* filename, const char* out_filename, int flags);
 struct compile_process* compile_process_create(const char* filename, const char* filename_out, int flags, struct compile_process* parent_process);
 
+// ch229: include-directory iteration + include compilation.
+const char* compiler_include_dir_begin(struct compile_process* process);
+const char* compiler_include_dir_next(struct compile_process* process);
+void        compiler_setup_default_include_directories(struct vector* include_vec);
+struct compile_process* compile_include(const char* filename, struct compile_process* parent_process);
+
+// ch229: helpers.
+bool file_exists(const char* filename);
+
 void compiler_error(struct compile_process* compiler, const char* msg, ...);
 void compiler_warning(struct compile_process* compiler, const char* msg, ...);
 
