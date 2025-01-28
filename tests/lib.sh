@@ -17,7 +17,7 @@ test_name="$(basename "${0%.*}")"
 # libraries. Tests use $LINK_OBJS instead of hand-listing files, so
 # new modules added in later chapters don't require touching every
 # test.
-LINK_OBJS="$(ls "$REPO_ROOT"/build/*.o "$REPO_ROOT"/build/helpers/*.o 2>/dev/null | tr '\n' ' ')"
+LINK_OBJS="$(ls "$REPO_ROOT"/build/*.o "$REPO_ROOT"/build/helpers/*.o "$REPO_ROOT"/build/static-includes/*.o 2>/dev/null | tr '\n' ' ')"
 
 pass() { echo "$test_name ... ok"; exit 0; }
 fail() { echo "$test_name ... FAIL: $*" >&2; exit 1; }
