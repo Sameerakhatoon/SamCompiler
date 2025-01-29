@@ -124,6 +124,7 @@ static void          parse_variable(struct datatype* dtype, struct token* name_t
 static void          make_variable_list_node(struct vector* var_list_vec);
 static void          expect_sym(char c);
 static void          parse_keyword(struct history* history);
+static void          parse_sizeof(struct history* history);
 static int           parse_expressionable_single(struct history* history);
 static void          parse_expressionable(struct history* history);
 static int           parse_next(void);
@@ -1786,8 +1787,23 @@ static void parse_return(struct history* history){
     expect_sym(';');
 }
 
+// ch232: parse `sizeof(<datatype>)` as a NUMBER node holding the size.
+// Operates entirely at parse time; codegen sees a constant.
+static void parse_sizeof(struct history* history){
+    expect_keyword("sizeof");
+    expect_op("(");
+    struct datatype dtype;
+    parse_datatype(&dtype);
+    node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&dtype) });
+    expect_sym(')');
+}
+
 static void parse_keyword(struct history* history){
     struct token* token = token_peek_next();
+    if(S_EQ(token->sval, "sizeof")){
+        parse_sizeof(history);
+        return;
+    }
     if(is_keyword_variable_modifier(token->sval) || keyword_is_datatype(token->sval)){
         parse_variable_function_or_struct_union(history);
         return;
