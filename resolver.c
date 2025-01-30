@@ -534,13 +534,23 @@ struct resolver_entity* resolver_follow_variable(struct resolver_process* resolv
 // insert a RULE entity carrying merge flags (do-indirection on the
 // right for `->` unless the left is a function call), then walk the
 // right side.
+// ch233: indirection on the right of `->` is only valid when the
+// left is itself an addressable thing - not a FUNCTION_CALL result,
+// not the target of unary-&, not a CAST result.
+static bool resolver_do_indirection(struct resolver_entity* entity){
+    struct resolver_result* result = entity->result;
+    return entity->type != RESOLVER_ENTITY_TYPE_FUNCTION_CALL
+        && !(result->flags & RESOLVER_RESULT_FLAG_DOES_GET_ADDRESS)
+        && entity->type != RESOLVER_ENTITY_TYPE_CAST;
+}
+
 struct resolver_entity* resolver_follow_struct_exp(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
     resolver_follow_part(resolver, node->exp.left, result);
     struct resolver_entity* left_entity = resolver_result_peek(result);
     struct resolver_entity_rule rule = {0};
     if(is_access_node_with_op(node, "->")){
         rule.left.flags = RESOLVER_ENTITY_FLAG_NO_MERGE_WITH_NEXT_ENTITY;
-        if(left_entity && left_entity->type != RESOLVER_ENTITY_TYPE_FUNCTION_CALL){
+        if(left_entity && resolver_do_indirection(left_entity)){
             rule.right.flags = RESOLVER_ENTITY_FLAG_DO_INDIRECTION;
         }
     }
@@ -680,6 +690,15 @@ struct resolver_entity* resolver_follow_cast(struct resolver_process* resolver, 
     operand_entity = resolver_result_peek(result);
     operand_entity->flags |= RESOLVER_ENTITY_FLAG_WAS_CASTED;
     struct resolver_entity* cast_entity = resolver_create_new_cast_entity(resolver, operand_entity->scope, &node->cast.dtype);
+    // ch233: casts to struct / union should anchor as the
+    // last_struct_union_entity so a subsequent `.` / `->` can
+    // resolve member offsets against the cast dtype.
+    if(datatype_is_struct_or_union(&node->cast.dtype)){
+        if(!cast_entity->scope){
+            cast_entity->scope = resolver->scope.current;
+        }
+        result->last_struct_union_entity = cast_entity;
+    }
     resolver_result_entity_push(result, cast_entity);
     return cast_entity;
 }
@@ -701,6 +720,9 @@ struct resolver_entity* resolver_follow_indirection(struct resolver_process* res
 // ch132: `&a.b.c` - walk the operand, then push a UNARY_GET_ADDRESS
 // entity carrying the operand's dtype / scope / offset.
 struct resolver_entity* resolver_follow_unary_address(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
+    // ch233: mark the result as "we want the address" so any inner
+    // `->` doesn't try to indirect through the address-of operand.
+    result->flags |= RESOLVER_RESULT_FLAG_DOES_GET_ADDRESS;
     resolver_follow_part(resolver, node->unary.operand, result);
     struct resolver_entity* last_entity = resolver_result_peek(result);
     struct resolver_entity* addr = resolver_create_new_unary_get_address_entity(resolver, result, &last_entity->dtype, node, last_entity->scope, last_entity->offset);
