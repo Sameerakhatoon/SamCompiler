@@ -4,11 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <elf.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
 #include "helpers/vector.h"
 #include "compiler.h"
+#include "os.h"
 
 // The driver. Two forms:
 //
@@ -41,7 +39,7 @@ static const char* main_prog = "main";
 static const char* main_sysroot;
 static const char* main_own_includes;
 static bool        main_verbose;
-static pid_t       main_pid;
+static int         main_pid;
 // -fPIC or -shared: compile for a shared object; -shared: link one.
 static int         main_compile_flags;
 static bool        main_shared;
@@ -122,32 +120,6 @@ static bool main_is_linker_input(const char* path){
     return main_ends_with(path, ".o") || main_ends_with(path, ".a") || main_is_shared_library(path);
 }
 
-// Single-quote `in` for /bin/sh so a path reaches the assembler and linker
-// as one argument and is never run as shell syntax (E2).
-static bool main_shell_quote(const char* in, char* out, size_t out_size){
-    size_t used = 0;
-    if(out_size < 3){
-        return false;
-    }
-    out[used++] = '\'';
-    for(const char* c = in; *c; c++){
-        const char* piece = *c == '\'' ? "'\\''" : 0;
-        size_t piece_len = piece ? strlen(piece) : 1;
-        if(used + piece_len + 2 > out_size){
-            return false;
-        }
-        if(piece){
-            memcpy(out + used, piece, piece_len);
-        } else {
-            out[used] = *c;
-        }
-        used += piece_len;
-    }
-    out[used++] = '\'';
-    out[used] = 0;
-    return true;
-}
-
 // gcc-multilib (needed by `gcc -m32`) cannot be installed next to the
 // aarch64 and riscv64 cross gcc's on Ubuntu, so the x86 target lists
 // the i686 cross gcc first and `gcc -m32` as its fallback. The
@@ -168,29 +140,22 @@ static const char* main_link_cmd(const struct target* target, int kind){
         return cmd;
     }
     char tool[64];
-    char check_cmd[128];
     sscanf(cmd, "%63s", tool);
-    snprintf(check_cmd, sizeof(check_cmd), "command -v %s >/dev/null 2>&1", tool);
-    if(system(check_cmd) == 0){
-        return cmd;
-    }
-    return fallback;
+    return os_have_command(tool) ? cmd : fallback;
 }
 
-// pc_includes is found next to this binary (readlink follows a symlink
-// such as /usr/local/bin/samcc), not in the working directory.
+// pc_includes is found next to this binary (os_self_path follows a
+// symlink such as /usr/local/bin/samcc), not in the working directory.
 static void main_find_own_includes(void){
     static char own_includes[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", own_includes, sizeof(own_includes) - 32);
-    if(n <= 0){
+    if(!os_self_path(own_includes, sizeof(own_includes) - 32)){
         return;
     }
-    own_includes[n] = 0;
-    char* slash = strrchr(own_includes, '/');
-    if(!slash){
+    char* base = (char*)os_base_name(own_includes);
+    if(base == own_includes){
         return;
     }
-    strcpy(slash, "/pc_includes");
+    strcpy(base, "pc_includes");
     main_own_includes = own_includes;
     compiler_set_own_include_dir(own_includes);
 }
@@ -248,19 +213,66 @@ static void main_usage(FILE* out){
         main_prog, main_prog);
 }
 
-// Run a shell command; returns 0 or the tool's exit status (at least 1).
+// Run a tool's command line; returns 0 or the tool's exit status (at
+// least 1).
 static int main_run(const char* cmd){
     if(main_verbose){
         fprintf(stderr, "%s\n", cmd);
     }
-    int rc = system(cmd);
-    if(rc == 0){
-        return 0;
+    return os_run_command(cmd);
+}
+
+// The arguments the driver was started with, for main_compile_spawned.
+static int    main_argc;
+static char** main_argv;
+
+struct main_compile_job {
+    const char* input;
+    const char* output;
+    int         flags;
+};
+
+static int main_compile_job_run(void* arg){
+    struct main_compile_job* job = arg;
+    return compile_file(job->input, job->output, job->flags) == COMPILER_FILE_COMPILED_OK ? 0 : 1;
+}
+
+// Without fork (Windows, or SAMCC_NO_FORK set) the driver runs itself
+// again, `--samcc-compile-child FLAGS INPUT OUTPUT` in front of its own
+// arguments, so the child sets up the same target, includes and macros
+// and compiles that one input.
+static int main_compile_spawned(const char* input, const char* output, int flags){
+    char self[PATH_MAX];
+    if(!os_self_path(self, sizeof(self))){
+        main_error("cannot find the driver's own executable to compile %s", input);
+        return 1;
     }
-    if(rc > 0 && WIFEXITED(rc) && WEXITSTATUS(rc) != 0){
-        return WEXITSTATUS(rc);
+    char quoted[PATH_MAX * 4 + 3];
+    size_t size = 64 + 3 * sizeof(quoted);
+    for(int i = 1; i < main_argc; i++){
+        size += strlen(main_argv[i]) * 4 + 4;
     }
-    return 1;
+    char* cmd = malloc(size);
+    os_quote_arg(self, cmd, size);
+    snprintf(cmd + strlen(cmd), size - strlen(cmd), " --samcc-compile-child %d", flags);
+    for(int i = -2; i < main_argc; i++){
+        const char* arg = i == -2 ? input : i == -1 ? output : main_argv[i];
+        if(i == 0){
+            continue;
+        }
+        if(!os_quote_arg(arg, quoted, sizeof(quoted))){
+            main_error("the argument %s is too long", arg);
+            free(cmd);
+            return 1;
+        }
+        strcat(cmd, " ");
+        strcat(cmd, quoted);
+    }
+    fflush(stdout);
+    fflush(stderr);
+    int rc = os_run_command(cmd);
+    free(cmd);
+    return rc == 0 ? 0 : 1;
 }
 
 // Compile one source in a child process. The compiler keeps global state
@@ -268,22 +280,15 @@ static int main_run(const char* cmd){
 // process: one bad file cannot take the driver down, and one file's
 // state cannot leak into the next.
 static int main_compile_child(const char* input, const char* output, int flags){
-    fflush(stdout);
-    fflush(stderr);
-    pid_t pid = fork();
-    if(pid < 0){
-        main_error("cannot fork: %s", strerror(errno));
-        return 1;
+    struct main_compile_job job;
+    job.input = input;
+    job.output = output;
+    job.flags = flags;
+    int rc = os_run_forked(main_compile_job_run, &job);
+    if(rc == OS_NO_FORK){
+        return main_compile_spawned(input, output, flags);
     }
-    if(pid == 0){
-        int res = compile_file(input, output, flags);
-        exit(res == COMPILER_FILE_COMPILED_OK ? 0 : 1);
-    }
-    int status = 0;
-    if(waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0){
-        return 1;
-    }
-    return 0;
+    return rc;
 }
 
 // A temporary next to `dest`, so the finished file can be renamed into
@@ -294,22 +299,16 @@ static int main_reserve_beside(const char* dest, char* out, size_t out_size){
         main_error("the output path %s is too long", dest);
         return -1;
     }
-    int fd = mkstemp(out);
-    if(fd < 0){
+    if(os_make_temp_file(out) < 0){
         main_error("cannot create a temporary file next to %s: %s", dest, strerror(errno));
         return -1;
     }
-    // mkstemp creates the file as 0600; give it the usual 0666 & ~umask.
-    mode_t mask = umask(0);
-    umask(mask);
-    fchmod(fd, 0666 & ~mask);
-    close(fd);
     main_track_tmp(out);
     return 0;
 }
 
 static int main_install(const char* tmp, const char* dest){
-    if(rename(tmp, dest) != 0){
+    if(os_replace_file(tmp, dest) != 0){
         main_error("cannot write %s: %s", dest, strerror(errno));
         return -1;
     }
@@ -319,9 +318,8 @@ static int main_install(const char* tmp, const char* dest){
 // A path in the private temporary directory, unique per input.
 static const char* main_tmp_path(int index, const char* suffix){
     if(!main_tmp_dir[0]){
-        const char* base = getenv("TMPDIR");
-        snprintf(main_tmp_dir, sizeof(main_tmp_dir), "%s/samcc.XXXXXX", base && base[0] ? base : "/tmp");
-        if(!mkdtemp(main_tmp_dir)){
+        snprintf(main_tmp_dir, sizeof(main_tmp_dir), "%s/samcc.XXXXXX", os_temp_dir());
+        if(os_make_temp_dir(main_tmp_dir) < 0){
             main_error("cannot create a temporary directory: %s", strerror(errno));
             main_tmp_dir[0] = 0;
             return NULL;
@@ -422,8 +420,8 @@ static int main_assemble(const struct target* target, const char* asm_file, cons
     char quoted_asm[PATH_MAX * 4 + 3];
     char quoted_object[PATH_MAX * 4 + 3];
     char cmd[sizeof(quoted_asm) * 2 + 64];
-    if(!main_shell_quote(asm_file, quoted_asm, sizeof(quoted_asm))
-       || !main_shell_quote(object_file, quoted_object, sizeof(quoted_object))){
+    if(!os_quote_arg(asm_file, quoted_asm, sizeof(quoted_asm))
+       || !os_quote_arg(object_file, quoted_object, sizeof(quoted_object))){
         main_error("the path %s is too long", object_file);
         return 1;
     }
@@ -436,14 +434,14 @@ static int main_assemble(const struct target* target, const char* asm_file, cons
 static int main_link(const struct target* target, int kind, const char* objects, const char* output){
     char quoted_output[PATH_MAX * 4 + 3];
     char quoted_sysroot[PATH_MAX * 4 + 3];
-    if(!main_shell_quote(output, quoted_output, sizeof(quoted_output))){
+    if(!os_quote_arg(output, quoted_output, sizeof(quoted_output))){
         main_error("the output path %s is too long", output);
         return 1;
     }
     size_t size = strlen(objects) + sizeof(quoted_output) + sizeof(quoted_sysroot) + 512;
     char* cmd = malloc(size);
     if(target->samos){
-        if(!main_shell_quote(main_sysroot, quoted_sysroot, sizeof(quoted_sysroot))){
+        if(!os_quote_arg(main_sysroot, quoted_sysroot, sizeof(quoted_sysroot))){
             main_error("the sysroot path %s is too long", main_sysroot);
             return 1;
         }
@@ -459,8 +457,7 @@ static int main_link(const struct target* target, int kind, const char* objects,
 // NAME.c -> NAME<suffix> in the current directory, as gcc names the
 // outputs of -c and -S.
 static const char* main_default_output(const char* input, const char* suffix){
-    const char* base = strrchr(input, '/');
-    base = base ? base + 1 : input;
+    const char* base = os_base_name(input);
     size_t stem = strlen(base);
     const char* dot = strrchr(base, '.');
     if(dot && dot != base){
@@ -484,7 +481,7 @@ static bool main_output_is_an_input(const char* output, const char** inputs, int
 
 // Append the file at `path` to `out`.
 static int main_copy_into(const char* path, FILE* out){
-    FILE* in = fopen(path, "r");
+    FILE* in = fopen(path, "rb");
     if(!in){
         main_error("cannot read %s: %s", path, strerror(errno));
         return 1;
@@ -510,7 +507,7 @@ static int main_preprocess(const char** inputs, int count, const char* output){
         if(main_output_is_an_input(output, inputs, count) || main_reserve_beside(output, beside, sizeof(beside)) < 0){
             return 1;
         }
-        out = fopen(beside, "w");
+        out = fopen(beside, "wb");
         if(!out){
             main_error("cannot write %s: %s", beside, strerror(errno));
             return 1;
@@ -545,7 +542,9 @@ static int main_preprocess(const char** inputs, int count, const char* output){
     return rc;
 }
 
-// -c and -S: one output per source.
+// -c and -S: one output per source (and with -c per .s file). A source
+// that fails does not stop the others, as with gcc: every file's
+// errors are reported, and the status is 1.
 static int main_compile_each(const struct target* target, int mode, const char** inputs, int count, const char* output){
     int sources = 0;
     for(int i = 0; i < count; i++){
@@ -624,7 +623,7 @@ static int main_build_executable(const struct target* target, const char** input
             }
         }
         char quoted[PATH_MAX * 4 + 3];
-        if(!main_shell_quote(object, quoted, sizeof(quoted))){
+        if(!os_quote_arg(object, quoted, sizeof(quoted))){
             main_error("the path %s is too long", object);
             return 1;
         }
@@ -666,21 +665,15 @@ static int main_legacy(const struct target* target, const char* input_file, cons
         main_tmp_output[0] = 0;
         return 1;
     }
-    int tmp_fd = mkstemp(main_tmp_output);
-    if(tmp_fd < 0){
+    if(os_make_temp_file(main_tmp_output) < 0){
         fprintf(stderr, "Cannot create a temporary file next to %s\n", output_file);
         main_tmp_output[0] = 0;
         return 1;
     }
-    // mkstemp creates the file as 0600; give the asm the usual 0666 & ~umask.
-    mode_t mask = umask(0);
-    umask(mask);
-    fchmod(tmp_fd, 0666 & ~mask);
-    close(tmp_fd);
 
     int res = compile_file(input_file, main_tmp_output, compile_flags);
     if(res == COMPILER_FILE_COMPILED_OK){
-        if(rename(main_tmp_output, output_file) != 0){
+        if(os_replace_file(main_tmp_output, output_file) != 0){
             fprintf(stderr, "Cannot write %s\n", output_file);
             return 1;
         }
@@ -701,8 +694,8 @@ static int main_legacy(const struct target* target, const char* input_file, cons
     char link_cmd[sizeof(quoted_output) * 6 + 256];
     char nasm_cmd[sizeof(asm_cmd) + sizeof(link_cmd) + 8];
     snprintf(nasm_output_file, sizeof(nasm_output_file), "%s.o", output_file);
-    if(!main_shell_quote(output_file, quoted_output, sizeof(quoted_output)) ||
-       !main_shell_quote(nasm_output_file, quoted_object, sizeof(quoted_object))){
+    if(!os_quote_arg(output_file, quoted_output, sizeof(quoted_output)) ||
+       !os_quote_arg(nasm_output_file, quoted_object, sizeof(quoted_object))){
         fprintf(stderr, "The output path %s is too long\n", output_file);
         return 1;
     }
@@ -712,7 +705,7 @@ static int main_legacy(const struct target* target, const char* input_file, cons
     } else {
         if(target->samos){
             char quoted_sysroot[PATH_MAX * 4 + 3];
-            if(!main_shell_quote(main_sysroot, quoted_sysroot, sizeof(quoted_sysroot))){
+            if(!os_quote_arg(main_sysroot, quoted_sysroot, sizeof(quoted_sysroot))){
                 fprintf(stderr, "The sysroot path %s is too long\n", main_sysroot);
                 return 1;
             }
@@ -725,21 +718,16 @@ static int main_legacy(const struct target* target, const char* input_file, cons
     printf("%s\n", nasm_cmd);
     fflush(stdout);
     // Assembled, the object's extern thread-locals marked, then linked.
-    int rc = system(asm_cmd);
+    int rc = os_run_command(asm_cmd);
     if(rc == 0 && main_mark_tls_externs(output_file, nasm_output_file)){
         rc = 1;
     }
     if(rc == 0 && !object){
-        rc = system(link_cmd);
+        rc = os_run_command(link_cmd);
     }
     if(rc != 0){
         printf("Issue assemblign the assembly file with NASM and linking with gcc\n");
-        // system() returns a wait status; 256 truncated to an exit
-        // code would be 0, so report the tool's own status (or 1).
-        if(rc > 0 && WIFEXITED(rc) && WEXITSTATUS(rc) != 0){
-            return WEXITSTATUS(rc);
-        }
-        return 1;
+        return rc;
     }
     // Cross targets do not run on the host directly; say how.
     if(!object && target->run_cmd[0]){
@@ -789,9 +777,24 @@ static const char* main_option_value(int argc, char** argv, int* i, const char* 
 
 int main(int argc, char** argv){
     main_pid = getpid();
-    const char* slash = strrchr(argv[0], '/');
-    main_prog = slash ? slash + 1 : argv[0];
+    main_prog = os_base_name(argv[0]);
     atexit(main_remove_tmp_files);
+
+    // main_compile_spawned's child: compile one input with the options
+    // that follow, then stop.
+    const char* child_input = NULL;
+    const char* child_output = NULL;
+    int child_flags = 0;
+    if(argc >= 5 && S_EQ(argv[1], "--samcc-compile-child")){
+        child_flags = (int)strtol(argv[2], NULL, 10);
+        child_input = argv[3];
+        child_output = argv[4];
+        argv[4] = argv[0];
+        argv += 4;
+        argc -= 4;
+    }
+    main_argc = argc;
+    main_argv = argv;
 
     if(argc < 2){
         main_usage(stderr);
@@ -917,6 +920,9 @@ int main(int argc, char** argv){
             main_error("%s: %s", file, strerror(errno));
             return 1;
         }
+    }
+    if(child_input){
+        return compile_file(child_input, child_output, child_flags) == COMPILER_FILE_COMPILED_OK ? 0 : 1;
     }
 
     switch(mode){

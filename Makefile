@@ -3,7 +3,8 @@ OBJECTS  = ./build/compiler.o ./build/cprocess.o ./build/validator.o \
            ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/resolver.o ./build/rdefault.o ./build/codegen.o ./build/codegen_x86.o ./build/codegen_x86_64.o ./build/codegen_aarch64.o ./build/codegen_riscv64.o ./build/target.o ./build/stackframe.o ./build/fixup.o ./build/array.o ./build/initializer.o ./build/exp64.o ./build/helper.o ./build/constant.o ./build/atomic.o \
            ./build/preprocessor.o ./build/native.o \
            ./build/static-include.o ./build/static-includes/stdarg.o ./build/static-includes/stddef.o \
-           ./build/helpers/buffer.o ./build/helpers/vector.o ./build/helpers/arena.o
+           ./build/helpers/buffer.o ./build/helpers/vector.o ./build/helpers/arena.o \
+           ./build/os.o
 INCLUDES = -I./
 # -Wall -Wextra with nothing hidden except unused parameters: callbacks
 # such as the expressionable and static-include tables must take the
@@ -104,6 +105,9 @@ all: ./main
 
 ./build/helper.o: ./helper.c ./compiler.h ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./helper.c -o ./build/helper.o
+
+./build/os.o: ./os.c ./os.h
+	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./os.c -o ./build/os.o
 
 ./build/preprocessor.o: ./preprocessor/preprocessor.c ./compiler.h ./helpers/vector.h ./helpers/buffer.h
 	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./preprocessor/preprocessor.c -o ./build/preprocessor.o

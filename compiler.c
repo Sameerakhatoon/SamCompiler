@@ -8,6 +8,7 @@
 #include "compiler.h"
 #include "helpers/vector.h"
 #include "helpers/buffer.h"
+#include "os.h"
 
 static struct compile_process* compile_include_path(const char* path, struct compile_process* parent_process);
 
@@ -67,7 +68,7 @@ static int compiler_prepend_cli_macros(struct compile_process* process){
     }
     buffer_write(text, 0);
     const char* source_text = buffer_ptr(text);
-    FILE* file = fmemopen((void*)source_text, strlen(source_text), "r");
+    FILE* file = os_memory_file(source_text);
     if(!file){
         return -1;
     }

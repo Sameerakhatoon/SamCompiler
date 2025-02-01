@@ -67,7 +67,8 @@ struct compile_process* compile_process_create(const char* filename, const char*
     }
 
     if(filename_out){
-        out_file = fopen(filename_out, "w");
+        // Binary, so the asm has LF line ends on Windows too.
+        out_file = fopen(filename_out, "wb");
         if(!out_file){
             goto out_err;
         }
