@@ -86,6 +86,15 @@ struct compile_process* compile_process_create(const char* filename, const char*
         compiler_setup_default_include_directories(process->include_dirs);
     }
 
+    // ch235: resolve the source path to absolute form so include
+    // tracking can compare against canonical paths, and hand the
+    // node vectors to the global node module so node_create works
+    // for this process.
+    char* path = malloc(PATH_MAX);
+    realpath(filename, path);
+    process->cfile.abs_path = path;
+    node_set_vector(process->node_vec, process->node_tree_vec);
+
     return process;
 
 out_err:
