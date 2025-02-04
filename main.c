@@ -112,6 +112,14 @@ static bool main_is_source(const char* path){
     return S_EQ(path, "-") || main_ends_with(path, ".c");
 }
 
+// An assembly file in the target's own syntax (NASM for x86 and x86_64,
+// GNU as for aarch64 and riscv64), assembled and linked like a compiled
+// source. Not in the original form: there `main in.c out.s` still
+// writes the asm to out.s.
+static bool main_is_assembly(const char* path){
+    return main_ends_with(path, ".s");
+}
+
 static bool main_is_shared_library(const char* path){
     return main_ends_with(path, ".so");
 }
@@ -186,8 +194,9 @@ static void main_usage(FILE* out){
         "       %s [-target=T] [options] input.c output [object]\n"
         "\n"
         "Inputs ending in .c are compiled (- reads the source from standard\n"
-        "input); .o, .a and .so files go to the linker. Without -c, -S or -E the\n"
-        "inputs are compiled, assembled and linked into one executable.\n"
+        "input), .s files (the target's assembly) assembled; .o, .a and .so files\n"
+        "go to the linker. Without -c, -S or -E the inputs are compiled,\n"
+        "assembled and linked into one executable.\n"
         "\n"
         "  -o FILE          write the output to FILE (default a.out; with -c or -S,\n"
         "                   NAME.o or NAME.s in the current directory for each NAME.c)\n"
@@ -516,7 +525,8 @@ static int main_preprocess(const char** inputs, int count, const char* output){
     int rc = 0;
     for(int i = 0; i < count && rc == 0; i++){
         if(!main_is_source(inputs[i])){
-            fprintf(stderr, "%s: warning: %s: linker input file unused because linking not done\n", main_prog, inputs[i]);
+            fprintf(stderr, "%s: warning: %s: %s input file unused because %s not done\n", main_prog, inputs[i],
+                main_is_assembly(inputs[i]) ? "assembler" : "linker", main_is_assembly(inputs[i]) ? "assembly" : "linking");
             continue;
         }
         const char* tmp = main_tmp_path(i, ".i");
@@ -548,15 +558,21 @@ static int main_preprocess(const char** inputs, int count, const char* output){
 static int main_compile_each(const struct target* target, int mode, const char** inputs, int count, const char* output){
     int sources = 0;
     for(int i = 0; i < count; i++){
-        sources += main_is_source(inputs[i]);
+        sources += main_is_source(inputs[i]) || (mode == MAIN_MODE_OBJECT && main_is_assembly(inputs[i]));
     }
     if(output && sources > 1){
         main_error("cannot specify -o with -c or -S and several source files");
         return 1;
     }
+    int failed = 0;
     for(int i = 0; i < count; i++){
         const char* input = inputs[i];
-        if(!main_is_source(input)){
+        bool assembly = main_is_assembly(input);
+        if(assembly && mode == MAIN_MODE_ASSEMBLY){
+            fprintf(stderr, "%s: warning: %s: assembler input file unused because assembly not done\n", main_prog, input);
+            continue;
+        }
+        if(!main_is_source(input) && !assembly){
             fprintf(stderr, "%s: warning: %s: linker input file unused because linking not done\n", main_prog, input);
             continue;
         }
@@ -572,12 +588,17 @@ static int main_compile_each(const struct target* target, int mode, const char**
         }
         if(mode == MAIN_MODE_ASSEMBLY){
             if(main_compile_child(input, beside, main_compile_flags) != 0){
-                return 1;
+                failed = 1;
+                continue;
             }
         } else {
-            const char* asm_file = main_tmp_path(i, ".s");
-            if(!asm_file || main_compile_child(input, asm_file, main_compile_flags) != 0){
+            const char* asm_file = assembly ? input : main_tmp_path(i, ".s");
+            if(!asm_file){
                 return 1;
+            }
+            if(!assembly && main_compile_child(input, asm_file, main_compile_flags) != 0){
+                failed = 1;
+                continue;
             }
             int rc = main_assemble(target, asm_file, beside);
             if(rc != 0){
@@ -588,11 +609,13 @@ static int main_compile_each(const struct target* target, int mode, const char**
             return 1;
         }
     }
-    return 0;
+    return failed;
 }
 
-// The default: compile and assemble each source, then link everything,
-// objects and archives in command-line order, into one executable.
+// The default: compile and assemble each source, assemble each .s file,
+// then link everything, objects and archives in command-line order, into
+// one executable. Every source is compiled even after one fails, so all
+// their errors are reported; nothing is linked then.
 static int main_build_executable(const struct target* target, const char** inputs, int count, const char* output){
     if(!output){
         output = "a.out";
@@ -603,15 +626,23 @@ static int main_build_executable(const struct target* target, const char** input
     int kind = main_shared ? MAIN_LINK_SHARED : MAIN_LINK_EXECUTABLE;
     size_t objects_size = 1;
     char* objects = calloc(1, objects_size);
+    int failed = 0;
     for(int i = 0; i < count; i++){
         const char* object = inputs[i];
         if(kind == MAIN_LINK_EXECUTABLE && main_is_shared_library(object)){
             kind = MAIN_LINK_DYNAMIC;
         }
-        if(main_is_source(inputs[i])){
-            const char* asm_file = main_tmp_path(i, ".s");
-            if(!asm_file || main_compile_child(inputs[i], asm_file, main_compile_flags) != 0){
+        if(main_is_source(inputs[i]) || main_is_assembly(inputs[i])){
+            const char* asm_file = main_is_assembly(inputs[i]) ? inputs[i] : main_tmp_path(i, ".s");
+            if(!asm_file){
                 return 1;
+            }
+            if(!main_is_assembly(inputs[i]) && main_compile_child(inputs[i], asm_file, main_compile_flags) != 0){
+                failed = 1;
+                continue;
+            }
+            if(failed){
+                continue;
             }
             object = main_tmp_path(i, ".o");
             if(!object){
@@ -633,6 +664,10 @@ static int main_build_executable(const struct target* target, const char** input
             strcat(objects, " ");
         }
         strcat(objects, quoted);
+    }
+    if(failed){
+        free(objects);
+        return 1;
     }
     char beside[PATH_MAX];
     if(main_reserve_beside(output, beside, sizeof(beside)) < 0){
@@ -883,6 +918,9 @@ int main(int argc, char** argv){
     if(target->samos && main_setup_samos(target) < 0){
         return 1;
     }
+    if(child_input){
+        return compile_file(child_input, child_output, child_flags) == COMPILER_FILE_COMPILED_OK ? 0 : 1;
+    }
 
     if(file_count == 0){
         main_error("no input files");
@@ -907,8 +945,8 @@ int main(int argc, char** argv){
     int stdin_count = 0;
     for(int i = 0; i < file_count; i++){
         const char* file = files[i];
-        if(!main_is_source(file) && !main_is_linker_input(file)){
-            main_error("%s: unknown file type (expected .c, .o, .a or -)", file);
+        if(!main_is_source(file) && !main_is_assembly(file) && !main_is_linker_input(file)){
+            main_error("%s: unknown file type (expected .c, .s, .o, .a, .so or -)", file);
             return 1;
         }
         if(S_EQ(file, "-")){

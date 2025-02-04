@@ -5,8 +5,8 @@
 # options reach the child (-D with a space and a quote in the value, -I
 # with a space and a quote in the directory, -target=), standard input
 # is inherited, an error in one input is still that input's alone, and
-# the asm is the same as with fork. Then the driver tests 310 and 313
-# run on that path.
+# the asm is the same as with fork. Then the driver tests 310, 313 and
+# 540 run on that path.
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
@@ -60,7 +60,7 @@ assert_contains "$err" "missing_name" "the bad input's error"
 [ -z "$(ls "$TMPDIR")" ] || fail "temporaries left in TMPDIR: $(ls "$TMPDIR")"
 
 cd "$REPO_ROOT"
-for t in 310 313; do
+for t in 310 313 540; do
     SAMCC_NO_FORK=1 bash tests/$t-*.sh >"$tmp/log_$t" 2>&1 \
         || fail "test $t without fork: $(tail -2 "$tmp/log_$t")"
 done
