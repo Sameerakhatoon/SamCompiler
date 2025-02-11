@@ -5,7 +5,7 @@
 #     (lock xadd, xchg, lock cmpxchg, mfence; ldar, stlr, ldaxr/stlxr,
 #     dmb ish; amo*.aqrl, lr/sc, the psABI fences), not a load and a
 #     store;
-#   - _Atomic float and double on the 64-bit targets (gcc needs
+#   - _Atomic float and double (gcc needs
 #     libatomic for them, so the result is checked by value);
 #   - what is rejected instead of miscompiled.
 . "$(dirname "$0")/lib.sh"
@@ -67,9 +67,9 @@ int main(void){
     return (int)x * 10 + (int)(f * 4);
 }
 EOF
-for target in x86_64 aarch64 riscv64; do
+for target in x86 x86_64 aarch64 riscv64; do
     case $target in
-        x86_64)  run="" ;;
+        x86|x86_64)  run="" ;;
         aarch64) run="qemu-aarch64" ;;
         riscv64) run="qemu-riscv64" ;;
     esac
@@ -99,8 +99,8 @@ for target in x86_64 aarch64 riscv64; do
 done
 reject x86 "an 8-byte atomic on i386" 'double d; int main(void){ double x = __atomic_load_n(&d, 5); return 0; }' \
     "no 8-byte integers on i386"
-reject x86 "an _Atomic double += on i386" '_Atomic double d; int main(void){ d += 1; return 0; }' \
-    "_Atomic object with a floating type"
+reject x86 "an _Atomic int += a double on i386" '_Atomic int i; int main(void){ i += 0.5; return 0; }' \
+    "only supported for a float or double object"
 for target in x86 x86_64 aarch64 riscv64; do
     reject $target "the wrong argument count" 'int a; int main(void){ return __atomic_load_n(&a); }' \
         "__atomic_load_n expects 2 arguments"

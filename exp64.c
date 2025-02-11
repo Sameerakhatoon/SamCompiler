@@ -2620,7 +2620,10 @@ static struct datatype exp64_rvalue(struct node* node, bool decay){
     } else {
         t = exp64_rvalue_of(node, decay);
     }
-    if(vector_count(ledger) > mark && !exp64_in_memory(&t)){
+    // An array member of such a struct (`(c ? s : t).arr`) is
+    // an address into the room, which has to stay until the element is
+    // read.
+    if(vector_count(ledger) > mark && !exp64_in_memory(&t) && !exp64_is_array(&t)){
         ops->drop(vector_count(ledger) - mark);
     }
     return t;

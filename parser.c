@@ -268,6 +268,7 @@ static void                        parser_note_thread_local(const char* name, st
 static struct parser_thread_local* parser_thread_local_find(const char* name);
 static struct node*                parser_thread_local_object(struct parser_thread_local* tls);
 static struct node*                parser_thread_local_address(struct node* node);
+static struct parser_thread_local* parser_thread_local_array(struct node* node);
 
 // Defined here so current_process is in scope.
 static struct parser_scope_entity* parser_scope_last_entity_stop_global_scope(void){
@@ -3545,6 +3546,25 @@ static struct node* parser_thread_local_address(struct node* node){
     return object->unary.operand;
 }
 
+// The thread-local array whose parser_thread_local_object `node` is (the
+// parentheses taken off), or NULL.
+static struct parser_thread_local* parser_thread_local_array(struct node* node){
+    if(node->type != NODE_TYPE_CAST || node->cast.operand->type != NODE_TYPE_EXPRESSION
+       || !S_EQ(node->cast.operand->exp.op, "()") || node->cast.operand->exp.left->type != NODE_TYPE_IDENTIFIER
+       || !S_EQ(node->cast.operand->exp.left->sval, "__builtin_tls_address")){
+        return 0;
+    }
+    struct node* name = node->cast.operand->exp.right;
+    while(name->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        name = name->parenthesis.exp;
+    }
+    if(name->type != NODE_TYPE_STRING){
+        return 0;
+    }
+    struct parser_thread_local* tls = parser_thread_local_find(name->sval);
+    return tls && (tls->type.flags & DATATYPE_FLAG_IS_ARRAY) ? tls : 0;
+}
+
 static void parser_vla_natives(void){
     static const char* names[] = { "__builtin_vla_save", "__builtin_vla_alloc", "__builtin_vla_restore" };
     static NATIVE_FUNCTION_CALL calls[] = { codegen_x86_native_vla_save, codegen_x86_native_vla_alloc, codegen_x86_native_vla_restore };
@@ -5880,6 +5900,14 @@ static void parse_sizeof(struct history* history){
         struct node* inner = operand;
         while(inner->type == NODE_TYPE_EXPRESSION_PARENTHESES){
             inner = inner->parenthesis.exp;
+        }
+        // an i386 thread-local array is its decayed address
+        // here (parser_thread_local_object); its size is the array's.
+        struct parser_thread_local* tls_array = parser_thread_local_array(inner);
+        if(tls_array){
+            node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&tls_array->type),
+                .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG, .num.sizeof_operand = operand });
+            return;
         }
         // The size of a variable-length array is known when it runs.
         const char* vla_size = inner->type == NODE_TYPE_IDENTIFIER ? parser_vla_size_of(inner->sval) : 0;

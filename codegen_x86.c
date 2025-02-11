@@ -557,6 +557,7 @@ static void x87_effect(struct node* node);
 static void x87_return(struct node* node, struct datatype* rtype);
 static void x87_initialize(struct node* value, struct datatype* type, const char* address);
 static bool x87_is_floating(struct datatype* t);
+static struct datatype x87_type(struct node* node);
 
 // ch138: dispatch by node type. Sets EXPRESSION_IS_NOT_ROOT_NODE for
 // nested calls so the recursive walk knows it's deeper than the top.
@@ -1527,6 +1528,139 @@ static void codegen_generate_tenary(struct node* node, struct history* history){
     asm_push(".tenary_end_%i:", tenary_end_label_id);
 }
 
+// `c ? x : y` whose operands are struct values, the parentheses
+// around it taken off. The resolver has no entity for a conditional.
+static bool codegen_struct_conditional(struct node* node, struct datatype* t_out){
+    while(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        node = node->parenthesis.exp;
+    }
+    if(node->type != NODE_TYPE_EXPRESSION || !S_EQ(node->exp.op, "?")
+       || node->exp.right->type != NODE_TYPE_TENARY){
+        return false;
+    }
+    struct datatype t = x87_type(node);
+    t.flags &= ~DATATYPE_FLAG_IS_ARRAY;
+    if(!datatype_is_struct_or_union_non_pointer(&t)){
+        return false;
+    }
+    *t_out = t;
+    return true;
+}
+
+// One operand of a struct-valued conditional, copied into the room
+// reserved under it. The operand leaves its dwords on the stack (a
+// variable, a call's result, a nested conditional) or, for a struct
+// reached through a pointer, its address.
+static void codegen_struct_conditional_operand(struct node* operand, struct history* history, int pieces){
+    struct vector* elements = current_function->func.frame.elements;
+    int before = vector_count(elements);
+    codegen_generate_expressionable(operand, codegen_history_down(history, 0));
+    int above = vector_count(elements) - before;
+    struct stack_frame_element* top = stackframe_back(current_function);
+    if(above == 1 && pieces != 1 && (top->flags & STACK_FRAME_ELEMENT_FLAG_IS_PUSHED_ADDRESS)){
+        asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        for(int i = 0; i < pieces; i++){
+            asm_push("mov eax, [ebx+%i]", i * DATA_SIZE_DWORD);
+            asm_push("mov [esp+%i], eax", i * DATA_SIZE_DWORD);
+        }
+        return;
+    }
+    if(above != pieces){
+        compiler_error(current_process, "COMPILER BUG: x86 struct conditional operand left %i dwords, not %i\n", above, pieces);
+    }
+    for(int i = 0; i < pieces; i++){
+        asm_push("mov eax, [esp+%i]", i * DATA_SIZE_DWORD);
+        asm_push("mov [esp+%i], eax", (above + i) * DATA_SIZE_DWORD);
+    }
+    codegen_stack_add(above * DATA_SIZE_DWORD);
+}
+
+// a struct-valued conditional. Each operand used to leave its
+// own dwords (a call's result its own room), and the ledger, which
+// cannot tell that only one branch ran, counted both after the join:
+// wrong values and a stack off by a struct. The room is made before the
+// condition and each branch copies its value into it, as exp64_ternary
+// does; afterwards the room is the value, laid out as pushed dwords.
+static void codegen_generate_struct_conditional(struct node* node, struct datatype* t, struct history* history){
+    while(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        node = node->parenthesis.exp;
+    }
+    int pieces = align_value(datatype_size(t), DATA_SIZE_DWORD) / DATA_SIZE_DWORD;
+    int false_label_id = codegen_label_count();
+    int end_label_id   = codegen_label_count();
+    asm_push("; STRUCT CONDITIONAL");
+    codegen_stack_sub_with_name(pieces * DATA_SIZE_DWORD, "result_value");
+    codegen_generate_expressionable(node->exp.left, codegen_history_down(history, 0));
+    asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("cmp eax, 0");
+    asm_push("je .tenary_false_%i", false_label_id);
+    codegen_struct_conditional_operand(node->exp.right->tenary.true_node, history, pieces);
+    asm_push("jmp .tenary_end_%i", end_label_id);
+    asm_push(".tenary_false_%i:", false_label_id);
+    codegen_struct_conditional_operand(node->exp.right->tenary.false_node, history, pieces);
+    asm_push(".tenary_end_%i:", end_label_id);
+    struct vector* elements = current_function->func.frame.elements;
+    for(int i = 0; i < pieces; i++){
+        struct stack_frame_element* el = vector_at(elements, vector_count(elements) - 1 - i);
+        el->type       = STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE;
+        el->flags     |= STACK_FRAME_ELEMENT_FLAG_HAS_DATATYPE;
+        el->data.dtype = *t;
+    }
+    codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_PUSHED_STRUCTURE});
+}
+
+// The conditional at the start of a member or element access
+// (`(c ? s : t).m`, `(c ? p : q)[i]`), or NULL.
+static struct node* codegen_access_conditional(struct node* node){
+    bool access = false;
+    while(true){
+        if(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            node = node->parenthesis.exp;
+        } else if(node->type == NODE_TYPE_EXPRESSION && (is_access_node(node) || is_array_node(node))){
+            node = node->exp.left;
+            access = true;
+        } else {
+            break;
+        }
+    }
+    if(!access || node->type != NODE_TYPE_EXPRESSION || !S_EQ(node->exp.op, "?")
+       || node->exp.right->type != NODE_TYPE_TENARY){
+        return 0;
+    }
+    return node;
+}
+
+// A copy of the access `path` with `operand` in place of the
+// conditional at its start.
+static struct node* codegen_access_with_operand(struct node* path, struct node* conditional, struct node* operand){
+    if(path == conditional){
+        return operand;
+    }
+    struct node* copy = malloc(sizeof(struct node));
+    memcpy(copy, path, sizeof(struct node));
+    if(path->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        copy->parenthesis.exp = codegen_access_with_operand(path->parenthesis.exp, conditional, operand);
+    } else {
+        copy->exp.left = codegen_access_with_operand(path->exp.left, conditional, operand);
+    }
+    return copy;
+}
+
+// `(c ? s : t).m` is `c ? s.m : t.m`: only one operand is
+// evaluated either way, and the member of each is something the
+// resolver can follow. The resolver had no root for the conditional,
+// which crashed and then was an error.
+static struct node* codegen_access_of_conditional(struct node* node, struct node* conditional){
+    struct node* tenary = malloc(sizeof(struct node));
+    memcpy(tenary, conditional->exp.right, sizeof(struct node));
+    tenary->tenary.true_node  = codegen_access_with_operand(node, conditional, conditional->exp.right->tenary.true_node);
+    tenary->tenary.false_node = codegen_access_with_operand(node, conditional, conditional->exp.right->tenary.false_node);
+    struct node* rewritten = malloc(sizeof(struct node));
+    memcpy(rewritten, conditional, sizeof(struct node));
+    rewritten->exp.right = tenary;
+    return rewritten;
+}
+
 // ch151/154: NODE_TYPE_UNARY codegen dispatch.
 static void codegen_generate_unary(struct node* node, struct history* history){
     if(is_increment_operator(node->unary.op)){
@@ -1687,11 +1821,27 @@ static void codegen_generate_entity_access(struct resolver_result* result, struc
     });
 }
 
+// The bytes a call's arguments take. The resolver counts an argument it
+// cannot follow as one dword, and it follows no conditional: a struct
+// one takes its struct's dwords.
+static size_t codegen_call_arguments_size(struct resolver_entity* entity){
+    size_t size = entity->func_call_data.stack_size;
+    struct vector* arguments = entity->func_call_data.arguments;
+    for(int i = 0; i < vector_count(arguments); i++){
+        struct datatype t;
+        if(codegen_struct_conditional(*(struct node**)vector_at(arguments, i), &t)){
+            size += align_value(datatype_size(&t), DATA_SIZE_DWORD) - DATA_SIZE_DWORD;
+        }
+    }
+    return size;
+}
+
 // ch148: function call code. Iterate args last-to-first (cdecl push
 // order), then `call ecx` (callee address sits in ecx), pop args
 // off the stack, push the eax return value as our result.
 static void codegen_generate_entity_access_for_function_call(struct resolver_result* result, struct resolver_entity* entity){
     (void)result;
+    size_t arguments_size = codegen_call_arguments_size(entity);
     vector_set_flag(entity->func_call_data.arguments, VECTOR_FLAG_PEEK_DECREMENT);
     vector_set_peek_pointer_end(entity->func_call_data.arguments);
     struct node* node = vector_peek_ptr(entity->func_call_data.arguments);
@@ -1720,7 +1870,7 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
     // so the bytes below ebp at the call must be 8 mod 16. The pad goes
     // under the arguments.
     size_t returns_struct = datatype_is_struct_or_union_non_pointer(&entity->dtype);
-    size_t call_bytes = entity->func_call_data.stack_size + (returns_struct ? DATA_SIZE_DWORD : 0);
+    size_t call_bytes = arguments_size + (returns_struct ? DATA_SIZE_DWORD : 0);
     size_t below_ebp = (vector_count(current_function->func.frame.elements) - 1) * DATA_SIZE_DWORD + call_bytes;
     size_t pad = (C_STACK_ALIGNMENT + 8 - below_ebp % C_STACK_ALIGNMENT) % C_STACK_ALIGNMENT;
     codegen_stack_sub_with_name(pad, "call_alignment_pad");
@@ -1730,7 +1880,7 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
         node = vector_peek_ptr(entity->func_call_data.arguments);
     }
     if((vector_count(current_function->func.frame.elements) - elements_before_arguments) * DATA_SIZE_DWORD
-       != entity->func_call_data.stack_size){
+       != arguments_size){
         compiler_error(current_process, "COMPILER BUG: x86 call arguments do not match their stack size\n");
     }
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
@@ -1748,7 +1898,7 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
         // The callee removed the hidden pointer with `ret 4`.
         stackframe_pop_expecting(current_function, STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     }
-    codegen_stack_add(entity->func_call_data.stack_size);
+    codegen_stack_add(arguments_size);
     codegen_stack_add_with_name(pad, "call_alignment_pad");
     if(datatype_is_struct_or_union_non_pointer(&entity->dtype)){
         // The callee wrote the struct into the room reserved before the
@@ -2126,6 +2276,16 @@ static void codegen_generate_exp_node(struct node* node, struct history* history
         codegen_generate_assignment_expression(node, history);
         return;
     }
+    struct datatype conditional_type;
+    if(codegen_struct_conditional(node, &conditional_type)){
+        codegen_generate_struct_conditional(node, &conditional_type, history);
+        return;
+    }
+    struct node* conditional = codegen_access_conditional(node);
+    if(conditional){
+        codegen_generate_expressionable(codegen_access_of_conditional(node, conditional), history);
+        return;
+    }
     // Try resolving the node to a single entity (e.g. a bare
     // identifier) - if we do, the value's pushed and we're done.
     if(codegen_resolve_node_for_value(node, history)){
@@ -2471,13 +2631,14 @@ static bool x87_wanted(struct node* node){
 
 // ---- Instructions.
 
-// Two dwords and a qword in .data: the control words of a truncation
-// and a scratch value (a conversion, or rounding to a type).
+// The constant 1.0f in .data, for ++ and --. The scratch of a
+// conversion or a rounding (a value, the control words of a truncation)
+// is stack room below esp, outside the ledger and released straight
+// away: it was a qword and two words in .data, shared by
+// every thread, so threads converting at once got each other's values.
 static void x87_scratch(void){
     static bool emitted;
     if(!emitted){
-        codegen_data_section_add("x87_cw: dw 0, 0");
-        codegen_data_section_add("x87_tmp: dq 0");
         codegen_data_section_add("x87_one: dd 0x3f800000");
         emitted = true;
     }
@@ -2513,8 +2674,10 @@ static void x87_round(int size){
         return;
     }
     x87_scratch();
-    asm_push("fstp %s [x87_tmp]", x87_size_keyword(size));
-    asm_push("fld %s [x87_tmp]", x87_size_keyword(size));
+    asm_push("sub esp, 8");
+    asm_push("fstp %s [esp]", x87_size_keyword(size));
+    asm_push("fld %s [esp]", x87_size_keyword(size));
+    asm_push("add esp, 8");
 }
 
 // eax = st0 != 0, st0 popped. A NaN is true, -0.0 false.
@@ -2554,13 +2717,15 @@ static void x87_convert(struct datatype* from, struct datatype* to){
                 compiler_error(current_process, "This value cannot become a floating value\n");
             }
             x87_scratch();
-            asm_push("mov [x87_tmp], eax");
+            asm_push("sub esp, 8");
+            asm_push("mov [esp], eax");
             if(!(from->flags & DATATYPE_FLAG_IS_SIGNED) && datatype_element_size(from) == DATA_SIZE_DWORD){
-                asm_push("mov dword [x87_tmp+4], 0");
-                asm_push("fild qword [x87_tmp]");
+                asm_push("mov dword [esp+4], 0");
+                asm_push("fild qword [esp]");
             } else {
-                asm_push("fild dword [x87_tmp]");
+                asm_push("fild dword [esp]");
             }
+            asm_push("add esp, 8");
             if(to->size == DATA_SIZE_DWORD){
                 x87_round(DATA_SIZE_DWORD);
             }
@@ -2581,14 +2746,16 @@ static void x87_convert(struct datatype* from, struct datatype* to){
         compiler_error(current_process, "A floating value cannot become this type\n");
     }
     x87_scratch();
-    asm_push("fnstcw [x87_cw]");
-    asm_push("mov ax, [x87_cw]");
+    asm_push("sub esp, 12");
+    asm_push("fnstcw [esp+8]");
+    asm_push("mov ax, [esp+8]");
     asm_push("or ax, 0x0c00");
-    asm_push("mov [x87_cw+2], ax");
-    asm_push("fldcw [x87_cw+2]");
-    asm_push("fistp qword [x87_tmp]");
-    asm_push("fldcw [x87_cw]");
-    asm_push("mov eax, [x87_tmp]");
+    asm_push("mov [esp+10], ax");
+    asm_push("fldcw [esp+10]");
+    asm_push("fistp qword [esp]");
+    asm_push("fldcw [esp+8]");
+    asm_push("mov eax, [esp]");
+    asm_push("add esp, 12");
     x87_reduce(to);
 }
 
@@ -2694,14 +2861,6 @@ static void x87_store(struct datatype* t){
         return;
     }
     asm_push("mov %s [ecx], %s", keyword, reg);
-}
-
-// The x87 read-modify-writes are a load and a store: not for an _Atomic
-// object.
-static void x87_no_atomic_update(struct datatype* t){
-    if(datatype_is_atomic(t)){
-        compiler_error(current_process, "x86: ++, -- or a compound assignment on an _Atomic object with a floating type or operand is not supported\n");
-    }
 }
 
 static void x87_constant(struct node* node, struct datatype* t){
@@ -2828,6 +2987,83 @@ static struct datatype x87_compare(struct node* node){
     return datatype_for_int();
 }
 
+// `a op= v`, `++a`, `a++` on an _Atomic float or double a,
+// one atomic read-modify-write as gcc -m32 makes it: a compare-and-swap
+// loop. The old value's bits are read, `old op v` is worked out on the
+// x87 and rounded to a's type, and a lock cmpxchg (cmpxchg8b for a
+// double) stores the new bits only if a still holds the old ones, else
+// the loop retries with what it found there. cmpxchg8b compares edx:eax
+// and stores ecx:ebx, so the address goes in esi, saved around it (esi
+// holds the GOT under -fPIC). The room on the stack: [esp] the new bits,
+// [esp+8] the old ones, then the operand spilled as a qword (none for
+// ++ and --), then the address.
+static struct datatype x87_atomic_update(struct node* object, struct node* operand, const char* ins, bool postfix){
+    struct datatype lt = x87_type(object);
+    struct datatype c = lt;
+    if(operand){
+        c = x87_common(object, operand);
+    }
+    if(!x87_is_floating(&lt) || x87_is_long(&lt) || x87_is_long(&c)){
+        compiler_error(current_process, "x86: ++, -- or a compound assignment with a floating operand on an _Atomic object is only supported for a float or double object\n");
+    }
+    int size = lt.size;
+    const char* keyword = x87_size_keyword(size);
+    int label = codegen_label_count();
+    x87_scratch();
+    x87_address(object);
+    x87_reserve(DATA_SIZE_DWORD);
+    asm_push("mov [esp], eax");
+    int spill = 0;
+    if(operand){
+        x87_operand_as(operand, &c);
+        x87_spill_as(&c);
+        spill = x87_spill_size(&c);
+    }
+    x87_reserve(2 * DATA_SIZE_DDWORD);
+    int address = 2 * DATA_SIZE_DDWORD + spill;
+    asm_push("mov ecx, [esp+%i]", address);
+    asm_push("mov eax, [ecx]");
+    if(size == DATA_SIZE_DDWORD){
+        asm_push("mov edx, [ecx+4]");
+    }
+    asm_push(".x87_atomic_%i:", label);
+    asm_push("mov [esp+8], eax");
+    if(size == DATA_SIZE_DDWORD){
+        asm_push("mov [esp+12], edx");
+    }
+    asm_push("fld %s [esp+8]", keyword);
+    if(operand){
+        x87_convert(&lt, &c);
+        asm_push("%s qword [esp+16]", ins);
+        x87_round(c.size);
+        x87_convert(&c, &lt);
+    } else {
+        asm_push("%s dword [x87_one]", ins);
+        x87_round(size);
+    }
+    asm_push("fstp %s [esp]", keyword);
+    asm_push("mov ecx, [esp+%i]", address);
+    asm_push("mov eax, [esp+8]");
+    if(size == DATA_SIZE_DWORD){
+        asm_push("mov edx, [esp]");
+        asm_push("lock cmpxchg dword [ecx], edx");
+    } else {
+        asm_push("mov edx, [esp+12]");
+        asm_push("push esi");
+        asm_push("mov esi, ecx");
+        asm_push("mov ebx, [esp+4]");
+        asm_push("mov ecx, [esp+8]");
+        asm_push("lock cmpxchg8b [esi]");
+        asm_push("pop esi");
+    }
+    asm_push("jne .x87_atomic_%i", label);
+    // The value of the expression: the new value, or the old one for
+    // a++ and a--.
+    asm_push("fld %s [esp+%i]", keyword, postfix ? 8 : 0);
+    x87_release(2 * DATA_SIZE_DDWORD + spill + DATA_SIZE_DWORD);
+    return lt;
+}
+
 // `a = b` and `a op= b`, a or b floating. The address of a is worked
 // out once.
 static struct datatype x87_assign(struct node* node){
@@ -2854,10 +3090,12 @@ static struct datatype x87_assign(struct node* node){
         x87_reduce(&lt);
         return lt;
     }
-    x87_no_atomic_update(&lt);
     char arith_op[4] = {0};
     strncpy(arith_op, op, strlen(op) - 1);
     const char* ins = x87_arith_ins(arith_op);
+    if(datatype_is_atomic(&lt)){
+        return x87_atomic_update(node->exp.left, node->exp.right, ins, false);
+    }
     struct datatype c = x87_common(node->exp.left, node->exp.right);
     x87_address(node->exp.left);
     x87_reserve(DATA_SIZE_DWORD);
@@ -2890,8 +3128,10 @@ static struct datatype x87_assign(struct node* node){
 // stays on the stack for the postfix forms (x + 1 - 1 need not be x).
 static struct datatype x87_increment(struct node* node){
     struct datatype lt = x87_type(node->unary.operand);
-    x87_no_atomic_update(&lt);
     bool postfix = node->unary.flags & UNARY_FLAG_IS_POSTFIX;
+    if(datatype_is_atomic(&lt)){
+        return x87_atomic_update(node->unary.operand, 0, S_EQ(node->unary.op, "++") ? "fadd" : "fsub", postfix);
+    }
     x87_scratch();
     x87_address(node->unary.operand);
     x87_reserve(DATA_SIZE_DWORD);
@@ -3107,6 +3347,11 @@ static struct datatype x87_expression(struct node* node, struct datatype* t){
         return x87_call_emit(node, false);
     }
     if(is_array_node(node) || is_access_node(node)){
+        // `(c ? s : t).d` as `c ? s.d : t.d`.
+        struct node* conditional = codegen_access_conditional(node);
+        if(conditional){
+            return x87_value(codegen_access_of_conditional(node, conditional));
+        }
         x87_address(node);
         x87_load(t);
         return *t;
@@ -3240,11 +3485,28 @@ static void codegen_generate_structure_push_or_return(struct resolver_entity* en
 static void codegen_generate_move_struct(struct datatype* dtype, const char* base_address, int offset){
     size_t structure_size = align_value(datatype_size(dtype), DATA_SIZE_DWORD);
     int pops = structure_size / DATA_SIZE_DWORD;
+    // the last dword of a struct whose size is not a multiple
+    // of 4 (`struct { char c[5]; }`) is stored as the struct's own bytes;
+    // the whole dword overwrote the variable next to it.
+    int tail = datatype_size(dtype) % DATA_SIZE_DWORD;
     for(int i = 0; i < pops; i++){
         asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
         char fmt[10];
         int chunk_offset = offset + (i * DATA_SIZE_DWORD);
         codegen_plus_or_minus_string_for_value(fmt, chunk_offset, sizeof(fmt));
+        if(i == pops - 1 && tail){
+            if(tail == 1){
+                asm_push("mov [%s%s], al", base_address, fmt);
+            } else {
+                asm_push("mov [%s%s], ax", base_address, fmt);
+            }
+            if(tail == 3){
+                codegen_plus_or_minus_string_for_value(fmt, chunk_offset + 2, sizeof(fmt));
+                asm_push("shr eax, 16");
+                asm_push("mov [%s%s], al", base_address, fmt);
+            }
+            continue;
+        }
         asm_push("mov [%s%s], eax", base_address, fmt);
     }
 }
@@ -3881,6 +4143,13 @@ static const char* asm_keyword_for_size(size_t size, char* tmp_buf){
 
 static void codegen_generate_global_variable_for_primitive(struct node* node){
     char tmp_buf[256];
+    // an _Atomic global is aligned to its size, as in gcc, so
+    // a plain load or store of it (a double's fld and fst too) never
+    // straddles a cache line and stays one access. Other globals keep
+    // the packed layout the locked golden output has.
+    if(datatype_is_atomic(&node->var.type) && variable_size(node) > DATA_SIZE_BYTE){
+        asm_push("align %lu, db 0", (unsigned long)variable_size(node));
+    }
     if(node->var.val){
         if(node->var.val->type == NODE_TYPE_STRING){
             // ch112: register the literal in the string table and
@@ -4367,7 +4636,8 @@ void codegen_x86_native_vla_restore(struct generator* generator, struct native_f
 // into ebx (the object's address), ecx and edx. A load is a mov, a store
 // or exchange an xchg (locked by itself), + and - a lock xadd, anything
 // else a lock cmpxchg loop. i386 has no 8-byte integer here (long long is
-// 4 bytes), so 1, 2 and 4 byte objects.
+// 4 bytes), so 1, 2 and 4 byte objects, and 8-byte ones (a double) for
+// the generic forms (codegen_x86_atomic_generic8).
 static int codegen_x86_atomic_count;
 
 static struct node* codegen_x86_atomic_argument(struct vector* arguments, int i){
@@ -4406,11 +4676,80 @@ static struct datatype codegen_x86_atomic_object(struct datatype* pt, const char
     if(datatype_is_struct_or_union_non_pointer(&t) || (t.type == DATA_TYPE_VOID && !t.pointer_depth)){
         compiler_error(current_process, "%s needs an integer or pointer object\n", name);
     }
-    if(datatype_size(&t) > DATA_SIZE_DWORD){
-        compiler_error(current_process, "x86: %s on an object of %i bytes is not supported (no 8-byte integers on i386)\n",
-            name, (int)datatype_size(&t));
-    }
     return t;
+}
+
+// the generic builtins (values by address) on an 8-byte object,
+// a double: gcc -m32's sequences. A load or store is one qword access
+// through the x87 (fild and fistp move any 64 bits unchanged; the x87
+// stack is empty here), a store followed by mfence; an exchange or a
+// compare-exchange is lock cmpxchg8b, which compares edx:eax and stores
+// ecx:ebx, so the object's address goes in esi, saved around it (esi
+// holds the GOT under -fPIC).
+static void codegen_x86_atomic_generic8(struct generator* generator, int kind, int label){
+    struct datatype void_type;
+    datatype_set_void(&void_type);
+    struct datatype int_type = datatype_for_int();
+    switch(kind){
+        case ATOMIC_BUILTIN_GENERIC_LOAD:
+            asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push("fild qword [ebx]");
+            asm_push("fistp qword [ecx]");
+            generator->ret(&void_type, "0");
+            return;
+        case ATOMIC_BUILTIN_GENERIC_STORE:
+            asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push("fild qword [eax]");
+            asm_push("fistp qword [ebx]");
+            asm_push("mfence");
+            generator->ret(&void_type, "0");
+            return;
+    }
+    // An exchange: ret, val, obj; a compare-exchange: desired, expected,
+    // obj. eax and edx start as the object's value read plainly; the
+    // first cmpxchg8b checks it.
+    bool cas = kind == ATOMIC_BUILTIN_GENERIC_CAS;
+    asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("push esi");
+    asm_push("push edi");
+    asm_push("mov esi, ebx");
+    if(cas){
+        // edi = expected, which a failure overwrites with what was there.
+        asm_push("mov edi, ecx");
+        asm_push("mov ebx, [edx]");
+        asm_push("mov ecx, [edx+4]");
+        asm_push("mov eax, [edi]");
+        asm_push("mov edx, [edi+4]");
+        asm_push("lock cmpxchg8b [esi]");
+        asm_push("je .atomic_%i", label);
+        asm_push("mov [edi], eax");
+        asm_push("mov [edi+4], edx");
+        asm_push(".atomic_%i:", label);
+        asm_push("pop edi");
+        asm_push("pop esi");
+        asm_push("sete al");
+        asm_push("movzx eax, al");
+        generator->ret(&int_type, "eax");
+        return;
+    }
+    // edi = ret, which gets the old value.
+    asm_push("mov edi, edx");
+    asm_push("mov ebx, [ecx]");
+    asm_push("mov ecx, [ecx+4]");
+    asm_push("mov eax, [esi]");
+    asm_push("mov edx, [esi+4]");
+    asm_push(".atomic_%i:", label);
+    asm_push("lock cmpxchg8b [esi]");
+    asm_push("jne .atomic_%i", label);
+    asm_push("mov [edi], eax");
+    asm_push("mov [edi+4], edx");
+    asm_push("pop edi");
+    asm_push("pop esi");
+    generator->ret(&void_type, "0");
 }
 
 static int codegen_x86_atomic_size(struct datatype* t){
@@ -4447,7 +4786,8 @@ void codegen_x86_native_atomic(struct generator* generator, struct native_functi
     }
     if(kind == ATOMIC_BUILTIN_LOCK_FREE){
         codegen_x86_atomic_pop_argument(generator, arguments, 0, "eax");
-        asm_push("cmp eax, %i", DATA_SIZE_DWORD);
+        // up to 8 bytes, through cmpxchg8b, as gcc -m32 says.
+        asm_push("cmp eax, %i", DATA_SIZE_DDWORD);
         asm_push("setbe al");
         asm_push("movzx eax, al");
         generator->ret(&int_type, "eax");
@@ -4465,6 +4805,12 @@ void codegen_x86_native_atomic(struct generator* generator, struct native_functi
         t.flags &= ~DATATYPE_FLAG_IS_SIGNED;
     }
     int size = codegen_x86_atomic_size(&t);
+    bool generic = kind == ATOMIC_BUILTIN_GENERIC_LOAD || kind == ATOMIC_BUILTIN_GENERIC_STORE
+                || kind == ATOMIC_BUILTIN_GENERIC_EXCHANGE || kind == ATOMIC_BUILTIN_GENERIC_CAS;
+    if(size > DATA_SIZE_DWORD && !(generic && size == DATA_SIZE_DDWORD)){
+        compiler_error(current_process, "x86: %s on an object of %i bytes is not supported (no 8-byte integers on i386)\n",
+            b->name, size);
+    }
     bool is_signed = (t.flags & DATATYPE_FLAG_IS_SIGNED) && !(t.flags & DATATYPE_FLAG_IS_POINTER);
     const char* keyword = size == DATA_SIZE_BYTE ? "byte" : size == DATA_SIZE_WORD ? "word" : "dword";
     const char* eax = codegen_sub_register("eax", size);
@@ -4479,6 +4825,10 @@ void codegen_x86_native_atomic(struct generator* generator, struct native_functi
         generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, i), 0);
     }
     codegen_x86_atomic_orders(generator, arguments, operands);
+    if(size == DATA_SIZE_DDWORD){
+        codegen_x86_atomic_generic8(generator, kind, label);
+        return;
+    }
     switch(kind){
         case ATOMIC_BUILTIN_LOAD:
             asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
