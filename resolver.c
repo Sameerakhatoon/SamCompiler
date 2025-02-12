@@ -395,7 +395,27 @@ struct resolver_entity* resolver_create_new_entity_for_function_call(struct reso
         return 0;
     }
     entity->dtype = left_operand_entity->dtype;
+    // ch237: stamp the name so codegen can chase native-function
+    // entries back to their registered callbacks.
+    entity->name  = left_operand_entity->name;
     entity->func_call_data.arguments = vector_create(sizeof(struct node*));
+    return entity;
+}
+
+// ch237: build a NATIVE_FUNCTION entity for a discovered native sym.
+struct resolver_entity* resolver_create_new_entity_for_native_function(struct resolver_process* process, const char* name, struct symbol* native_func_symbol){
+    struct resolver_entity* entity = resolver_create_new_entity(NULL, RESOLVER_ENTITY_TYPE_NATIVE_FUNCTION, NULL);
+    if(!entity){
+        return NULL;
+    }
+    // Make a void return type
+    datatype_set_void(&entity->dtype);
+    make_function_node(&entity->dtype, name, NULL, NULL);
+    entity->node             = node_pop();
+    entity->name             = name;
+    entity->native_func.symbol = native_func_symbol;
+    entity->scope            = resolver_process_scope_current(process);
+    vector_push(process->scope.root->entities, &entity);
     return entity;
 }
 
@@ -488,7 +508,13 @@ struct resolver_entity* resolver_get_variable(struct resolver_result* result, st
 
 struct resolver_entity* resolver_get_function_in_scope(struct resolver_result* result, struct resolver_process* resolver, const char* func_name, struct resolver_scope* scope){
     (void)scope;
-    return resolver_get_entity_for_type(result, resolver, func_name, RESOLVER_ENTITY_TYPE_FUNCTION);
+    struct resolver_entity* entity = resolver_get_entity_for_type(result, resolver, func_name, RESOLVER_ENTITY_TYPE_FUNCTION);
+    // ch237: fall back to native-function entities so identifier
+    // lookups for `test` (etc.) succeed at codegen time.
+    if(!entity){
+        entity = resolver_get_entity_for_type(result, resolver, func_name, RESOLVER_ENTITY_TYPE_NATIVE_FUNCTION);
+    }
+    return entity;
 }
 
 struct resolver_entity* resolver_get_function(struct resolver_result* result, struct resolver_process* resolver, const char* func_name){
@@ -518,6 +544,16 @@ struct resolver_entity* resolver_follow_for_name(struct resolver_process* resolv
 
 struct resolver_entity* resolver_follow_identifier(struct resolver_process* resolver, struct node* node, struct resolver_result* result){
     struct resolver_entity* entity = resolver_follow_for_name(resolver, node->sval, result);
+    // ch237: if the regular scope search came up empty, try the
+    // native-function symbol table - sets `test()` etc. up so the
+    // codegen-time dispatcher can hand off to the registered cb.
+    if(!entity){
+        struct symbol* symbol = symresolver_get_symbol_for_native_function(resolver->compiler, node->sval);
+        if(symbol){
+            entity = resolver_create_new_entity_for_native_function(resolver, symbol->name, symbol);
+            resolver_result_entity_push(result, entity);
+        }
+    }
     if(entity){
         entity->last_resolve.referencing_node = node;
     }
