@@ -47,8 +47,10 @@ EOF
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 [ -x "$bin" ] || fail "ch121 probe failed to compile"
 got="$("$bin")"
-assert_contains "$got" "unk_type=6 unk_off=16"     "GENERAL=6 unknown entity"
-assert_contains "$got" "ind_type=8 ind_depth=2"    "UNARY_INDIRECTION=8 carries depth"
-assert_contains "$got" "addr_type=7 addr_ptr=1 addr_pd=1" "UNARY_GET_ADDRESS=7 bumps pointer_depth"
-assert_contains "$got" "cast_type=10"               "CAST=10"
+# ch237 added RESOLVER_ENTITY_TYPE_NATIVE_FUNCTION between
+# FUNCTION (1) and STRUCTURE so every later enum slot bumps by 1.
+assert_contains "$got" "unk_type=7 unk_off=16"     "GENERAL=7 unknown entity (post-ch237)"
+assert_contains "$got" "ind_type=9 ind_depth=2"    "UNARY_INDIRECTION=9 carries depth (post-ch237)"
+assert_contains "$got" "addr_type=8 addr_ptr=1 addr_pd=1" "UNARY_GET_ADDRESS=8 bumps pointer_depth (post-ch237)"
+assert_contains "$got" "cast_type=11"               "CAST=11 (post-ch237)"
 pass

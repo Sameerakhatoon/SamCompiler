@@ -46,6 +46,6 @@ EOF
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || true
 [ -x "$bin" ] || fail "ch131 probe failed to compile"
 got="$("$bin")"
-# CAST=10, DATA_TYPE_INTEGER value depends on enum; we just check top is CAST.
-assert_contains "$got" "count=2 top_type=10" "follow_cast pushes UNSUPPORTED operand + CAST on top"
+# CAST=11 post-ch237 (NATIVE_FUNCTION inserted before STRUCTURE).
+assert_contains "$got" "count=2 top_type=11" "follow_cast pushes UNSUPPORTED operand + CAST on top"
 pass
