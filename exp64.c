@@ -1228,7 +1228,10 @@ static void exp64_va_align(struct node* list, int field, int align){
 // the stack arguments), on aarch64 in the next q register, whose home
 // (exp64_va_qhome) is two of fp's 8-byte steps per register, else in a
 // 16-byte aligned stack slot (and no v register is used after it).
-static void exp64_va_ldouble(struct node* list, bool x86_64, bool aarch64){
+// on aarch64 `count` long doubles in a row, a homogeneous
+// aggregate of one to four of them: in that many q registers when they
+// are left, whose homes hold it as it is in memory, else on the stack.
+static void exp64_va_ldouble(struct node* list, bool x86_64, bool aarch64, int count){
     if(!aarch64){
         int field = x86_64 ? EXP64_VA_OVERFLOW : EXP64_VA_GP;
         exp64_va_align(list, field, EXP64_LD_SIZE);
@@ -1241,8 +1244,8 @@ static void exp64_va_ldouble(struct node* list, bool x86_64, bool aarch64){
     int stack_label = exp64_new_label();
     int end_label = exp64_new_label();
     int mark = vector_count(current_function->func.frame.elements);
-    exp64_va_compare(list, EXP64_VA_FP, DATA_SIZE_DDWORD, ">", EXP64_VA_FP_END, stack_label);
-    exp64_va_take(list, EXP64_VA_FP, DATA_SIZE_DDWORD);
+    exp64_va_compare(list, EXP64_VA_FP, DATA_SIZE_DDWORD * count, ">", EXP64_VA_FP_END, stack_label);
+    exp64_va_take(list, EXP64_VA_FP, DATA_SIZE_DDWORD * count);
     int fp = exp64_push_index();
     ops->frame_address(exp64_va_fp_end - DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS);
     ops->mov_r1();
@@ -1260,7 +1263,7 @@ static void exp64_va_ldouble(struct node* list, bool x86_64, bool aarch64){
     exp64_va_field(list, EXP64_VA_FP_END);
     exp64_va_set(list, EXP64_VA_FP);
     exp64_va_align(list, EXP64_VA_OVERFLOW, EXP64_LD_SIZE);
-    exp64_va_take(list, EXP64_VA_OVERFLOW, EXP64_LD_SIZE);
+    exp64_va_take(list, EXP64_VA_OVERFLOW, EXP64_LD_SIZE * count);
     ops->label(end_label);
 }
 
@@ -1278,9 +1281,6 @@ static void exp64_va_pieces(struct node* list, struct exp64_piece* pieces, int c
     int ints = 0;
     bool in_place = true;
     for(int i = 0; i < count; i++){
-        if(pieces[i].size == EXP64_LD_SIZE){
-            compiler_error(current_process, "va_arg of a struct of long doubles is not supported\n");
-        }
         ints += !pieces[i].fp;
         if(!pieces[i].fp || (aarch64 && pieces[i].size != DATA_SIZE_DDWORD)){
             in_place = false;
@@ -1318,6 +1318,8 @@ static void exp64_va_pieces(struct node* list, struct exp64_piece* pieces, int c
     ops->label(end_label);
 }
 
+static bool exp64_struct_x87(struct datatype* t);
+
 // va_start(list, last): the five addresses of the first variadic
 // argument, from the layout of the named parameters (exp64_parameters),
 // so a named struct that went to the stack while later named scalars
@@ -1351,6 +1353,8 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
     // no float to read (gcc makes it a trap).
     bool floating = false;
     bool ldouble = false;
+    bool aligned16 = false;
+    bool x87_struct = false;
     struct exp64_piece pieces[EXP64_MAX_PIECES];
     int piece_count = 0;
     int struct_size = 0;
@@ -1361,6 +1365,8 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
             piece_count = exp64_struct_pieces(&t, pieces);
             struct_size = piece_count ? (int)exp64_size(&t) : 0;
             ldouble = exp64_is_ldouble(&t);
+            aligned16 = exp64_is_struct(&t) && datatype_alignment(&t) > DATA_SIZE_DDWORD;
+            x87_struct = exp64_struct_x87(&t);
             if(exp64_is_floating(&t)){
                 if(t.size != DATA_SIZE_DDWORD){
                     compiler_error(current_process, "va_arg of a float: a float passed to `...` is promoted to double, read a double\n");
@@ -1401,14 +1407,25 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
         return result;
     }
     if(ldouble){
-        exp64_va_ldouble(list, x86_64, aarch64);
+        exp64_va_ldouble(list, x86_64, aarch64, 1);
+        return result;
+    }
+    if(piece_count && aarch64 && pieces[0].size == EXP64_LD_SIZE){
+        exp64_va_ldouble(list, false, true, piece_count);
         return result;
     }
     if(piece_count && (x86_64 || aarch64)){
         exp64_va_pieces(list, pieces, piece_count, struct_size, aarch64);
         return result;
     }
-    if(x86_64 && big){
+    // a struct with a long double member is of class MEMORY on
+    // x86_64 whatever its size. A struct aligned to 16 (a long double
+    // member) is 16-byte aligned on the stack there, and on riscv64 one
+    // of up to 16 bytes takes an even register pair or an aligned slot.
+    if(x86_64 && (big || x87_struct)){
+        if(aligned16){
+            exp64_va_align(list, EXP64_VA_OVERFLOW, EXP64_LD_SIZE);
+        }
         exp64_va_take(list, EXP64_VA_OVERFLOW, bytes);
         return result;
     }
@@ -1418,6 +1435,9 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
     if(x86_64 || aarch64){
         exp64_va_take_or_overflow(list, EXP64_VA_GP, bytes, EXP64_VA_GP_END, aarch64);
     } else {
+        if(aligned16 && !big){
+            exp64_va_align(list, EXP64_VA_GP, EXP64_LD_SIZE);
+        }
         exp64_va_take(list, EXP64_VA_GP, bytes);
     }
     if(big){
@@ -2007,6 +2027,9 @@ static int exp64_arg_layout(struct datatype* types, int count, int named, bool h
                 if(aarch64){
                     next_fp = EXP64_FP_ARG_REGISTERS;
                 }
+                if(datatype_alignment(&types[i]) > DATA_SIZE_DDWORD){
+                    stack = align_value(stack, 2);      // an aggregate of long doubles
+                }
                 a->stack = stack;
                 stack += words;
                 continue;
@@ -2027,12 +2050,23 @@ static int exp64_arg_layout(struct datatype* types, int count, int named, bool h
         }
         if(a->size > 2 * DATA_SIZE_DDWORD || exp64_struct_x87(&types[i])){
             if(x86_64){
+                if(datatype_alignment(&types[i]) > DATA_SIZE_DDWORD){
+                    stack = align_value(stack, 2);      // a long double member
+                }
                 a->stack = stack;
                 stack += words;
                 continue;
             }
             a->kind = EXP64_ARG_REF;
             words = 1;
+        }
+        // on riscv64 a struct aligned to 16 (a long double
+        // member) passed to `...` takes an even register pair, as a long
+        // double does, and a 16-byte aligned stack slot.
+        bool aligned16 = !x86_64 && !aarch64 && a->kind == EXP64_ARG_WORDS && is_struct
+                      && datatype_alignment(&types[i]) > DATA_SIZE_DDWORD;
+        if(aligned16 && i >= named){
+            next = align_value(next, 2);
         }
         if(next + words <= max){
             a->reg = next;
@@ -2042,10 +2076,14 @@ static int exp64_arg_layout(struct datatype* types, int count, int named, bool h
         }
         if(aarch64){
             next = max;
-        } else if(!x86_64 && next < max){
+        } else if(!x86_64 && next < max && !(aligned16 && i >= named)){
             a->reg = next;
             a->reg_words = max - next;
             next = max;
+        }
+        if(aligned16 && !a->reg_words){
+            next = max;
+            stack = align_value(stack, 2);
         }
         a->stack = stack;
         stack += words - a->reg_words;

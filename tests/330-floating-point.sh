@@ -6,8 +6,9 @@
 #     targets, against the output of the same program built by gcc;
 #   - what is rejected instead of miscompiled: % on a double or a long
 #     double, va_arg of a float (it was promoted to double), a global
-#     long double initialized with long double arithmetic (
-#     long double itself works since then, tests 391 and diff/long_double_*);
+#     long double initialized with a variable (long double
+#     itself works since then, tests 391 and diff/long_double_*:
+#     long double arithmetic in a global's initializer too, test 510);
 #   - va_arg of a double on all four targets.
 . "$(dirname "$0")/lib.sh"
 
@@ -46,7 +47,7 @@ reject(){
 }
 
 for target in x86 x86_64 aarch64 riscv64; do
-    reject $target "1.0L / 3 in a global" 'long double g = 1.0L / 3; int main(void){ return 0; }' "must be a constant expression"
+    reject $target "x * 1.0L in a global" 'int x; long double g = x * 1.0L; int main(void){ return 0; }' "must be a constant expression"
     reject $target "% on a long double" 'int main(void){ long double x = 5; return x % 2; }' "does not take"
     reject $target "% on a double" 'int main(void){ double x = 5; return x % 2; }' "does not take floating operands"
 done

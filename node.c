@@ -376,15 +376,42 @@ void make_tenary_node(struct node* true_node, struct node* false_node){
 
 extern struct node* parser_current_function;
 
+// whether a struct or union has a long double member, also in
+// a nested struct or an array.
+static bool node_struct_has_long_double(struct datatype* dtype){
+    struct node* s = dtype->struct_node;
+    struct node* body = !s ? 0 : s->type == NODE_TYPE_STRUCT ? s->_struct.body_n : s->_union.body_n;
+    if(!body){
+        return false;
+    }
+    struct vector* statements = body->body.statements;
+    for(int i = 0; i < vector_count(statements); i++){
+        struct node* member = *(struct node**)vector_at(statements, i);
+        struct vector* list = member->type == NODE_TYPE_VARIABLE_LIST ? member->var_list.list : 0;
+        for(int j = 0; j < (list ? vector_count(list) : 1); j++){
+            struct node* var = list ? *(struct node**)vector_at(list, j) : member;
+            if(var->type != NODE_TYPE_VARIABLE || (var->var.type.flags & DATATYPE_FLAG_IS_POINTER)){
+                continue;
+            }
+            if(var->var.type.type == DATA_TYPE_LONG_DOUBLE
+               || (datatype_is_struct_or_union(&var->var.type) && node_struct_has_long_double(&var->var.type))){
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void make_cast_node(struct datatype* dtype, struct node* operand_node){
     // `(struct s*)0` is how va_arg passes a struct type, and
-    // `(long double*)0` a long double.
+    // `(long double*)0` a long double (or a struct
+    // with one, whose long doubles also come in q registers on aarch64).
     if(parser_current_function && (dtype->flags & DATATYPE_FLAG_IS_POINTER) && dtype->pointer_depth == 1
        && operand_node && operand_node->type == NODE_TYPE_NUMBER && operand_node->llnum == 0){
         if(datatype_is_struct_or_union(dtype)){
             parser_current_function->func.flags |= FUNCTION_NODE_FLAG_STRUCT_POINTER_CAST;
         }
-        if(dtype->type == DATA_TYPE_LONG_DOUBLE){
+        if(dtype->type == DATA_TYPE_LONG_DOUBLE || (datatype_is_struct_or_union(dtype) && node_struct_has_long_double(dtype))){
             parser_current_function->func.flags |= FUNCTION_NODE_FLAG_LONG_DOUBLE_POINTER_CAST;
         }
     }

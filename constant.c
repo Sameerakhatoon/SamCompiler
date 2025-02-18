@@ -593,6 +593,39 @@ void long_double_from_double(double value, unsigned char out[16]){
     ld_pack(negative, 0, fraction | (1ULL << 52), exponent - 1075, false, out);
 }
 
+// sign * num / den * 2^e2, rounded once: a quotient of 116 bits or so,
+// and whether anything is left. num and den are changed.
+static void ld_divide(bool negative, struct ld_big* num, struct ld_big* den, int e2, unsigned char out[16]){
+    static struct ld_big rem;
+    int k = 116 - (ld_big_bits(num) - ld_big_bits(den));
+    if(k > 0){
+        ld_big_shl(num, k);
+    } else {
+        ld_big_shl(den, -k);
+    }
+    e2 -= k;
+    unsigned long long hi = 0, lo = 0;
+    ld_big_set(&rem, 0);
+    for(int i = ld_big_bits(num) - 1; i >= 0; i--){
+        ld_big_shl(&rem, 1);
+        if(ld_big_bit(num, i)){
+            if(rem.n == 0){
+                rem.n = 1;
+                rem.d[0] = 0;
+            }
+            rem.d[0] |= 1;
+        }
+        int q = 0;
+        if(ld_big_cmp(&rem, den) >= 0){
+            ld_big_sub(&rem, den);
+            q = 1;
+        }
+        hi = (hi << 1) | (lo >> 63);
+        lo = (lo << 1) | q;
+    }
+    ld_pack(negative, hi, lo, e2, rem.n != 0, out);
+}
+
 static int ld_hex_digit(char c){
     if(c >= '0' && c <= '9') return c - '0';
     if(c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -603,7 +636,7 @@ static int ld_hex_digit(char c){
 // A floating constant's spelling, without its suffix (the lexer checked
 // it): decimal with an optional e exponent, or hexadecimal with a p one.
 void long_double_from_text(const char* text, unsigned char out[16]){
-    static struct ld_big num, den, rem;
+    static struct ld_big num, den;
     bool hex = text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
     const char* p = hex ? text + 2 : text;
     int base = hex ? 16 : 10;
@@ -654,41 +687,242 @@ void long_double_from_text(const char* text, unsigned char out[16]){
             ld_big_mul_add(e10 < 0 ? &den : &num, 10, 0);
         }
     }
-    // q = num / den with 116 bits or so, and whether anything is left.
-    int k = 116 - (ld_big_bits(&num) - ld_big_bits(&den));
-    if(k > 0){
-        ld_big_shl(&num, k);
-    } else {
-        ld_big_shl(&den, -k);
+    ld_divide(false, &num, &den, e2, out);
+}
+
+// long double arithmetic in a global's initializer, folded
+// as gcc folds it: each operation exactly on big integers, then rounded
+// once to nearest, ties to even, into the target's format (ld_pack),
+// with no host floating point.
+
+enum {
+    LD_FINITE,
+    LD_INFINITE,
+    LD_NAN
+};
+
+// a += b.
+static void ld_big_add(struct ld_big* a, struct ld_big* b){
+    unsigned long long carry = 0;
+    int n = a->n > b->n ? a->n : b->n;
+    for(int i = 0; i < n; i++){
+        unsigned long long t = (i < a->n ? (unsigned long long)a->d[i] : 0) + (i < b->n ? b->d[i] : 0) + carry;
+        a->d[i] = (unsigned int)t;
+        carry = t >> 32;
     }
-    e2 -= k;
+    a->n = n;
+    if(carry && a->n < LD_LIMBS){
+        a->d[a->n++] = (unsigned int)carry;
+    }
+}
+
+// out = a * b; the operands have a few limbs (out is neither of them).
+static void ld_big_mul(struct ld_big* out, struct ld_big* a, struct ld_big* b){
+    out->n = a->n + b->n;
+    for(int i = 0; i < out->n; i++){
+        out->d[i] = 0;
+    }
+    for(int i = 0; i < a->n; i++){
+        unsigned long long carry = 0;
+        for(int j = 0; j < b->n; j++){
+            unsigned long long t = (unsigned long long)a->d[i] * b->d[j] + out->d[i + j] + carry;
+            out->d[i + j] = (unsigned int)t;
+            carry = t >> 32;
+        }
+        out->d[i + b->n] = (unsigned int)carry;
+    }
+    while(out->n && !out->d[out->n - 1]){
+        out->n--;
+    }
+}
+
+// sign * num * 2^e, with up to 124 of its top bits kept and the rest
+// as the sticky bit.
+static void ld_pack_big(bool negative, struct ld_big* num, int e, unsigned char out[16]){
+    int bits = ld_big_bits(num);
+    int shift = bits > 124 ? bits - 124 : 0;
+    bool sticky = false;
+    for(int i = 0; i < shift; i++){
+        if(ld_big_bit(num, i)){
+            sticky = true;
+            break;
+        }
+    }
     unsigned long long hi = 0, lo = 0;
-    ld_big_set(&rem, 0);
-    for(int i = ld_big_bits(&num) - 1; i >= 0; i--){
-        ld_big_shl(&rem, 1);
-        if(ld_big_bit(&num, i)){
-            if(rem.n == 0){
-                rem.n = 1;
-                rem.d[0] = 0;
-            }
-            rem.d[0] |= 1;
-        }
-        int q = 0;
-        if(ld_big_cmp(&rem, &den) >= 0){
-            ld_big_sub(&rem, &den);
-            q = 1;
-        }
+    for(int i = bits - 1; i >= shift; i--){
         hi = (hi << 1) | (lo >> 63);
-        lo = (lo << 1) | q;
+        lo = (lo << 1) | ld_big_bit(num, i);
     }
-    ld_pack(false, hi, lo, e2, rem.n != 0, out);
+    ld_pack(negative, hi, lo, e + shift, sticky, out);
+}
+
+// The value bytes in the target's format stand for: a class, and for a
+// finite one sign * sig * 2^e.
+static int ld_unpack(unsigned char* in, bool* negative, struct ld_big* sig, int* e){
+    bool x87 = long_double_is_x87();
+    int top = x87 ? 9 : 15;
+    *negative = in[top] >> 7;
+    int field = ((in[top] & 0x7F) << 8) | in[top - 1];
+    unsigned long long lo = 0, hi = 0;
+    for(int i = 0; i < 8; i++){
+        lo |= (unsigned long long)in[i] << (8 * i);
+    }
+    for(int i = 0; !x87 && i < 6; i++){
+        hi |= (unsigned long long)in[8 + i] << (8 * i);
+    }
+    if(field == 0x7FFF){
+        return (x87 ? (lo << 1) != 0 : (hi | lo) != 0) ? LD_NAN : LD_INFINITE;
+    }
+    if(field && !x87){
+        hi |= 1ULL << 48;       // the hidden bit of binary128
+    }
+    *e = (field ? field : 1) - 16383 - (x87 ? 63 : 112);
+    static struct ld_big low;
+    ld_big_set(sig, hi);
+    ld_big_shl(sig, 64);
+    ld_big_set(&low, lo);
+    ld_big_add(sig, &low);
+    return LD_FINITE;
+}
+
+// The quiet NaN of an invalid operation (infinity - infinity, 0 / 0).
+static void ld_default_nan(unsigned char out[16]){
+    memset(out, 0, 16);
+    if(long_double_is_x87()){
+        out[7] = 0xC0;
+        out[8] = 0xFF;
+        out[9] = 0x7F;
+    } else {
+        out[13] = 0x80;
+        out[14] = 0xFF;
+        out[15] = 0x7F;
+    }
+}
+
+// out = a op b for op one of + - * /. A NaN operand is the result.
+static void long_double_arith(char op, unsigned char* a, unsigned char* b, unsigned char out[16]){
+    static struct ld_big x, y, r;
+    bool xneg, yneg;
+    int xe = 0, ye = 0;
+    int xclass = ld_unpack(a, &xneg, &x, &xe);
+    int yclass = ld_unpack(b, &yneg, &y, &ye);
+    if(xclass == LD_NAN || yclass == LD_NAN){
+        memcpy(out, xclass == LD_NAN ? a : b, 16);
+        return;
+    }
+    if(op == '-'){
+        op = '+';
+        yneg = !yneg;
+    }
+    bool negative = xneg != yneg;
+    if(op == '+'){
+        if(xclass == LD_INFINITE || yclass == LD_INFINITE){
+            if(xclass == yclass && xneg != yneg){
+                ld_default_nan(out);
+                return;
+            }
+            ld_pack(xclass == LD_INFINITE ? xneg : yneg, 1, 0, 20000, false, out);
+            return;
+        }
+        if(x.n == 0 && y.n == 0){
+            ld_pack(xneg && yneg, 0, 0, 0, false, out);
+            return;
+        }
+        // An operand far below the other only counts as a sticky bit:
+        // it becomes a 1 well below where the result is rounded.
+        int xtop = xe + ld_big_bits(&x), ytop = ye + ld_big_bits(&y);
+        if(x.n && y.n && xtop - ytop > 300){
+            ld_big_set(&y, 1);
+            ye = xtop - 300;
+        } else if(x.n && y.n && ytop - xtop > 300){
+            ld_big_set(&x, 1);
+            xe = ytop - 300;
+        }
+        int e = x.n == 0 ? ye : y.n == 0 ? xe : xe < ye ? xe : ye;
+        ld_big_shl(&x, xe - e);
+        ld_big_shl(&y, ye - e);
+        if(xneg == yneg){
+            ld_big_add(&x, &y);
+            ld_pack_big(xneg, &x, e, out);
+            return;
+        }
+        int order = ld_big_cmp(&x, &y);
+        if(order == 0){
+            ld_pack(false, 0, 0, 0, false, out);
+            return;
+        }
+        if(order > 0){
+            ld_big_sub(&x, &y);
+            ld_pack_big(xneg, &x, e, out);
+        } else {
+            ld_big_sub(&y, &x);
+            ld_pack_big(yneg, &y, e, out);
+        }
+        return;
+    }
+    if(op == '*'){
+        if(xclass == LD_INFINITE || yclass == LD_INFINITE){
+            if((xclass == LD_FINITE && x.n == 0) || (yclass == LD_FINITE && y.n == 0)){
+                ld_default_nan(out);
+                return;
+            }
+            ld_pack(negative, 1, 0, 20000, false, out);
+            return;
+        }
+        ld_big_mul(&r, &x, &y);
+        ld_pack_big(negative, &r, xe + ye, out);
+        return;
+    }
+    // Division.
+    if(xclass == LD_INFINITE){
+        if(yclass == LD_INFINITE){
+            ld_default_nan(out);
+        } else {
+            ld_pack(negative, 1, 0, 20000, false, out);
+        }
+        return;
+    }
+    if(yclass == LD_INFINITE || x.n == 0){
+        if(x.n == 0 && yclass == LD_FINITE && y.n == 0){
+            ld_default_nan(out);
+            return;
+        }
+        ld_pack(negative, 0, 0, 0, false, out);
+        return;
+    }
+    if(y.n == 0){
+        ld_pack(negative, 1, 0, 20000, false, out);
+        return;
+    }
+    ld_divide(negative, &x, &y, xe - ye, out);
+}
+
+// Whether a constant expression has the type long double: an L
+// constant, a cast to long double, or an arithmetic operator with one
+// such operand.
+static bool long_double_typed(struct node* node){
+    switch(node->type){
+        case NODE_TYPE_NUMBER:
+            return node->num.flags & NUMBER_FLAG_LONG_DOUBLE;
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            return long_double_typed(node->parenthesis.exp);
+        case NODE_TYPE_UNARY:
+            return (S_EQ(node->unary.op, "-") || S_EQ(node->unary.op, "+")) && long_double_typed(node->unary.operand);
+        case NODE_TYPE_CAST:
+            return datatype_is_long_double(&node->cast.dtype);
+        case NODE_TYPE_EXPRESSION:
+            return (S_EQ(node->exp.op, "+") || S_EQ(node->exp.op, "-") || S_EQ(node->exp.op, "*") || S_EQ(node->exp.op, "/"))
+                && (long_double_typed(node->exp.left) || long_double_typed(node->exp.right));
+    }
+    return false;
 }
 
 // The value of a constant expression of arithmetic type as a long
 // double: a long double constant from its spelling, other constants
 // exactly from their double or integer value, and `-`, `+`, casts and
-// parentheses on top. Anything else is folded as constant_fold does (in
-// double) and then converted.
+// parentheses on top, and `+ - * /` with a long double
+// operand, rounded in the target's format. Anything else is folded as
+// constant_fold does (in double) and then converted.
 bool long_double_fold(struct compile_process* process, struct node* node, unsigned char out[16]){
     if(!node){
         return false;
@@ -716,6 +950,16 @@ bool long_double_fold(struct compile_process* process, struct node* node, unsign
         case NODE_TYPE_CAST:
             if(datatype_is_long_double(&node->cast.dtype)){
                 return long_double_fold(process, node->cast.operand, out);
+            }
+            break;
+        case NODE_TYPE_EXPRESSION:
+            if(long_double_typed(node)){
+                unsigned char left[16], right[16];
+                if(!long_double_fold(process, node->exp.left, left) || !long_double_fold(process, node->exp.right, right)){
+                    return false;
+                }
+                long_double_arith(node->exp.op[0], left, right, out);
+                return true;
             }
             break;
     }
