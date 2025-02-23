@@ -2322,7 +2322,10 @@ void asm_push_ins_with_datatype(struct datatype* dtype, const char* fmt, ...){
 }
 
 void codegen_gen_exp(struct generator* generator, struct node* node, int flags){
-    codegen_generate_expressionable(node, codegen_history_down(x86_generator_private(generator)->remembered.history, flags));
+    // ch238: switch from history_down to history_begin since the
+    // remembered.history slot is always NULL at native-callback
+    // entry. history_begin synthesizes a fresh top-level history.
+    codegen_generate_expressionable(node, codegen_history_begin(flags));
 }
 
 void codegen_end_exp(struct generator* generator){
