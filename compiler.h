@@ -448,6 +448,14 @@ enum {
     PARSE_GENERAL_ERROR,
 };
 
+// ch243: validator return codes. ALL_OK so compile_file's
+// `validate(process) != VALIDATION_ALL_OK` short-circuit catches
+// failures uniformly with parse / codegen.
+enum {
+    VALIDATION_ALL_OK,
+    VALIDATION_GENERAL_ERROR,
+};
+
 enum {
     NODE_TYPE_EXPRESSION,
     NODE_TYPE_EXPRESSION_PARENTHESES,
@@ -749,6 +757,10 @@ struct node {
 };
 
 int  parse(struct compile_process* process);
+
+// ch243: validator entry point. Scaffolded only; later chapters
+// hang the actual checks off this.
+int  validate(struct compile_process* process);
 
 // ch26: node stack helpers. node_set_vector points them at the parser's
 // scratch / root vectors; the rest of the parser uses node_push /

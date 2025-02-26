@@ -1,4 +1,4 @@
-OBJECTS  = ./build/compiler.o ./build/cprocess.o \
+OBJECTS  = ./build/compiler.o ./build/cprocess.o ./build/validator.o \
            ./build/lexer.o ./build/lex_process.o ./build/token.o \
            ./build/parser.o ./build/node.o ./build/expressionable.o ./build/datatype.o ./build/scope.o ./build/symresolver.o ./build/resolver.o ./build/rdefault.o ./build/codegen.o ./build/stackframe.o ./build/fixup.o ./build/array.o ./build/helper.o \
            ./build/preprocessor.o ./build/native.o \
@@ -17,6 +17,9 @@ all: ./main
 
 ./build/cprocess.o: ./cprocess.c ./compiler.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./cprocess.c -o ./build/cprocess.o
+
+./build/validator.o: ./validator.c ./compiler.h
+	gcc ${INCLUDES} ${CFLAGS} -c ./validator.c -o ./build/validator.o
 
 ./build/lexer.o: ./lexer.c ./compiler.h
 	gcc ${INCLUDES} ${CFLAGS} -c ./lexer.c -o ./build/lexer.o
