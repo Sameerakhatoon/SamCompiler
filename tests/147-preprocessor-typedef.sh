@@ -86,7 +86,9 @@ EOF
 
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || fail "ch219 probe failed to compile"
 got="$("$bin")"
-# Expected: 1 def, name=ABC, type=TYPEDEF; token_vec has `int x = 50 ;` (5 tokens), no ABC, has int.
-assert_contains "$got" "defs=1 name=1 type=1 n=5 abc=0 int=1" \
-    "typedef int ABC; ABC x = 50; registers a TYPEDEF and expands ABC back to int"
+# a typedef is no longer a preprocessor definition; the
+# parser reads it with its scope. Expected: no definition, and token_vec
+# keeps `typedef int ABC ; ABC x = 50 ;` (9 tokens), ABC and int in it.
+assert_contains "$got" "defs=0 name=0 type=0 n=9 abc=1 int=1" \
+    "typedef int ABC; ABC x = 50; is left for the parser"
 pass

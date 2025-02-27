@@ -241,6 +241,10 @@ static struct vector*          parser_vlas;
 static struct vector*          parser_vla_dims;
 static size_t                  parser_vla_pointer_element;
 static struct vector*          parser_vla_pointer_dims;
+// the dimensions of a variable-length array typedef's type
+// (`int [__typedef_size_0]`), which parse_datatype leaves for
+// parse_variable.
+static struct vector*          parser_type_vla_dims;
 static struct vector*          parser_vla_params;
 static struct vector*          parser_vla_views;
 static struct vector*          parser_vla_done;
@@ -429,13 +433,18 @@ static const char* parser_token_text(struct token* token){
 // name declared deeper hides it (a `shadow` entry). The parser turns a
 // use of the name into a number node, so nothing after the parser sees
 // enumerators. A `rename` entry is a static local instead: its name
-// stands for the global that holds it (parse_static_local).
+// stands for the global that holds it (parse_static_local). A `tokens`
+// entry is a typedef name: the tokens of its type, which take
+// its place where a type is read (parser_typedef_expand). Typedef names
+// and ordinary identifiers share one name space (C11 6.2.3), so they
+// hide each other the same way.
 struct parser_enumerator {
     const char*     name;
     struct constant value;
     int             depth;
     bool            shadow;
     const char*     rename;
+    struct vector*  tokens;
 };
 static struct vector* parser_enumerators;
 
@@ -467,21 +476,256 @@ static void parser_enumerators_trim(void){
     }
 }
 
-static struct parser_enumerator* parser_enumerator_find(const char* name){
+// The innermost entry for name, whatever it is, or NULL.
+static struct parser_enumerator* parser_name_find(const char* name){
     for(int i = vector_count(parser_enumerators) - 1; i >= 0; i--){
         struct parser_enumerator* e = vector_at(parser_enumerators, i);
         if(S_EQ(e->name, name)){
-            return e->shadow ? 0 : e;
+            return e;
         }
     }
     return 0;
 }
 
-// A variable, parameter or function named like a visible enumerator
-// hides it from here on in this scope.
+static struct parser_enumerator* parser_enumerator_find(const char* name){
+    struct parser_enumerator* e = parser_name_find(name);
+    return e && !e->shadow && !e->tokens ? e : 0;
+}
+
+// The visible typedef called name, or NULL.
+static struct parser_enumerator* parser_typedef_find(const char* name){
+    struct parser_enumerator* e = parser_enumerators ? parser_name_find(name) : 0;
+    return e && e->tokens ? e : 0;
+}
+
+// A variable, parameter or function named like a visible enumerator or
+// typedef hides it from here on in this scope.
 static void parser_enumerator_hide(const char* name){
-    if(name && parser_enumerators && parser_enumerator_find(name)){
+    struct parser_enumerator* e = name && parser_enumerators ? parser_name_find(name) : 0;
+    if(e && !e->shadow){
         parser_enumerator_push(name, 0, true);
+    }
+}
+
+// ---- Typedef names ----
+//
+// The preprocessor leaves `typedef ... ;` in the tokens (its struct body
+// already out in front, preprocessor_handle_typedef_token). parse_typedef
+// reads it where it stands and keeps the tokens of the type, without the
+// name, as a parser_enumerator of its scope. Where a type may start, the
+// parser calls parser_typedef_expand, which puts those tokens in place of
+// a visible typedef name, so the rest of the parser reads keywords as it
+// always did. A name in any other place (a declarator, a member, a tag,
+// a label) is never expanded, and a variable that hides the typedef
+// hides it like an enumerator.
+
+// The first token of the bracket groups that end tokens before `end`
+// (`[2][3]`), or end when there are none.
+static int parser_typedef_brackets_start(struct vector* tokens, int end){
+    int i = end - 1;
+    int start = end;
+    while(i >= 0 && token_is_symbol(vector_at(tokens, i), ']')){
+        int level = 0;
+        for(; i >= 0; i--){
+            struct token* t = vector_at(tokens, i);
+            if(token_is_symbol(t, ']')){
+                level++;
+            } else if(token_is_operator(t, "[") && --level == 0){
+                break;
+            }
+        }
+        if(i < 0){
+            break;
+        }
+        start = i;
+        i--;
+    }
+    return start;
+}
+
+// Where the name is among the tokens between `typedef` and `;`: after
+// the `*`s of the first parentheses (`int (*fn)(int)`), else before the
+// trailing brackets (`long buf[8]`), else last. -1 when it is not an
+// identifier.
+static int parser_typedef_name_index(struct vector* tokens){
+    int count = vector_count(tokens);
+    for(int i = 0; i < count; i++){
+        if(!token_is_operator(vector_at(tokens, i), "(")){
+            continue;
+        }
+        int j = i + 1;
+        while(j < count && token_is_operator(vector_at(tokens, j), "*")){
+            j++;
+        }
+        if(j > i + 1 && j < count && token_is_identifier(vector_at(tokens, j))){
+            return j;
+        }
+        break;
+    }
+    int i = parser_typedef_brackets_start(tokens, count) - 1;
+    return i >= 0 && token_is_identifier(vector_at(tokens, i)) ? i : -1;
+}
+
+// Whether a typedef name after `previous` is a declarator rather than a
+// type: after a type keyword, `signed` or `unsigned`, another name, `*`,
+// `.`, `->`, `]` or `)`.
+static bool parser_typedef_name_is_declarator(struct token* previous){
+    if(!previous){
+        return false;
+    }
+    if(previous->type == TOKEN_TYPE_KEYWORD){
+        return keyword_is_datatype(previous->sval) || S_EQ(previous->sval, "signed") || S_EQ(previous->sval, "unsigned");
+    }
+    return previous->type == TOKEN_TYPE_IDENTIFIER || token_is_operator(previous, "*")
+        || token_is_operator(previous, ".") || token_is_operator(previous, "->")
+        || token_is_symbol(previous, ']') || token_is_symbol(previous, ')');
+}
+
+// The tokens a typedef stands for, with the typedef names among them
+// replaced as they are here, so `typedef T* P;` keeps this scope's T. An
+// array typedef as the element (`typedef buf two[2];`, buf `long[8]`)
+// puts its brackets after the new ones: two is long[2][8].
+static struct vector* parser_typedef_tokens(struct vector* tokens){
+    struct vector* type  = vector_create(sizeof(struct token));
+    struct vector* inner = vector_create(sizeof(struct token));
+    int count = vector_count(tokens);
+    for(int i = 0; i < count; i++){
+        struct token* token = vector_at(tokens, i);
+        struct parser_enumerator* e = token_is_identifier(token) ? parser_typedef_find(token->sval) : 0;
+        if(!e || parser_typedef_name_is_declarator(i ? vector_at(tokens, i - 1) : 0)){
+            vector_push(type, token);
+            continue;
+        }
+        int n = vector_count(e->tokens);
+        int keep = n;
+        if(i + 1 < count && token_is_operator(vector_at(tokens, i + 1), "[")){
+            keep = parser_typedef_brackets_start(e->tokens, n);
+        }
+        for(int k = 0; k < n; k++){
+            vector_push(k < keep ? type : inner, vector_at(e->tokens, k));
+        }
+    }
+    for(int k = 0; k < vector_count(inner); k++){
+        vector_push(type, vector_at(inner, k));
+    }
+    vector_free(inner);
+    return type;
+}
+
+// How many tokens the splices have added so far (parse_function).
+static int parser_spliced;
+
+// The `remove` tokens at `at` give way to `tokens`. parse() made room
+// for every expansion (parser_typedef_reserve), so the vector does not
+// move and the struct token* the parser holds stay good; a saved
+// position (vector_save) moves with the tokens after it.
+static void parser_splice(int at, int remove, struct vector* tokens){
+    struct vector* vec = current_process->token_vec;
+    int moved = vector_count(tokens) - remove;
+    assert(vector_count(vec) + moved < vec->mindex);
+    for(int i = 0; i < remove; i++){
+        vector_pop_at(vec, at);
+    }
+    vector_insert(vec, tokens, at);
+    parser_spliced += moved;
+    for(int i = 0; vec->saves && i < vector_count(vec->saves); i++){
+        struct vector* save = vector_at(vec->saves, i);
+        save->count  += moved;
+        save->rindex += moved;
+        if(save->pindex > at){
+            save->pindex += moved;
+        }
+    }
+}
+
+// Where a type may start: a visible typedef name next becomes its type.
+static bool parser_typedef_expand(void){
+    struct token* token = token_peek_next();
+    struct parser_enumerator* e = token_is_identifier(token) ? parser_typedef_find(token->sval) : 0;
+    if(!e){
+        return false;
+    }
+    parser_splice(current_process->token_vec->pindex, 1, e->tokens);
+    return true;
+}
+
+// Room in the token vector for every expansion: each use of a name may
+// grow by the longest type a typedef of that name has had so far (with
+// its own typedef names expanded).
+struct parser_typedef_length {
+    const char*                   name;
+    int                           length;
+    struct parser_typedef_length* next;
+};
+
+static struct parser_typedef_length** parser_typedef_length_slot(struct parser_typedef_length** table, const char* name){
+    unsigned hash = 2166136261u;
+    for(const unsigned char* c = (const unsigned char*)name; *c; c++){
+        hash = (hash ^ *c) * 16777619u;
+    }
+    struct parser_typedef_length** slot = &table[hash % 1024];
+    while(*slot && !S_EQ((*slot)->name, name)){
+        slot = &(*slot)->next;
+    }
+    return slot;
+}
+
+static void parser_typedef_reserve(void){
+    struct parser_typedef_length** table = calloc(1024, sizeof(struct parser_typedef_length*));
+    struct vector* vec = current_process->token_vec;
+    struct vector* tokens = vector_create(sizeof(struct token));
+    int count = vector_count(vec);
+    long extra = 0;
+    for(int i = 0; i < count; i++){
+        struct token* token = vector_at(vec, i);
+        if(token_is_identifier(token)){
+            struct parser_typedef_length* known = *parser_typedef_length_slot(table, token->sval);
+            extra += known ? known->length : 0;
+            continue;
+        }
+        if(!token_is_keyword(token, "typedef")){
+            continue;
+        }
+        vector_clear(tokens);
+        int depth = 0;
+        for(int j = i + 1; j < count; j++){
+            struct token* t = vector_at(vec, j);
+            if(depth == 0 && token_is_symbol(t, ';')){
+                break;
+            }
+            depth += token_is_operator(t, "(") - token_is_symbol(t, ')');
+            vector_push(tokens, t);
+        }
+        int at = parser_typedef_name_index(tokens);
+        if(at < 0){
+            continue;
+        }
+        int length = 0;
+        for(int k = 0; k < vector_count(tokens); k++){
+            struct token* t = vector_at(tokens, k);
+            struct parser_typedef_length* known = token_is_identifier(t) ? *parser_typedef_length_slot(table, t->sval) : 0;
+            length += k == at ? 0 : known ? known->length : 1;
+        }
+        const char* name = ((struct token*)vector_at(tokens, at))->sval;
+        struct parser_typedef_length** slot = parser_typedef_length_slot(table, name);
+        if(!*slot){
+            *slot = calloc(1, sizeof(struct parser_typedef_length));
+            (*slot)->name = name;
+        }
+        if(length > (*slot)->length){
+            (*slot)->length = length;
+        }
+    }
+    vector_free(tokens);
+    // Growing the vector by pushes, then giving the tokens back, keeps
+    // the room.
+    struct token blank = {0};
+    extra += 256;
+    for(long k = 0; k <= extra; k++){
+        vector_push(vec, &blank);
+    }
+    for(long k = 0; k <= extra; k++){
+        vector_pop(vec);
     }
 }
 
@@ -1095,6 +1339,8 @@ static void parse_for_parentheses(struct history* history){
     // this is a cast expression, not a parenthesised value.
     // Only a type keyword starts a cast; `(sizeof(x) == 4)` is a
     // parenthesised expression that happens to begin with a keyword.
+    // So does a visible typedef name.
+    parser_typedef_expand();
     if(token_peek_next() && token_peek_next()->type == TOKEN_TYPE_KEYWORD
        && (keyword_is_datatype(token_peek_next()->sval) || is_keyword_variable_modifier(token_peek_next()->sval))){
         parse_for_cast();
@@ -1168,6 +1414,9 @@ static void parse_for_tenary(struct history* history){
 static void parse_for_cast(void){
     struct datatype dtype = {0};
     parse_datatype(&dtype);
+    if(parser_type_vla_dims){
+        compiler_error(current_process, "A cast to a variable-length array type is not supported\n");
+    }
     // `(int (*)(int))p`
     struct token* no_name = 0;
     parse_function_pointer_declarator(&dtype, &no_name);
@@ -1692,8 +1941,10 @@ static void parser_datatype_init(struct token* datatype_token,
 // Where the parameters of a function declared to return a function
 // pointer start (`int (*f(int))(int)`), for parse_function, or -1.
 static int parser_function_declarator_params = -1;
-// Where parse_function goes on after reading those parameters, or -1.
+// Where parse_function goes on after reading those parameters, or -1,
+// and parser_spliced then.
 static int parser_function_resume = -1;
+static int parser_function_resume_spliced;
 
 // A parenthesized parameter list, read and not kept.
 static void parser_skip_parameters(void){
@@ -1916,6 +2167,12 @@ static bool parser_type_sign_given;
 
 static void parse_datatype_type(struct datatype* dtype){
     struct token* datatype_token            = 0;
+    // A typedef name is the type, unless `signed` or
+    // `unsigned` was the type: then it is the declarator. Its tokens may
+    // begin with qualifiers of their own (`unsigned long`, `_Atomic int`).
+    if(!parser_sign_given && parser_typedef_expand()){
+        parser_sign_given = parse_datatype_modifiers(dtype);
+    }
     if(parser_atomic_specifier_next()){
         parser_last_datatype_was_enum = false;
         parse_atomic_type_specifier(dtype);
@@ -1976,6 +2233,9 @@ static void parse_datatype_type(struct datatype* dtype){
 
 // modifier* type modifier*
 static void parse_datatype(struct datatype* dtype){
+    if(parser_type_vla_dims){
+        compiler_error(current_process, "A variable-length array type is only supported for a local variable\n");
+    }
     memset(dtype, 0, sizeof(struct datatype));
     dtype->flags |= DATATYPE_FLAG_IS_SIGNED;
 
@@ -1984,6 +2244,8 @@ static void parse_datatype(struct datatype* dtype){
     parser_sign_given = sign_given;
     parser_type_sign_settled = false;
     parse_datatype_type(dtype);
+    // Also a sign the tokens of a typedef name gave.
+    sign_given |= parser_sign_given;
     parser_sign_given = false;
     sign_given |= parser_type_sign_settled;
     parser_type_sign_settled = false;
@@ -1999,12 +2261,23 @@ static void parse_datatype(struct datatype* dtype){
     }
     // Brackets right after the type are part of it: an array typedef
     // (`typedef long buf[8];` makes `buf b;` read `long [8] b`, see
-    // preprocessor_handle_typedef_token) or the abstract declarator of
+    // parser_typedef_expand) or the abstract declarator of
     // `sizeof(int[3])` and `(int[]){ 1, 2 }`. A declarator's own
     // brackets go in front of these (parser_join_brackets). sizeof reads
     // its own (parse_sizeof): `sizeof(int[n][m])` may be a VLA type.
+    // In a function, a variable-length array typedef's sizes are the
+    // hidden locals parse_typedef set: those dimensions go to
+    // parse_variable.
     if(token_next_is_operator("[") && !parser_sizeof_type_brackets){
+        int mode = parser_vla_mode;
+        parser_vla_mode = parser_current_function ? PARSER_VLA_MODE_LOCAL : PARSER_VLA_MODE_NONE;
         struct array_brackets* brackets = parse_array_brackets(history_begin(0));
+        parser_vla_mode = mode;
+        if(parser_vla_dims){
+            parser_type_vla_dims = parser_vla_dims;
+            parser_vla_dims = 0;
+            return;
+        }
         dtype->array.brackets = brackets;
         dtype->array.size     = array_brackets_calculate_size(dtype, brackets);
         dtype->flags         |= DATATYPE_FLAG_IS_ARRAY;
@@ -2636,7 +2909,10 @@ static void make_variable_node_and_register(struct history* history,
                                             struct node* value_node){
     make_variable_node(dtype, name_token, value_node);
     struct node* var_node = node_pop();
-    parser_enumerator_hide(name_token ? name_token->sval : 0);
+    // A member's name is in its struct's own name space.
+    if(!(history->flags & (HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION))){
+        parser_enumerator_hide(name_token ? name_token->sval : 0);
+    }
     if(parser_bitfield_width >= 0){
         // The width parse_variable read; the layout needs it below.
         var_node->var.bitfield.is_bitfield = true;
@@ -4254,6 +4530,30 @@ static void parse_variable(struct datatype* dtype, struct token* name_token, str
         vector_push(parser_vlas, &hide);
     }
 
+    // a variable-length array typedef's type, `row a[2];` with
+    // `typedef int row[n];`: its dimensions come after the declarator's
+    // own, as with any array typedef (parser_join_brackets).
+    if(parser_type_vla_dims){
+        struct vector* type_dims = parser_type_vla_dims;
+        parser_type_vla_dims = 0;
+        if(!plain_object || !is_block_local || parser_vla_pointer_dims){
+            compiler_error(current_process, "A variable-length array type is only supported for a local variable\n");
+        }
+        struct vector* dims = vector_create(sizeof(struct node*));
+        if(token_next_is_operator("[")){
+            parser_vla_mode = PARSER_VLA_MODE_ALWAYS;
+            parse_array_brackets(history);
+            parser_vla_mode = PARSER_VLA_MODE_NONE;
+            dims = parser_vla_dims;
+            parser_vla_dims = 0;
+        }
+        for(int i = 0; i < vector_count(type_dims); i++){
+            vector_push(dims, vector_at(type_dims, i));
+        }
+        parser_declare_vla(dtype, name_token, dims, history);
+        return;
+    }
+
     // `T (*p)[n]...`, a pointer to an array, is a flat `T*`
     // whose subscripts step over the array's rows.
     if(parser_vla_pointer_dims && !name_token && is_parameter){
@@ -4493,10 +4793,10 @@ static void parser_check_gotos(const char* function){
 
 // After a function's `(`: an identifier list (`f(a, b)`), the
 // parameters of an old-style definition. A type name here is a keyword
-// (typedefs are substituted), so an identifier followed by `,` or `)`
-// is a parameter name.
+// or a visible typedef name, so another identifier followed
+// by `,` or `)` is a parameter name.
 static bool parser_next_is_identifier_list(void){
-    if(!token_is_identifier(token_peek_next())){
+    if(!token_is_identifier(token_peek_next()) || parser_typedef_find(token_peek_next()->sval)){
         return false;
     }
     vector_save(current_process->token_vec);
@@ -4630,9 +4930,19 @@ static void parse_function(struct datatype* ret_type, struct token* name_token, 
         expect_sym(')');
     }
     if(parser_function_resume >= 0){
-        // After the declarator the parameters were taken from.
-        vector_set_peek_pointer(current_process->token_vec, parser_function_resume);
+        // After the declarator the parameters were taken from, which
+        // moved by the typedef names expanded in them.
+        vector_set_peek_pointer(current_process->token_vec,
+            parser_function_resume + parser_spliced - parser_function_resume_spliced);
         parser_function_resume = -1;
+    }
+    // the parameters hide typedef names and enumerators in
+    // the body too, not only in the list.
+    for(int i = 0; i < vector_count(arguments_vector); i++){
+        struct node* argument = *(struct node**)vector_at(arguments_vector, i);
+        if(argument->type == NODE_TYPE_VARIABLE){
+            parser_enumerator_hide(argument->var.name);
+        }
     }
 
     function_node->func.args.vector = arguments_vector;
@@ -4715,11 +5025,79 @@ static void parse_asm(void){
     node_create(&(struct node){ .type = NODE_TYPE_ASM, .sval = buffer_ptr(text) });
 }
 
+// Numbers the hidden locals holding a typedef's array sizes.
+static int parser_typedef_size_number;
+
+// `typedef T name;`, as the preprocessor leaves it, declares
+// name in the scope being parsed: a parser_enumerator holding the tokens
+// of T (parser_typedef_tokens). In a function, an array size that is not
+// constant is evaluated here (C11 6.7.8p3): it goes into a hidden local
+// declared before this statement and set after it, and the type keeps
+// the local's name, `int [__typedef_size_0]`. Returns whether it did,
+// so the typedef needs a statement for those to attach to.
+static bool parse_typedef(void){
+    expect_keyword("typedef");
+    struct vector* tokens = vector_create(sizeof(struct token));
+    bool sized = false;
+    int depth = 0;
+    while(true){
+        struct token* token = token_peek_next();
+        if(!token){
+            compiler_error(current_process, "Expected ';' to end the typedef but found the end of the file\n");
+        }
+        if(depth == 0 && token_is_symbol(token, ';')){
+            break;
+        }
+        depth += token_is_operator(token, "(") - token_is_symbol(token, ')');
+        vector_push(tokens, token);
+        token_next();
+        if(depth != 0 || !parser_current_function || !token_is_operator(token, "[") || token_next_is_symbol(']')){
+            continue;
+        }
+        int start = current_process->token_vec->pindex;
+        parse_expressionable_root(history_begin(0));
+        struct node* size = node_pop();
+        struct constant value;
+        if(constant_fold(current_process, size, &value)){
+            for(int i = start; i < current_process->token_vec->pindex; i++){
+                vector_push(tokens, vector_at(current_process->token_vec, i));
+            }
+            continue;
+        }
+        struct token* name = parser_hidden_name("__typedef_size_%i", parser_typedef_size_number++);
+        struct datatype size_type = parser_vla_size_type();
+        parser_hidden_local(name, &size_type);
+        parser_vla_assign_later(name->sval, parser_vla_as_size(size));
+        vector_push(tokens, name);
+        sized = true;
+    }
+    expect_sym(';');
+    int at = parser_typedef_name_index(tokens);
+    if(at < 0 || vector_count(tokens) < 2){
+        compiler_error(current_process, "The typedef name has to be a valid identifier\n");
+    }
+    const char* name = ((struct token*)vector_at(tokens, at))->sval;
+    vector_pop_at(tokens, at);
+    struct parser_enumerator e = { .name = name, .depth = parser_scope_depth(), .tokens = parser_typedef_tokens(tokens) };
+    vector_push(parser_enumerators, &e);
+    vector_free(tokens);
+    return sized;
+}
+
 static void parse_statement(struct history* history){
     compiler_check_stack(current_process);
     if(parser_next_is_asm()){
         parse_asm();
         return;
+    }
+    // A typedef is a declaration, not a statement: the statement after
+    // it is parsed in its place, unless it left stores to attach or the
+    // block ends.
+    while(token_is_keyword(token_peek_next(), "typedef")){
+        if(parse_typedef() || !token_peek_next() || token_next_is_symbol('}')){
+            node_create(&(struct node){ .type = NODE_TYPE_BLANK });
+            return;
+        }
     }
     if(!token_peek_next()){
         compiler_error(current_process, "Expected a statement or '}' but found the end of the file\n");
@@ -4757,6 +5135,8 @@ static void parse_statement(struct history* history){
             return;
         }
     }
+    // `T x;` with T a visible typedef name is a declaration.
+    parser_typedef_expand();
     // `{ ... }` is a compound statement with its own scope.
     if(token_is_symbol(token_peek_next(), '{')){
         size_t var_size = 0;
@@ -5365,6 +5745,7 @@ static void parse_variable_function_or_struct_union(struct history* history){
     // inside the declarator.
     if(parser_function_declarator_params >= 0){
         parser_function_resume = current_process->token_vec->pindex;
+        parser_function_resume_spliced = parser_spliced;
         vector_set_peek_pointer(current_process->token_vec, parser_function_declarator_params);
         parser_function_declarator_params = -1;
         parse_function(&dtype, name_token, history);
@@ -5386,6 +5767,7 @@ static void parse_variable_function_or_struct_union(struct history* history){
     base_dtype.pointer_depth = 0;
     base_dtype.pointer_const = 0;
     struct datatype first_dtype = dtype;
+    struct vector* type_vla_dims = parser_type_vla_dims;
     parse_variable(&first_dtype, name_token, history);
     parser_merge_tentative_definition();
 
@@ -5410,6 +5792,7 @@ static void parse_variable_function_or_struct_union(struct history* history){
             if(!name_token || name_token->type != TOKEN_TYPE_IDENTIFIER){
                 compiler_error(current_process, "Expecting a variable name after ',' in the declaration\n");
             }
+            parser_type_vla_dims = type_vla_dims;
             parse_variable(&peer_dtype, name_token, history);
             var_node = node_pop();
             if(var_node->type != NODE_TYPE_BLANK){
@@ -5627,6 +6010,7 @@ static void parse_for_stmt(struct history* history){
     // `for (int i = 0; ...)`: the declaration is scoped to the loop. It
     // gets a scope of its own around the loop and its bytes in the
     // function's frame; it was rejected before.
+    parser_typedef_expand();
     struct token* first = token_peek_next();
     bool declares = first && first->type == TOKEN_TYPE_KEYWORD
         && (keyword_is_datatype(first->sval) || is_keyword_variable_modifier(first->sval));
@@ -5854,6 +6238,7 @@ static void parse_sizeof(struct history* history){
     struct node* operand = 0;
     if(token_next_is_operator("(")){
         expect_op("(");
+        parser_typedef_expand();
         after_paren = token_peek_next();
     }
     if(after_paren && after_paren->type == TOKEN_TYPE_KEYWORD
@@ -5861,6 +6246,9 @@ static void parse_sizeof(struct history* history){
         parser_sizeof_type_brackets = true;
         parse_datatype(&dtype);
         parser_sizeof_type_brackets = false;
+        // `sizeof(int (*)(int))`, also through a typedef name.
+        struct token* no_name = 0;
+        parse_function_pointer_declarator(&dtype, &no_name);
         // `sizeof(int[4])`, and in a function `sizeof(int[n][m])`
         //, worked out when it runs.
         if(token_next_is_operator("[")){
@@ -6103,6 +6491,11 @@ static void parse_keyword_for_global(void){
 }
 
 static int parse_next(void){
+    // a file scope typedef declares its name and leaves no node.
+    while(token_is_keyword(token_peek_next(), "typedef")){
+        parse_typedef();
+    }
+    parser_typedef_expand();
     struct token* token = token_peek_next();
     if(!token){
         return -1;
@@ -6173,6 +6566,8 @@ int parse(struct compile_process* process){
         parser_enumerator_push(orders[i], &order, false);
     }
     parser_thread_locals = vector_create(sizeof(struct parser_thread_local));
+    parser_type_vla_dims = 0;
+    parser_typedef_reserve();
 
     struct node* node = 0;
     vector_set_peek_pointer(process->token_vec, 0);

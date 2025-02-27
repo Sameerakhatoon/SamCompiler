@@ -1476,147 +1476,65 @@ void preprocessor_handle_typedef_token(struct compile_process *compiler, struct 
     struct typedef_type td;
     preprocessor_handle_typedef_body(compiler, token_vec, &td, src_vec, overflow_use_token_vec);
 
-    // `typedef int (*fn)(int);`: the name is the identifier after the
-    // `*`s in the first parentheses. It comes out, and fn stands for
-    // the rest, `int (*)(int)`; the parser takes a name after that
-    // abstract declarator (parse_function_pointer_declarator).
-    // The same with a struct return type and no body,
-    // `typedef struct r* (*fn)(int);`, which compiler.h itself uses.
-    const char *function_pointer_name = NULL;
-    if (td.type == TYPEDEF_TYPE_STANDARD
-        || (td.type == TYPEDEF_TYPE_STRUCTURE_TYPEDEF && td.structure.no_body))
+    // a typedef is a declaration with a scope, which the parser
+    // keeps (parse_typedef): it comes out as `typedef T name;` and the
+    // name is no macro here. Only a struct, union or enum body comes out
+    // first, once, as `struct S { ... };` (under an `__anonymous_N` tag
+    // when it has none), and the typedef then names `struct S` plus what
+    // followed the body: `typedef struct S name;`, `... *name_ptr;`.
+    if (td.type == TYPEDEF_TYPE_STRUCTURE_TYPEDEF && !td.structure.no_body)
     {
-        int count = vector_count(token_vec);
-        for (int i = 0; i < count; i++)
-        {
-            if (!token_is_operator(vector_at(token_vec, i), "("))
-            {
-                continue;
-            }
-            int j = i + 1;
-            while (j < count && token_is_operator(vector_at(token_vec, j), "*"))
-            {
-                j++;
-            }
-            struct token *candidate = j < count ? vector_at(token_vec, j) : NULL;
-            if (j > i + 1 && candidate && candidate->type == TOKEN_TYPE_IDENTIFIER)
-            {
-                function_pointer_name = candidate->sval;
-                vector_pop_at(token_vec, j);
-            }
-            break;
-        }
-    }
-
-    // `typedef long buf[8];`: the name is the identifier before the
-    // trailing `[...]` groups. It comes out and buf stands for `long [8]`;
-    // the parser reads brackets right after a type as part of the type
-    // (parse_datatype), so `buf b[2];` is `long [8] b[2]`, b an array
-    // of 2 arrays of 8 longs.
-    const char* array_name = NULL;
-    if (!function_pointer_name)
-    {
-        int i = vector_count(token_vec) - 1;
-        while (i >= 0 && token_is_symbol(vector_at(token_vec, i), ']'))
-        {
-            int level = 0;
-            for (; i >= 0; i--)
-            {
-                struct token* t = vector_at(token_vec, i);
-                if (token_is_symbol(t, ']'))
-                {
-                    level++;
-                }
-                else if (token_is_operator(t, "["))
-                {
-                    level--;
-                    if (level == 0)
-                    {
-                        break;
-                    }
-                }
-            }
-            i--;
-        }
-        struct token* candidate = i >= 0 && i < vector_count(token_vec) - 1 ? vector_at(token_vec, i) : NULL;
-        if (candidate && candidate->type == TOKEN_TYPE_IDENTIFIER)
-        {
-            array_name = candidate->sval;
-            vector_pop_at(token_vec, i);
-        }
-    }
-
-    if (function_pointer_name)
-    {
-        td.definiton_name = function_pointer_name;
-    }
-    else if (array_name)
-    {
-        td.definiton_name = array_name;
-    }
-    else
-    {
-        struct token *name_token = vector_back_or_null(token_vec);
-        if (!name_token)
-        {
-            compiler_error(compiler, "We expected a name token for your typedef");
-        }
-
-        if (name_token->type != TOKEN_TYPE_IDENTIFIER)
-        {
-            compiler_error(compiler, "The typedef name has to be a valid identifier");
-        }
-
-        td.definiton_name = name_token->sval;
-
-        // Pop off the name token
-        vector_pop(token_vec);
-    }
-
-    // THis is a typedef structure we need to push the structure body
-    // to the output so it can be found. The name then stands for
-    // `struct S` plus whatever followed the body, e.g. a `*`.
-    if (td.type == TYPEDEF_TYPE_STRUCTURE_TYPEDEF)
-    {
-        // The suffix starts after the body's closing }, or after
-        // `struct S` when there is no body.
+        // The suffix starts after the body's closing }.
         int suffix_start = 2;
-        if (!td.structure.no_body)
+        for (int i = vector_count(token_vec) - 1; i >= 0; i--)
         {
-            for (int i = vector_count(token_vec) - 1; i >= 0; i--)
+            if (token_is_symbol(vector_at(token_vec, i), '}'))
             {
-                if (token_is_symbol(vector_at(token_vec, i), '}'))
-                {
-                    suffix_start = i + 1;
-                    break;
-                }
+                suffix_start = i + 1;
+                break;
             }
         }
 
         struct vector *value_vec = vector_create(sizeof(struct token));
         preprocessor_token_vec_push_keyword_and_identifier(value_vec, td.structure.keyword, td.structure.sname);
+        for (int i = 0; i < 2; i++)
+        {
+            struct token *made = vector_at(value_vec, i);
+            made->whitespace = true;
+            made->pos = ((struct token *)vector_at(token_vec, 0))->pos;
+        }
         for (int i = suffix_start; i < vector_count(token_vec); i++)
         {
             vector_push(value_vec, vector_at(token_vec, i));
         }
 
-        if (!td.structure.no_body)
+        while (vector_count(token_vec) > suffix_start)
         {
-            while (vector_count(token_vec) > suffix_start)
-            {
-                vector_pop(token_vec);
-            }
-            // The body was read without expanding anything: its macros
-            // (`unsigned char e_ident[EI_NIDENT];` in <elf.h>) and the
-            // typedef names of its members expand on the way out.
-            preprocessor_token_vec_push_src_resolve_definitions(compiler, token_vec, compiler->token_vec);
-            preprocessor_token_push_semicolon(compiler);
+            vector_pop(token_vec);
         }
+        // The body was read without expanding anything: its macros
+        // (`unsigned char e_ident[EI_NIDENT];` in <elf.h>) expand on the
+        // way out.
+        preprocessor_token_vec_push_src_resolve_definitions(compiler, token_vec, compiler->token_vec);
+        preprocessor_token_push_semicolon(compiler);
         token_vec = value_vec;
     }
 
-    struct preprocessor *preprocessor = compiler->preprocessor;
-    preprocessor_definition_create_typedef(td.definiton_name, token_vec, preprocessor);
+    if (!vector_count(token_vec))
+    {
+        compiler_error(compiler, "We expected a name token for your typedef");
+    }
+    struct token typedef_token = {};
+    typedef_token.type = TOKEN_TYPE_KEYWORD;
+    typedef_token.sval = "typedef";
+    typedef_token.whitespace = true;
+    typedef_token.pos = ((struct token *)vector_at(token_vec, 0))->pos;
+    vector_push(compiler->token_vec, &typedef_token);
+    for (int i = 0; i < vector_count(token_vec); i++)
+    {
+        vector_push(compiler->token_vec, vector_at(token_vec, i));
+    }
+    preprocessor_token_push_semicolon(compiler);
 }
 void preprocessor_token_vec_push_src_resolve_definition(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec, struct token *token)
 {

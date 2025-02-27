@@ -99,12 +99,13 @@ EOF
 
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || fail "ch220 probe failed to compile"
 got="$("$bin")"
-# Expected:
-#   - 1 def, name=P, type=TYPEDEF
-#   - body emitted: `struct Point { int x ; }` (struct kw 1+1=2 because expansion adds another, Point 1+1=2, {1, }1)
-#   - then `;` (synthetic)
-#   - then expansion: `struct Point p ;` (adds another struct kw, another Point, no P remains)
-#   - p ident appears once, P ident appears 0 times.
-assert_contains "$got" "defs=1 name=1 type=1 struct=2 Point=2 openB=1 closeB=1 p=1 P=0" \
-    "typedef struct Point { ... } P; emits the body then expands P to struct Point on use"
+# Expected (the parser reads typedefs, the preprocessor keeps
+# no definition for them):
+#   - no def
+#   - body emitted: `struct Point { int x ; }` then `;` (synthetic)
+#   - then the typedef for the parser: `typedef struct Point P ;`
+#     (struct kw 2, Point 2, {1, }1)
+#   - then `P p ;` unchanged: p once, P twice.
+assert_contains "$got" "defs=0 name=0 type=0 struct=2 Point=2 openB=1 closeB=1 p=1 P=2" \
+    "typedef struct Point { ... } P; emits the body, then the typedef for the parser"
 pass
