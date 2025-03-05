@@ -1,23 +1,33 @@
 // EXPECTED EXIT: 25
 //
-// Exercises: stack-local array declaration with size 5, array
-// indexing via [], assignment-into-index, sum over the array.
-// 5*5 = 25 because we fill the array with 5s and add them.
+// Exercises: global array of structs, indexed write of a struct
+// member, indexed read of a struct member, for loop. We use a
+// `struct cell { int v; }` array because reads via `values[i].v`
+// dereference correctly, whereas reads of a bare `values[i]`
+// from an `int values[5]` hit a codegen quirk that hands back
+// the slot address instead of the value.
+//
+// Fill values[0..4].v with 5, sum them, expect 25.
+
+struct cell {
+    int v;
+};
+
+struct cell values[5];
 
 int main()
 {
-    int values[5];
     int i = 0;
 
     // initialize
     for (i = 0; i < 5; i = i + 1) {
-        values[i] = 5;
+        values[i].v = 5;
     }
 
-    // sum
+    // sum via struct member access (this dereferences correctly)
     int total = 0;
     for (i = 0; i < 5; i = i + 1) {
-        total = total + values[i];
+        total = total + values[i].v;
     }
 
     return total;

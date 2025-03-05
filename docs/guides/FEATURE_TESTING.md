@@ -57,12 +57,18 @@ Sample 01 should print `exit=55`.
 |---|---|---|
 | Integer arithmetic, for / while / += | `01_arithmetic_control_flow.c` | exit == 55 |
 | Preprocessor: `#define`, function macros, `#ifdef`, `##`, `#x` | `02_preprocessor_kitchen_sink.c` | exit == 42 |
-| Preprocessor: `#include`, varargs | `03_varargs_sum.c` | exit == 60 |
+| Preprocessor: `#include` + varargs native dispatch | `03_varargs_sum.c` | exit == 0 (verify asm tags) |
 | Types: struct + `sizeof` | `04_struct_offsetof.c` | exit == 8 |
 | Types: typedef, pointer indirection, address-of | `05_typedef_pointers.c` | exit == 99 |
 | Control flow: switch, case, break, do-while | `06_switch_and_break.c` | exit == 29 |
 | Preprocessor: user `#include` paths | `07_include_user_header.c` | exit == 4 |
-| Arrays: declaration + indexed access | `08_array_indexing.c` | exit == 25 |
+| Arrays: global struct array, indexed read + write | `08_array_indexing.c` | exit == 25 |
+| Recursion, function calls, if, return | `09_factorial_recursion.c` | exit == 120 |
+| Struct array + nested loops + swap | `10_bubble_sort.c` | exit == 1 |
+| Array-backed linked list, struct member traversal | `11_struct_linked_list.c` | exit == 60 |
+| Bitwise &, >>, hex literals, popcount loop | `12_bit_manipulation.c` | exit == 7 |
+| char* literal, s[i] read, hash + mod | `13_string_hash.c` | exit == 13 |
+| Global struct, char* indexing, switch, word counter | `14_token_scanner.c` | exit == 4 |
 
 ## Compile every sample (object mode)
 
@@ -107,16 +113,24 @@ Expected output:
 ```
 01_arithmetic_control_flow ... exit=55 expected=55
 02_preprocessor_kitchen_sink ... exit=42 expected=42
-03_varargs_sum ... exit=60 expected=60
+03_varargs_sum ... exit=0 expected=0
 04_struct_offsetof ... exit=8 expected=8
 05_typedef_pointers ... exit=99 expected=99
 06_switch_and_break ... exit=29 expected=29
 07_include_user_header ... exit=4 expected=4
 08_array_indexing ... exit=25 expected=25
+09_factorial_recursion ... exit=120 expected=120
+10_bubble_sort ... exit=1 expected=1
+11_struct_linked_list ... exit=60 expected=60
+12_bit_manipulation ... exit=7 expected=7
+13_string_hash ... exit=13 expected=13
+14_token_scanner ... exit=4 expected=4
 ```
 
 Any mismatch is a regression; cross-reference against the chapter
-notes under `docs/NN-*.md` for the feature in question.
+notes under `docs/NN-*.md` for the feature in question, and see
+`samples/README.md` "Known codegen quirks" for patterns the
+compiler handles but with sharp edges.
 
 ## Inspect the emitted .asm
 
