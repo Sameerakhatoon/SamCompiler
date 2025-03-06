@@ -184,6 +184,10 @@ that's worth a new sample; it doubles as documentation.
 
 ## See also
 
+- `USING_THE_COMPILER.md` for how `./main` works internally
+  (the lex / preproc / validate / parse / codegen pipeline,
+  the post-codegen `nasm` + `gcc -m32` shell-out, and how to
+  drive the CLI against your own programs)
 - `RUNNING_TESTS.md` for the chapter test suite
 - `DEBUGGING.md` for failure-shape patterns we've already
   encountered and resolved
