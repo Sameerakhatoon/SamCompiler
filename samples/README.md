@@ -44,18 +44,36 @@ asm and the binary won't appear.
 
 ## Run them all
 
+A runner ships in this directory:
+
 ```
-for src in samples/*.c; do
-    base=$(basename "$src" .c)
-    bin="samples/${base}.bin"
-    expected=$(grep -oP 'EXPECTED EXIT: \K[0-9]+' "$src" | head -1)
-    ./main "$src" "$bin" >/dev/null 2>&1
-    if [ -x "$bin" ]; then
-        "$bin"
-        echo "$base ... exit=$? expected=$expected"
-    fi
-done
-rm -f samples/*.bin samples/*.bin.o samples/*.asm samples/*.o
+bash samples/run_all.sh           # from repo root
+bash run_all.sh                   # from inside samples/
+```
+
+It rebuilds `./main` if missing, compiles each sample, runs the
+produced binary, and tabulates exit-code vs expected. The final
+line is `passed: N   failed: M`; non-zero `failed` -> exit code 1.
+
+Expected output on a clean tree:
+
+```
+01_arithmetic_control_flow       exit=55  expected=55  OK
+02_preprocessor_kitchen_sink     exit=42  expected=42  OK
+03_varargs_sum                   exit=0   expected=0   OK
+04_struct_offsetof               exit=8   expected=8   OK
+05_typedef_pointers              exit=99  expected=99  OK
+06_switch_and_break              exit=29  expected=29  OK
+07_include_user_header           exit=4   expected=4   OK
+08_array_indexing                exit=25  expected=25  OK
+09_factorial_recursion           exit=120 expected=120 OK
+10_bubble_sort                   exit=1   expected=1   OK
+11_struct_linked_list            exit=60  expected=60  OK
+12_bit_manipulation              exit=7   expected=7   OK
+13_string_hash                   exit=13  expected=13  OK
+14_token_scanner                 exit=4   expected=4   OK
+
+passed: 14   failed: 0
 ```
 
 ## What ends up in the binary
