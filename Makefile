@@ -5,7 +5,8 @@ OBJECTS  = ./build/compiler.o ./build/cprocess.o ./build/validator.o \
            ./build/static-include.o ./build/static-includes/stdarg.o ./build/static-includes/stddef.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o
 INCLUDES = -I./
-CFLAGS   = -g -Wall -Wno-unused-variable -Wno-unused-function
+CFLAGS   = -g -Wall -Wno-unused-variable -Wno-unused-function \
+           -Wno-parentheses -Wno-return-type -Wno-sizeof-pointer-memaccess
 
 all: ./main
 
