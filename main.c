@@ -209,6 +209,7 @@ static void main_usage(FILE* out){
         "  -fPIC, -fpic     code for a shared object: exported symbols through the GOT\n"
         "  -shared          link a shared object (implies -fPIC); a .so input links\n"
         "                   the program as a dynamic PIE\n"
+        "  -g               debug information: DWARF lines, frames and variables\n"
         "  -target=T        x86 (default), x86_64, aarch64, riscv64, samos-x86_64,\n"
         "                   samos-aarch64 or samos-riscv64\n"
         "  -sysroot=DIR     the SamOS sysroot of a samos target (or SAMOS_SYSROOT)\n"
@@ -899,6 +900,12 @@ int main(int argc, char** argv){
         } else if(S_EQ(arg, "-shared")){
             main_shared = true;
             main_compile_flags |= COMPILE_PROCESS_PIC;
+        } else if(S_EQ(arg, "-g") || S_EQ(arg, "-ggdb")){
+            // the DWARF is in the asm itself, so
+            // the assembler and linker commands stay as they are.
+            main_compile_flags |= COMPILE_PROCESS_DEBUG;
+        } else if(S_EQ(arg, "-g0")){
+            main_compile_flags &= ~COMPILE_PROCESS_DEBUG;
         } else {
             main_error("unknown option %s (see %s --help)", arg, main_prog);
             return 1;

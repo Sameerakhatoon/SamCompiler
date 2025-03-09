@@ -1102,9 +1102,11 @@ static void codegen_generate_scope_variable(struct node* node){
     if(node->var.type.flags & DATATYPE_FLAG_IS_STATIC){
         struct node* copy = exp64_static_local(codegen_new_scope_entity(node, 0, 0), node);
         vector_push(codegen_static_locals, &copy);
+        debug_static_local(current_process, node, copy->var.name);
         return;
     }
     codegen_new_scope_entity(node, node->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
+    debug_local(current_process, node);
     if(node->var.val){
         exp64_initialize_local(node);
     }
@@ -1368,6 +1370,8 @@ static int codegen_home_area_size(void){
 // area the prologue built (`ret imm16` pops the return address, then
 // adds imm16 to rsp).
 static void codegen_generate_epilogue_ret(void){
+    debug_cfi_def_cfa(current_process, 7, codegen_home_area_size() + 8);
+    debug_cfi_restore(current_process, 6);
     asm_push("ret %i", codegen_home_area_size());
 }
 
@@ -1375,9 +1379,11 @@ static void codegen_generate_statement_return(struct node* node){
     if(node->stmt.return_stmt.exp){
         codegen_generate_statement_return_exp(node);
     }
+    debug_cfi_remember_state(current_process);
     asm_push("mov rsp, rbp");
     asm_push("pop rbp");
     codegen_generate_epilogue_ret();
+    debug_cfi_restore_state(current_process);
 }
 
 static void codegen_generate_statement(struct node* node, struct history* history){
@@ -1387,6 +1393,7 @@ static void codegen_generate_statement(struct node* node, struct history* histor
     if(node->pos.line){
         current_process->pos = node->pos;
     }
+    debug_statement(current_process, node);
     switch(node->type){
         case NODE_TYPE_EXPRESSION:
         case NODE_TYPE_EXPRESSION_PARENTHESES:
@@ -1466,7 +1473,9 @@ static void codegen_generate_stack_scope(struct vector* statements, size_t scope
 }
 
 static void codegen_generate_body(struct node* node, struct history* history){
+    debug_block_begin(current_process);
     codegen_generate_stack_scope(node->body.statements, node->body.size, history);
+    debug_block_end(current_process);
 }
 
 // Prologue. The six argument registers are pushed into a home area
@@ -1492,14 +1501,27 @@ static void codegen_generate_function_with_body(struct node* node){
     }
     asm_push("; %s function", node->func.name);
     asm_push("%s:", codegen_symbol(node->func.name));
+    debug_function_begin(current_process, node);
 
+    // the CFA is rsp at the call. The return address goes
+    // to r11 and then below the home area; rbp holds the CFA less the
+    // home area, the return address and the saved rbp.
+    int cfa = codegen_home_area_size() + 16;
     asm_push("pop r11");
+    debug_cfi_def_cfa_offset(current_process, 0);
+    debug_cfi_register(current_process, 16, 11);
     for(int i = current_process->target->max_reg_args - 1; i >= 0; i--){
         asm_push("push %s", codegen_arg_registers[i]);
+        debug_cfi_def_cfa_offset(current_process, DATA_SIZE_DDWORD * (current_process->target->max_reg_args - i));
     }
     asm_push("push r11");
+    debug_cfi_def_cfa_offset(current_process, cfa - 8);
+    debug_cfi_offset(current_process, 16, -cfa + 8);
     asm_push_rbp();
+    debug_cfi_def_cfa_offset(current_process, cfa);
+    debug_cfi_offset(current_process, 6, -cfa);
     asm_push("mov rbp, rsp");
+    debug_cfi_def_cfa_register(current_process, 6);
     int locals = C_ALIGN(function_node_stack_size(node));
     codegen_stack_sub(locals);
     // Float and double parameters arrive in xmm0-7, which go to a home
@@ -1522,6 +1544,7 @@ static void codegen_generate_function_with_body(struct node* node){
     asm_pop_rbp();
     stackframe_assert_empty(current_function);
     codegen_generate_epilogue_ret();
+    debug_function_end(current_process);
 }
 
 static void codegen_generate_function(struct node* node){
@@ -1776,6 +1799,7 @@ static void codegen_generate_thread_local(struct node* node){
 }
 
 static void codegen_generate_global_variable(struct node* node){
+    debug_global(current_process, node);
     asm_push("; %s %s", node->var.type.type_str, node->var.name);
     if((node->var.type.flags & DATATYPE_FLAG_IS_THREAD_LOCAL) && !(node->var.type.flags & DATATYPE_FLAG_IS_EXTERN)){
         codegen_generate_thread_local(node);
@@ -1986,6 +2010,7 @@ int codegen_x86_64(struct compile_process* process){
     codegen_finish_scope();
 
     codegen_generate_rod();
+    debug_end(current_process);
     // The stack is not executable (the linker warns otherwise).
     asm_push("section .note.GNU-stack noalloc noexec nowrite progbits");
     return CODEGEN_ALL_OK;

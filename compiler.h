@@ -1262,6 +1262,8 @@ enum {
     // symbol this file defines may be interposed, so it is reached
     // through the GOT like an undefined one.
     COMPILE_PROCESS_PIC              = 0b00001000,
+    // -g: line tables, call frame information and variables as DWARF.
+    COMPILE_PROCESS_DEBUG            = 0b00100000,
 };
 
 // ch108: entry / exit "label" book-keeping for break / continue.
@@ -1379,6 +1381,35 @@ int                    codegen_x86_64(struct compile_process* process);
 int                    codegen_aarch64(struct compile_process* process);
 int                    codegen_riscv64(struct compile_process* process);
 struct code_generator* codegenerator_new(struct compile_process* process);
+
+// debuginfo.c, the DWARF of -g. The backends
+// call these at their statements, blocks, prologues and epilogues;
+// each does nothing without COMPILE_PROCESS_DEBUG, so the output
+// without -g does not change. On the GNU as targets the line table and
+// the frame information come from .loc and .cfi_* directives; on the
+// NASM ones (x86, x86_64) debuginfo.c writes .debug_line and
+// .debug_frame itself. .debug_info (functions, blocks, variables and
+// their types) is written by hand on all four.
+void debug_end(struct compile_process* process);
+void debug_statement(struct compile_process* process, struct node* statement);
+void debug_function_begin(struct compile_process* process, struct node* function);
+void debug_function_end(struct compile_process* process);
+void debug_block_begin(struct compile_process* process);
+void debug_block_end(struct compile_process* process);
+void debug_parameter(struct compile_process* process, struct node* var, bool by_reference);
+void debug_local(struct compile_process* process, struct node* var);
+void debug_static_local(struct compile_process* process, struct node* var, const char* symbol);
+void debug_global(struct compile_process* process, struct node* var);
+// Call frame information, by DWARF register number; `offset` is from
+// the CFA.
+void debug_cfi_def_cfa(struct compile_process* process, int reg, int offset);
+void debug_cfi_def_cfa_offset(struct compile_process* process, int offset);
+void debug_cfi_def_cfa_register(struct compile_process* process, int reg);
+void debug_cfi_offset(struct compile_process* process, int reg, int offset);
+void debug_cfi_register(struct compile_process* process, int reg, int in_reg);
+void debug_cfi_restore(struct compile_process* process, int reg);
+void debug_cfi_remember_state(struct compile_process* process);
+void debug_cfi_restore_state(struct compile_process* process);
 
 // exp64.c, the expression generator of the 64-bit backends.
 // The backend supplies the machine operations below. R0 (register 0)

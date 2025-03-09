@@ -2208,6 +2208,7 @@ void exp64_parameters(struct node* function, int register_home, int stack_home, 
                                              : stack_home + DATA_SIZE_DDWORD * a->stack;
         }
         resolver_default_new_scope_entity(current_process->resolver, param, param->var.aoffset, flags);
+        debug_parameter(current_process, param, a->kind == EXP64_ARG_REF);
     }
     exp64_va_scratch = assembly;
     // a variadic function on aarch64 that reads a long double

@@ -475,6 +475,7 @@ static void codegen_generate_function_arguments(struct vector* argument_vector){
     struct node* current = vector_peek_ptr(argument_vector);
     while(current){
         codegen_new_scope_entity(current, current->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
+        debug_parameter(current_process, current, false);
         current = vector_peek_ptr(argument_vector);
     }
 }
@@ -679,6 +680,7 @@ void codegen_entity_address(struct generator* generator, struct resolver_entity*
 // onto the stack and store it at the variable's address.
 static void codegen_generate_scope_variable(struct node* node){
     struct resolver_entity* entity = codegen_new_scope_entity(node, node->var.aoffset, RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
+    debug_local(current_process, node);
     if(node->var.val && !datatype_is_struct_or_union_non_pointer(&entity->dtype)
        && (x87_wanted(node->var.val) || (current_process->uses_floating && x87_is_floating(&entity->dtype)))){
         x87_initialize(node->var.val, &entity->dtype, codegen_entity_private(entity)->address);
@@ -3793,6 +3795,8 @@ static void codegen_generate_do_while_stmt(struct node* node){
 // A function that returns a struct or union removes the hidden result
 // pointer itself, `ret 4`, as gcc does on i386.
 static void codegen_generate_ret(struct node* function){
+    debug_cfi_def_cfa(current_process, 4, 4);
+    debug_cfi_restore(current_process, 5);
     if(datatype_is_struct_or_union_non_pointer(&function->func.rtype)){
         asm_push("ret 4");
     } else {
@@ -3814,9 +3818,11 @@ static void codegen_generate_statement_return(struct node* node){
     asm_push("mov ebx, [ebp-%i]", (int)locals_size + DATA_SIZE_DWORD);
     asm_push("mov esi, [ebp-%i]", (int)locals_size + 2 * DATA_SIZE_DWORD);
     asm_push("mov edi, [ebp-%i]", (int)locals_size + 3 * DATA_SIZE_DWORD);
+    debug_cfi_remember_state(current_process);
     asm_push("mov esp, ebp");
     asm_pop_ebp_no_stack_frame_restore();
     codegen_generate_ret(node->binded.function);
+    debug_cfi_restore_state(current_process);
 }
 
 static void codegen_generate_statement(struct node* node, struct history* history){
@@ -3826,6 +3832,7 @@ static void codegen_generate_statement(struct node* node, struct history* histor
     if(node->pos.line){
         current_process->pos = node->pos;
     }
+    debug_statement(current_process, node);
     bool is_expression = node->type == NODE_TYPE_EXPRESSION || node->type == NODE_TYPE_UNARY
         || node->type == NODE_TYPE_CAST || node->type == NODE_TYPE_EXPRESSION_PARENTHESES;
     if(is_expression && x87_wanted(node)){
@@ -3941,7 +3948,9 @@ static void codegen_generate_stack_scope(struct vector* statements, size_t scope
 
 // ch137 stub -> ch138 real impl.
 static void codegen_generate_body(struct node* node, struct history* history){
+    debug_block_begin(current_process);
     codegen_generate_stack_scope(node->body.statements, node->body.size, history);
+    debug_block_end(current_process);
 }
 
 static void codegen_generate_function_with_body(struct node* node){
@@ -3953,9 +3962,14 @@ static void codegen_generate_function_with_body(struct node* node){
     }
     asm_push("; %s function", node->func.name);
     asm_push("%s:", codegen_symbol(node->func.name));
+    debug_function_begin(current_process, node);
 
+    // the CFA is esp at the call, ebp + 8 from here on.
     asm_push_ebp();
+    debug_cfi_def_cfa_offset(current_process, 8);
+    debug_cfi_offset(current_process, 5, -8);
     asm_push("mov ebp, esp");
+    debug_cfi_def_cfa_register(current_process, 5);
     codegen_stack_sub(C_ALIGN(function_node_stack_size(node)));
     // cdecl makes ebx callee-saved, and every expression here uses it.
     // It goes in the slot below the locals.
@@ -3982,6 +3996,7 @@ static void codegen_generate_function_with_body(struct node* node){
     asm_pop_ebp();
     stackframe_assert_empty(current_function);
     codegen_generate_ret(node);
+    debug_function_end(current_process);
 }
 
 static void codegen_generate_function(struct node* node){
@@ -4311,6 +4326,7 @@ static void codegen_generate_thread_local(struct node* node){
 }
 
 static void codegen_generate_global_variable(struct node* node){
+    debug_global(current_process, node);
     asm_push("; %s %s", node->var.type.type_str, node->var.name);
     if((node->var.type.flags & DATATYPE_FLAG_IS_THREAD_LOCAL) && !(node->var.type.flags & DATATYPE_FLAG_IS_EXTERN)){
         codegen_generate_thread_local(node);
@@ -5007,6 +5023,7 @@ int codegen_x86(struct compile_process* process){
     // slots etc.) before .rodata.
     codegen_generate_data_section_add_ons();
     codegen_generate_rod();
+    debug_end(current_process);
     // The stack is not executable (the linker warns otherwise).
     asm_push("section .note.GNU-stack noalloc noexec nowrite progbits");
     return CODEGEN_ALL_OK;

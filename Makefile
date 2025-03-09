@@ -5,6 +5,8 @@ OBJECTS  = ./build/compiler.o ./build/cprocess.o ./build/validator.o \
            ./build/static-include.o ./build/static-includes/stdarg.o ./build/static-includes/stddef.o \
            ./build/helpers/buffer.o ./build/helpers/vector.o ./build/helpers/arena.o \
            ./build/os.o
+# -g.
+OBJECTS += ./build/debuginfo.o
 INCLUDES = -I./
 # -Wall -Wextra with nothing hidden except unused parameters: callbacks
 # such as the expressionable and static-include tables must take the
@@ -102,6 +104,9 @@ all: ./main
 
 ./build/atomic.o: ./atomic.c ./compiler.h
 	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./atomic.c -o ./build/atomic.o
+
+./build/debuginfo.o: ./debuginfo.c ./compiler.h
+	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./debuginfo.c -o ./build/debuginfo.o
 
 ./build/helper.o: ./helper.c ./compiler.h ./helpers/vector.h
 	gcc ${INCLUDES} ${CFLAGS} ${DEPFLAGS} -c ./helper.c -o ./build/helper.o
