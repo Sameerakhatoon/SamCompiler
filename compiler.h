@@ -1090,6 +1090,16 @@ struct pos parser_position(void);
 // hang the actual checks off this.
 int  validate(struct compile_process* process);
 
+// -O1. optimize() simplifies the validated tree
+// (opt.c); peephole_run() rewrites the asm the backend wrote to `in`
+// into `out` (peephole.c), and asks opt_function_has_volatile() where
+// a stack slot's reload must stay and opt_function_returns_narrow()
+// whether a function's return leaves the second return register free.
+void optimize(struct compile_process* process);
+bool opt_function_has_volatile(const char* name);
+bool opt_function_returns_narrow(const char* name);
+void peephole_run(const char* target_name, FILE* in, FILE* out);
+
 // ch26: node stack helpers. node_set_vector points them at the parser's
 // scratch / root vectors; the rest of the parser uses node_push /
 // node_peek* / node_pop to manipulate the work-stack.
@@ -1264,6 +1274,9 @@ enum {
     COMPILE_PROCESS_PIC              = 0b00001000,
     // -g: line tables, call frame information and variables as DWARF.
     COMPILE_PROCESS_DEBUG            = 0b00100000,
+    // -O1: optimise the tree (opt.c) and the asm (peephole.c), see
+    // -O0, the default, generates as before.
+    COMPILE_PROCESS_OPTIMIZE         = 0b01000000,
 };
 
 // ch108: entry / exit "label" book-keeping for break / continue.

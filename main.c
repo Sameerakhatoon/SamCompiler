@@ -206,6 +206,8 @@ static void main_usage(FILE* out){
         "  -I DIR           search DIR for includes, before pc_includes and /usr/include\n"
         "  -D NAME[=VALUE]  define a macro (VALUE defaults to 1)\n"
         "  -U NAME          undefine a macro\n"
+        "  -O0, -O, -O1     no optimisation (the default), or constant folding, dead\n"
+        "                   code removal and a peephole pass (-O2, -O3, -Os mean -O1)\n"
         "  -fPIC, -fpic     code for a shared object: exported symbols through the GOT\n"
         "  -shared          link a shared object (implies -fPIC); a .so input links\n"
         "                   the program as a dynamic PIE\n"
@@ -895,6 +897,11 @@ int main(int argc, char** argv){
             mode_given = true;
         } else if(S_EQ(arg, "-v")){
             main_verbose = true;
+        } else if(S_EQ(arg, "-O0")){
+            main_compile_flags &= ~COMPILE_PROCESS_OPTIMIZE;
+        } else if(S_EQ(arg, "-O") || S_EQ(arg, "-O1") || S_EQ(arg, "-O2") || S_EQ(arg, "-O3") || S_EQ(arg, "-Os")){
+            // one level; the higher ones ask for no more.
+            main_compile_flags |= COMPILE_PROCESS_OPTIMIZE;
         } else if(S_EQ(arg, "-fPIC") || S_EQ(arg, "-fpic")){
             main_compile_flags |= COMPILE_PROCESS_PIC;
         } else if(S_EQ(arg, "-shared")){

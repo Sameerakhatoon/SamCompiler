@@ -8,6 +8,7 @@ void   free(void* ptr);
 void   exit(int status);
 void   abort(void);
 long   strtol(const char* in, char** end, int base);
+long long strtoll(const char* in, char** end, int base);
 unsigned long long strtoull(const char* in, char** end, int base);
 double strtod(const char* in, char** end);
 float  strtof(const char* in, char** end);

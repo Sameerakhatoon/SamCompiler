@@ -45,4 +45,5 @@ int    rename(const char* from, const char* to);
 int    fseek(FILE* stream, long offset, int whence);
 long   ftell(FILE* stream);
 void   rewind(FILE* stream);
+FILE*  tmpfile(void);
 #endif

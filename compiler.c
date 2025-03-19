@@ -483,9 +483,30 @@ int compile_file(const char* filename, const char* out_filename, int flags){
         goto out;
     }
 
+    // -O1: the tree is simplified, and the backend writes to a
+    // temporary file that the peephole pass reads back.
+    FILE* asm_out = process->ofile;
+    FILE* raw_asm = 0;
+    if(flags & COMPILE_PROCESS_OPTIMIZE){
+        optimize(process);
+        raw_asm = asm_out ? tmpfile() : 0;
+        if(raw_asm){
+            process->ofile = raw_asm;
+        }
+    }
+
     // ch104: codegen stage. codegen.c hands the AST to the target's
     // backend, which writes the asm to the output file.
-    if(codegen(process) != CODEGEN_ALL_OK){
+    int codegen_res = codegen(process);
+    if(raw_asm){
+        process->ofile = asm_out;
+        if(codegen_res == CODEGEN_ALL_OK){
+            rewind(raw_asm);
+            peephole_run(process->target->name, raw_asm, asm_out);
+        }
+        fclose(raw_asm);
+    }
+    if(codegen_res != CODEGEN_ALL_OK){
         res = COMPILER_FAILED_WITH_ERRORS;
         goto out;
     }

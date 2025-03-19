@@ -8,6 +8,8 @@
 # DIR defaults to tests/diff. TARGET defaults to all four. A target whose
 # gcc (or qemu) is missing fails the run, so a missing toolchain can never
 # pass silently; set ALLOW_MISSING_TOOLCHAIN=1 to skip it instead.
+# SAMCC_FLAGS adds options to every SamCompiler run (SAMCC_FLAGS=-O1
+# tests the optimiser); gcc's side is unchanged.
 #
 # Result codes in the table: a number is the exit status, C means
 # SamCompiler rejected the program, A means assembling or linking failed,
@@ -103,7 +105,7 @@ for src in "$dir"/*.c; do
         fi
         # bash reports a crashed child ("Segmentation fault") on its own
         # stderr; the group keeps that redirected away from the table.
-        { timeout 20 ./main -target="$t" "$src" "$out" >"$out.log" 2>&1; } 2>/dev/null
+        { timeout 20 ./main -target="$t" ${SAMCC_FLAGS:-} "$src" "$out" >"$out.log" 2>&1; } 2>/dev/null
         rc=$?
         if [ $rc = 0 ]; then
             got=$(run_status "$runner" "$out")
