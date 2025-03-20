@@ -406,7 +406,15 @@ struct token *preprocessor_next_token_with_vector(struct compile_process *compil
     struct token *token = vector_peek(priority_token_vec);
     if (token == NULL && overflow_use_compiler_tokens)
     {
+        // Past the end of a macro's body the source continues in the file
+        // (`#define T typedef` then `T int a_t;`). The token must be taken,
+        // not only looked at: peeking returned the same token forever, and
+        // the typedef reader pushed it until memory ran out.
         token = preprocessor_peek_next_token_skip_nl(compiler);
+        if (token)
+        {
+            preprocessor_next_token(compiler);
+        }
     }
 
     return token;
