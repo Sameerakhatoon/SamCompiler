@@ -29,7 +29,8 @@
 // it. That code is scanned forward through labels (falling into a label
 // adds no use); a jump, a branch, an instruction this file does not
 // know or a directive count as a use, and so do a call and a return
-// unless the register is a scratch one they never read.
+// unless the register is a scratch one they never read. (a
+// jump back to a loop's head is followed too.)
 
 enum {
     PH_X86,
@@ -631,9 +632,24 @@ static int ph_label_after(int i, const char* name){
     return -1;
 }
 
+// the line of label `name:` up to PH_BACK_LINES lines before
+// line i, or -1: a loop's backward jump.
+#define PH_BACK_LINES 2000
+
+static int ph_label_before(int i, const char* name){
+    size_t len = strlen(name);
+    for(int j = i - 1, n = 0; j >= 0 && n < PH_BACK_LINES; j--, n++){
+        const char* line = ph_lines[j];
+        if(line && strncmp(line, name, len) == 0 && line[len] == ':' && line[len + 1] == 0){
+            return j;
+        }
+    }
+    return -1;
+}
+
 // Whether the register's value may be used after line i. A jump or a
-// branch forward is followed (a few levels deep); one backward counts
-// as a use.
+// branch is followed, forward or backward, a few levels
+// deep; past that it counts as a use.
 static bool ph_live_from(int i, int family, int depth){
     for(int j = ph_next(i); j >= 0; j = ph_next(j)){
         const char* line = ph_lines[j];
@@ -658,7 +674,11 @@ static bool ph_live_from(int i, int family, int depth){
         }
         bool jump = ph_is_jump_mnem(ins.mnem) && ins.count == 1;
         if(jump || ph_is_branch(&ins)){
-            int target = depth < 4 ? ph_label_after(j, ins.op[ins.count - 1].text) : -1;
+            const char* label = ins.op[ins.count - 1].text;
+            int target = depth < 4 ? ph_label_after(j, label) : -1;
+            if(target < 0 && depth < 4){
+                target = ph_label_before(j, label);
+            }
             if(target < 0 || ph_live_from(target, family, depth + 1)){
                 return true;
             }
@@ -1048,6 +1068,140 @@ static bool ph_self_move(int i, struct ph_ins* a){
         return true;
     }
     return false;
+}
+
+// an instruction with an operand whose base register it
+// writes back (aarch64 `[sp, #-16]!` and `[sp], #16`).
+static bool ph_writes_back(struct ph_ins* ins){
+    if(ph_arch != PH_AARCH64){
+        return false;
+    }
+    for(int k = 0; k < ins->count; k++){
+        if(strchr(ins->op[k].text, '!')){
+            return true;
+        }
+    }
+    return ins->count == 3 && ins->op[1].text[0] == '[';
+}
+
+static bool ph_has_memory(struct ph_ins* ins){
+    for(int k = 0; k < ins->count; k++){
+        if(strchr(ins->op[k].text, '[') || strchr(ins->op[k].text, '(')){
+            return true;
+        }
+    }
+    return false;
+}
+
+// def R, with R dead after it, does nothing (a value the
+// stack machine worked out and nobody uses, such as the old value of a
+// statement's x++). A load stays in a function with a volatile local.
+static bool ph_dead_def(int i, struct ph_ins* a){
+    if(!ph_is_def(a) || ph_writes_back(a) || (ph_volatile[i] && ph_has_memory(a))){
+        return false;
+    }
+    int r = ph_whole_register(a->op[0].text);
+    if(r < 0 || ph_live_after(i, r)){
+        return false;
+    }
+    ph_delete(i);
+    return true;
+}
+
+// Instructions whose first operand is only read.
+static const char* ph_x86_reads_first[] = { "cmp", "test", "push", 0 };
+static const char* ph_a64_reads_first[] = { "cmp", "cmn", "tst", "str", "strb", "strh", "stur", "sturb", "sturh",
+                                            "cbz", "cbnz", "tbz", "tbnz", 0 };
+static const char* ph_rv_reads_first[] = { "sb", "sh", "sw", "sd", "beq", "bne", "blt", "bge", "bltu", "bgeu",
+                                           "bgt", "ble", "bgtu", "bleu", "beqz", "bnez", "bltz", "bgez", "blez", "bgtz", 0 };
+// And some that write an operand after the first.
+static const char* ph_writes_others[] = { "xchg", "xadd", "cmpxchg", "cmpxchg8b", "cmpxchg16b", "ldp", "ldpsw",
+                                          "ldxp", "ldaxp", "stxp", "stlxp", 0 };
+
+// mov A, B; S; mov B, A, where S neither names B nor jumps
+// and A dies after: S working on B. A variable's register (B) copied out
+// to be changed by the expression code and copied back.
+static bool ph_move_run(int i, struct ph_ins* a){
+    int a_reg, b_reg;
+    if(!ph_is_move(a, &a_reg, &b_reg) || a_reg == b_reg || (ph_arch == PH_X86 && b_reg > 3)){
+        return false;
+    }
+    int lines[8];
+    struct ph_ins run[8];
+    int n = 0;
+    int j = ph_next(i);
+    struct ph_ins c;
+    while(ph_parse(j, &c)){
+        int d, s;
+        if(ph_is_move(&c, &d, &s) && d == b_reg && s == a_reg){
+            break;
+        }
+        if(n == 8 || ph_is_control(&c) || ph_ins_mentions(&c, 0, b_reg) || ph_mentions(c.mnem, b_reg)
+           || ph_has_hidden_uses(&c, a_reg) || ph_has_hidden_uses(&c, b_reg)){
+            return false;
+        }
+        for(int k = 0; k < c.count; k++){
+            if(!ph_rename_text(c.op[k].text, a_reg, b_reg)){
+                return false;
+            }
+        }
+        lines[n] = j;
+        run[n++] = c;
+        j = ph_next(j);
+    }
+    if(!n || !ph_parse(j, &c) || ph_live_after(j, a_reg)){
+        return false;
+    }
+    for(int k = 0; k < n; k++){
+        ph_set(lines[k], ph_format(&run[k]));
+    }
+    ph_delete(i);
+    ph_delete(j);
+    return true;
+}
+
+// mov A, B; I, where I reads A and A dies there -> I reading
+// B. Mostly a variable's register (B) copied to the expression
+// registers only to be read once.
+static bool ph_copy_forward(int i, struct ph_ins* a){
+    int dst, src;
+    // On x86 only eax to ebx have byte names.
+    if(!ph_is_move(a, &dst, &src) || dst == src || (ph_arch == PH_X86 && src > 3)){
+        return false;
+    }
+    // I is the first instruction after it that names A, past up to three
+    // that touch neither A nor B nor the flow.
+    int j = ph_next(i);
+    struct ph_ins b;
+    for(int n = 0; ph_parse(j, &b) && !ph_ins_mentions(&b, 0, dst); n++){
+        if(n == 3 || ph_is_control(&b) || ph_ins_mentions(&b, 0, src) || ph_has_hidden_uses(&b, dst) || ph_has_hidden_uses(&b, src)){
+            return false;
+        }
+        j = ph_next(j);
+    }
+    if(!ph_parse(j, &b) || !ph_ins_mentions(&b, 0, dst) || ph_writes_back(&b) || ph_mnem_in(b.mnem, ph_writes_others)
+       || ph_has_hidden_uses(&b, dst) || ph_has_hidden_uses(&b, src) || ph_mentions(b.mnem, dst)){
+        return false;
+    }
+    if(ph_is_control(&b) && !ph_is_branch(&b)){
+        return false;
+    }
+    const char** reads_first = ph_is_x86() ? ph_x86_reads_first : ph_arch == PH_AARCH64 ? ph_a64_reads_first : ph_rv_reads_first;
+    int width;
+    if(b.count > 0 && ph_register(b.op[0].text, &width) == dst && !ph_mnem_in(b.mnem, reads_first)){
+        return false;
+    }
+    if(ph_live_after(j, dst)){
+        return false;
+    }
+    for(int k = 0; k < b.count; k++){
+        if(!ph_rename_text(b.op[k].text, dst, src)){
+            return false;
+        }
+    }
+    ph_set(j, ph_format(&b));
+    ph_delete(i);
+    return true;
 }
 
 static bool ph_parse_integer(const char* text, long long* value){
@@ -1608,7 +1762,8 @@ static void ph_line(int i){
         return;
     }
     if(ph_jump_to_next(i, &ins) || ph_dead_after(i, &ins) || ph_self_move(i, &ins)
-       || ph_push_pop(i) || ph_push_compute_pop(i) || ph_compute_swap(i) || ph_def_move(i, &ins)){
+       || ph_push_pop(i) || ph_push_compute_pop(i) || ph_compute_swap(i) || ph_def_move(i, &ins)
+       || ph_dead_def(i, &ins) || ph_copy_forward(i, &ins) || ph_move_run(i, &ins)){
         return;
     }
     switch(ph_arch){

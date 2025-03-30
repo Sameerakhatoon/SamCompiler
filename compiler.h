@@ -1099,6 +1099,15 @@ void optimize(struct compile_process* process);
 bool opt_function_has_volatile(const char* name);
 bool opt_function_returns_narrow(const char* name);
 void peephole_run(const char* target_name, FILE* in, FILE* out);
+// register allocation at -O1 (opt.c). A 64-bit backend calls
+// regalloc_function() as it starts a function, with how many
+// callee-saved registers it can give and their DWARF numbers; it
+// returns how many of them the function uses (0 without -O1).
+// regalloc_register() is the register (0 to that count - 1) a local or
+// parameter of the function lives in, or -1 for one in its stack slot.
+int  regalloc_function(struct compile_process* process, struct node* function, int registers, const int* dwarf);
+int  regalloc_register(struct node* var);
+int  regalloc_dwarf_register(struct node* var);
 
 // ch26: node stack helpers. node_set_vector points them at the parser's
 // scratch / root vectors; the rest of the parser uses node_push /
@@ -1533,6 +1542,10 @@ struct exp64_ops {
     void (*add_imm)(long long value);                           // R0 += value
     void (*mul_imm)(int reg, long long value);                  // reg *= value
     void (*load)(int size, bool is_signed);                     // R0 = *R0
+    // R0 = callee-saved register k (regalloc_register), and
+    // register k = R0; the register holds the value in canonical form.
+    void (*reg_get)(int k);
+    void (*reg_set)(int k);
     void (*store)(int size);                                    // *R1 = R0
     void (*copy)(int size);                                     // size bytes from [R1] to [R0]
     void (*zero_frame)(int offset, int size);                   // zero a local

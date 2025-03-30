@@ -80,6 +80,7 @@
 
 #define DW_OP_addr  0x03
 #define DW_OP_deref 0x06
+#define DW_OP_reg0  0x50
 #define DW_OP_breg0 0x70
 #define DW_OP_fbreg 0x91
 
@@ -743,12 +744,20 @@ static void debug_emit_type(struct debug_type* entry){
 // ---------------------------------------------------------------
 
 // A parameter or variable DIE. `address` is a symbol for DW_OP_addr;
-// otherwise the location is DW_OP_fbreg `offset`, then DW_OP_deref
-// when the slot holds the object's address.
-static void debug_variable(int abbrev, const char* name, struct datatype* type, const char* address, int offset, bool by_reference){
+// `reg` (not -1) the DWARF number of the register the variable lives in
+// at -O1, for DW_OP_reg; otherwise the location is
+// DW_OP_fbreg `offset`, then DW_OP_deref when the slot holds the
+// object's address.
+static void debug_variable(int abbrev, const char* name, struct datatype* type, const char* address, int offset, bool by_reference,
+                           int reg){
     debug_text_uleb(&debug_info, abbrev);
     debug_text_string(&debug_info, name);
     debug_text_ref(&debug_info, debug_type(type));
+    if(reg >= 0 && reg < 32){
+        unsigned char op[2] = { 1, (unsigned char)(DW_OP_reg0 + reg) };
+        debug_text_bytes(&debug_info, op, 2);
+        return;
+    }
     if(address){
         unsigned char op[2] = { (unsigned char)(1 + debug_address_size), DW_OP_addr };
         debug_text_bytes(&debug_info, op, 2);
@@ -778,7 +787,7 @@ void debug_parameter(struct compile_process* process, struct node* var, bool by_
     if(debug_is_array(&type)){
         type = datatype_array_decay(&type);
     }
-    debug_variable(DEBUG_ABBREV_PARAMETER, var->var.name, &type, 0, var->var.aoffset, by_reference);
+    debug_variable(DEBUG_ABBREV_PARAMETER, var->var.name, &type, 0, var->var.aoffset, by_reference, regalloc_dwarf_register(var));
 }
 
 void debug_local(struct compile_process* process, struct node* var){
@@ -786,7 +795,7 @@ void debug_local(struct compile_process* process, struct node* var){
        || !debug_describable(&var->var.type)){
         return;
     }
-    debug_variable(DEBUG_ABBREV_VARIABLE, var->var.name, &var->var.type, 0, var->var.aoffset, false);
+    debug_variable(DEBUG_ABBREV_VARIABLE, var->var.name, &var->var.type, 0, var->var.aoffset, false, regalloc_dwarf_register(var));
 }
 
 // A static local lives in a global named `symbol`; it is described in
@@ -800,7 +809,7 @@ void debug_static_local(struct compile_process* process, struct node* var, const
     if(!var->var.name || !debug_describable(&var->var.type)){
         return;
     }
-    debug_variable(DEBUG_ABBREV_VARIABLE, var->var.name, &var->var.type, debug_symbol(symbol), 0, false);
+    debug_variable(DEBUG_ABBREV_VARIABLE, var->var.name, &var->var.type, debug_symbol(symbol), 0, false, -1);
 }
 
 // A global this file defines. An extern one is described by the file
@@ -824,7 +833,7 @@ void debug_global(struct compile_process* process, struct node* var){
             return;
         }
     }
-    debug_variable(DEBUG_ABBREV_VARIABLE, var->var.name, &var->var.type, debug_symbol(var->var.name), 0, false);
+    debug_variable(DEBUG_ABBREV_VARIABLE, var->var.name, &var->var.type, debug_symbol(var->var.name), 0, false, -1);
 }
 
 // ---------------------------------------------------------------
@@ -1073,7 +1082,7 @@ static void debug_static_locals(const char* function){
         char* c_name = malloc(length + 1);
         memcpy(c_name, name, length);
         c_name[length] = 0;
-        debug_variable(DEBUG_ABBREV_VARIABLE, c_name, &var->var.type, debug_symbol(var->var.name), 0, false);
+        debug_variable(DEBUG_ABBREV_VARIABLE, c_name, &var->var.type, debug_symbol(var->var.name), 0, false, -1);
         free(c_name);
     }
 }

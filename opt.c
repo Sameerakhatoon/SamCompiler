@@ -20,6 +20,8 @@
 //   - statements after return, break, continue or goto in the same
 //     block are dropped up to the next label, case or declaration;
 //   - a static function nothing refers to is not generated.
+// Stage 3, register allocation, is here too (regalloc_function, below):
+// the 64-bit backends ask it which locals live in registers.
 // The volatile objects of the file are also found here, from the tokens
 // (the parser drops the qualifier): the peephole pass of stage 2 keeps
 // the reloads in a function that has one.
@@ -549,6 +551,22 @@ static int opt_condition(struct node* node){
 
 static struct node* opt_statement(struct node* node);
 
+// an expression whose value nobody uses (a statement, a for
+// loop's step): x++ and x-- there are ++x and --x, which do not work
+// out the old value.
+static void opt_value_unused(struct node* node){
+    node = opt_strip_parentheses(node);
+    if(!node){
+        return;
+    }
+    if(node->type == NODE_TYPE_UNARY && is_increment_operator(node->unary.op)){
+        node->unary.flags &= ~UNARY_FLAG_IS_POSTFIX;
+    } else if(node->type == NODE_TYPE_EXPRESSION && S_EQ(node->exp.op, ",")){
+        opt_value_unused(node->exp.left);
+        opt_value_unused(node->exp.right);
+    }
+}
+
 static void opt_body(struct node* body){
     int mark = opt_scope_begin();
     struct vector* statements = body->body.statements;
@@ -644,6 +662,7 @@ static struct node* opt_statement(struct node* node){
         case NODE_TYPE_UNARY:
         case NODE_TYPE_CAST: {
             struct node* result = opt_expression(node);
+            opt_value_unused(result);
             // A constant on its own does nothing.
             return result->type == NODE_TYPE_NUMBER ? 0 : result;
         }
@@ -699,6 +718,7 @@ static struct node* opt_statement(struct node* node){
             }
             s->cond_node = opt_expression(s->cond_node);
             s->loop_node = opt_expression(s->loop_node);
+            opt_value_unused(s->loop_node);
             s->body_node = opt_statement(s->body_node);
             opt_scope_end(mark);
             if(opt_condition(s->cond_node) == 0 && !opt_has_target(s->body_node)){
@@ -900,6 +920,320 @@ static void opt_drop_unused_static_functions(struct compile_process* process){
         }
     }
     free(used);
+}
+
+// ---------------------------------------------------------------
+// Stage 3: register allocation
+// ---------------------------------------------------------------
+
+// The 64-bit backends ask, as they start a function, which of its
+// scalar locals and parameters live in one of their callee-saved
+// registers for the whole function instead of in a stack slot. A
+// variable can have one when nothing reaches it but its name: an
+// integer or a pointer that is not static, extern, thread-local,
+// _Atomic or volatile, whose address is never taken (`&x`, or a builtin
+// such as va_start, which works on the object), in a function without
+// inline asm and without setjmp. The ones used most get the registers
+// (a use in a loop counts 8 times, in a loop in a loop 64); one used
+// fewer than OPT_RA_MIN_WEIGHT times is not worth the save and the
+// restore.
+
+#define OPT_RA_MAX        16
+#define OPT_RA_MIN_WEIGHT 3
+
+struct opt_ra_candidate {
+    struct node* var;
+    long         weight;
+    bool         taken;
+};
+
+// A declaration in scope while the function is walked, and its
+// candidate (-1 for one that cannot have a register).
+struct opt_ra_declaration {
+    struct node* var;
+    int          candidate;
+};
+
+static struct compile_process* opt_ra_process;
+static struct vector*          opt_ra_candidates;
+static struct vector*          opt_ra_scope;
+static struct vector*          opt_ra_taken;
+static bool                    opt_ra_refused;
+// The current function's: the variable in register k and the
+// register's DWARF number.
+static struct node*            opt_ra_vars[OPT_RA_MAX];
+static int                     opt_ra_dwarf[OPT_RA_MAX];
+static int                     opt_ra_count;
+
+static bool opt_ra_type_ok(struct datatype* type){
+    int excluded = DATATYPE_FLAG_IS_ARRAY | DATATYPE_FLAG_IS_STATIC | DATATYPE_FLAG_IS_EXTERN | DATATYPE_FLAG_IS_THREAD_LOCAL;
+    if((type->flags & excluded) || datatype_is_atomic(type)){
+        return false;
+    }
+    if((type->flags & DATATYPE_FLAG_IS_POINTER) && type->pointer_depth > 0){
+        return true;
+    }
+    switch(type->type){
+        case DATA_TYPE_CHAR:
+        case DATA_TYPE_SHORT:
+        case DATA_TYPE_INTEGER:
+        case DATA_TYPE_LONG:
+            return type->size == 1 || type->size == 2 || type->size == 4 || type->size == 8;
+    }
+    return false;
+}
+
+// A use inside n loops weighs 8^n (up to 8^4).
+static long opt_ra_weight(int depth){
+    return 1L << (3 * (depth < 4 ? depth : 4));
+}
+
+static struct opt_ra_candidate* opt_ra_candidate_at(int index){
+    return index >= 0 ? vector_at(opt_ra_candidates, index) : 0;
+}
+
+static struct opt_ra_declaration* opt_ra_declare(struct node* var, bool may_have_register){
+    struct opt_ra_declaration declaration = { var, -1 };
+    if(may_have_register && var->var.name && opt_ra_type_ok(&var->var.type)){
+        struct opt_ra_candidate candidate = { var, 0, false };
+        vector_push(opt_ra_candidates, &candidate);
+        declaration.candidate = vector_count(opt_ra_candidates) - 1;
+    }
+    vector_push(opt_ra_scope, &declaration);
+    return vector_at(opt_ra_scope, vector_count(opt_ra_scope) - 1);
+}
+
+static struct opt_ra_declaration* opt_ra_lookup(const char* name){
+    for(int i = vector_count(opt_ra_scope) - 1; i >= 0; i--){
+        struct opt_ra_declaration* declaration = vector_at(opt_ra_scope, i);
+        if(declaration->var->var.name && S_EQ(declaration->var->var.name, name)){
+            return declaration;
+        }
+    }
+    return 0;
+}
+
+static void opt_ra_scope_end(int mark){
+    while(vector_count(opt_ra_scope) > mark){
+        vector_pop(opt_ra_scope);
+    }
+}
+
+// Every name in a builtin's arguments counts as taken: va_start, va_arg
+// and the atomics work on the object, not on its value.
+static void opt_ra_take_names(struct node* node){
+    struct opt_names names = { vector_create(sizeof(const char*)), vector_create(sizeof(const char*)) };
+    opt_references(node, &names);
+    for(int i = 0; i < vector_count(names.names); i++){
+        vector_push(opt_ra_taken, vector_at(names.names, i));
+    }
+}
+
+static bool opt_ra_returns_twice(const char* name){
+    return strstr(name, "setjmp") || S_EQ(name, "vfork") || S_EQ(name, "getcontext") || S_EQ(name, "savectx");
+}
+
+static bool opt_ra_is_builtin(const char* name){
+    return strncmp(name, "__builtin", 9) == 0 || strncmp(name, "va_", 3) == 0 || atomic_builtin_get(name)
+        || symresolver_get_symbol_for_native_function(opt_ra_process, name);
+}
+
+static void opt_ra_walk(struct node* node, int depth);
+
+static void opt_ra_walk_vector(struct vector* nodes, int depth){
+    for(int i = 0; nodes && i < vector_count(nodes); i++){
+        opt_ra_walk(*(struct node**)vector_at(nodes, i), depth);
+    }
+}
+
+// A declaration: the sizes of a VLA, the name, then the initializer,
+// whose store is a use.
+static void opt_ra_variable(struct node* var, bool may_have_register, int depth){
+    if(!var || var->type != NODE_TYPE_VARIABLE){
+        opt_ra_walk(var, depth);
+        return;
+    }
+    struct datatype* type = &var->var.type;
+    if((type->flags & DATATYPE_FLAG_IS_ARRAY) && type->array.brackets && type->array.brackets->n_brackets){
+        opt_ra_walk_vector(type->array.brackets->n_brackets, depth);
+    }
+    struct opt_ra_candidate* candidate = opt_ra_candidate_at(opt_ra_declare(var, may_have_register)->candidate);
+    if(var->var.val){
+        if(candidate){
+            candidate->weight += opt_ra_weight(depth);
+        }
+        opt_ra_walk(var->var.val, depth);
+    }
+}
+
+static void opt_ra_walk(struct node* node, int depth){
+    if(!node){
+        return;
+    }
+    compiler_check_stack(opt_ra_process);
+    switch(node->type){
+        case NODE_TYPE_IDENTIFIER: {
+            struct opt_ra_declaration* declaration = opt_ra_lookup(node->sval);
+            struct opt_ra_candidate* candidate = declaration ? opt_ra_candidate_at(declaration->candidate) : 0;
+            if(candidate){
+                candidate->weight += opt_ra_weight(depth);
+            }
+            break;
+        }
+        case NODE_TYPE_ASM:
+            opt_ra_refused = true;
+            break;
+        case NODE_TYPE_EXPRESSION:
+            if(is_parentheses_node(node)){
+                struct node* callee = opt_strip_parentheses(node->exp.left);
+                if(callee && callee->type == NODE_TYPE_IDENTIFIER && !opt_ra_lookup(callee->sval)){
+                    if(opt_ra_returns_twice(callee->sval)){
+                        opt_ra_refused = true;
+                    }
+                    if(opt_ra_is_builtin(callee->sval)){
+                        opt_ra_take_names(node->exp.right);
+                    }
+                }
+            }
+            opt_ra_walk(node->exp.left, depth);
+            opt_ra_walk(node->exp.right, depth);
+            break;
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            opt_ra_walk(node->parenthesis.exp, depth);
+            break;
+        case NODE_TYPE_UNARY: {
+            struct node* operand = opt_strip_parentheses(node->unary.operand);
+            if(op_is_address(node->unary.op) && operand && operand->type == NODE_TYPE_IDENTIFIER){
+                vector_push(opt_ra_taken, &operand->sval);
+            }
+            opt_ra_walk(node->unary.operand, depth);
+            break;
+        }
+        case NODE_TYPE_CAST:
+            opt_ra_walk(node->cast.operand, depth);
+            break;
+        case NODE_TYPE_TENARY:
+            opt_ra_walk(node->tenary.true_node, depth);
+            opt_ra_walk(node->tenary.false_node, depth);
+            break;
+        case NODE_TYPE_BRACKET:
+            opt_ra_walk(node->bracket.inner, depth);
+            break;
+        case NODE_TYPE_VARIABLE:
+            opt_ra_variable(node, true, depth);
+            break;
+        case NODE_TYPE_VARIABLE_LIST:
+            for(int i = 0; i < vector_count(node->var_list.list); i++){
+                opt_ra_variable(*(struct node**)vector_at(node->var_list.list, i), true, depth);
+            }
+            break;
+        case NODE_TYPE_STRUCT:
+            opt_ra_variable(node->_struct.var, false, depth);
+            break;
+        case NODE_TYPE_UNION:
+            opt_ra_variable(node->_union.var, false, depth);
+            break;
+        case NODE_TYPE_BODY: {
+            int mark = vector_count(opt_ra_scope);
+            opt_ra_walk_vector(node->body.statements, depth);
+            opt_ra_scope_end(mark);
+            break;
+        }
+        case NODE_TYPE_STATEMENT_RETURN:
+            opt_ra_walk(node->stmt.return_stmt.exp, depth);
+            break;
+        case NODE_TYPE_STATEMENT_IF:
+            opt_ra_walk(node->stmt.if_stmt.cond_node, depth);
+            opt_ra_walk(node->stmt.if_stmt.body_node, depth);
+            opt_ra_walk(node->stmt.if_stmt.next, depth);
+            break;
+        case NODE_TYPE_STATEMENT_ELSE:
+            opt_ra_walk(node->stmt.else_stmt.body_node, depth);
+            break;
+        case NODE_TYPE_STATEMENT_WHILE:
+            opt_ra_walk(node->stmt.while_stmt.exp_node, depth + 1);
+            opt_ra_walk(node->stmt.while_stmt.body_node, depth + 1);
+            break;
+        case NODE_TYPE_STATEMENT_DO_WHILE:
+            opt_ra_walk(node->stmt.do_while_stmt.exp_node, depth + 1);
+            opt_ra_walk(node->stmt.do_while_stmt.body_node, depth + 1);
+            break;
+        case NODE_TYPE_STATEMENT_FOR: {
+            int mark = vector_count(opt_ra_scope);
+            opt_ra_walk(node->stmt.for_stmt.init_node, depth);
+            opt_ra_walk(node->stmt.for_stmt.cond_node, depth + 1);
+            opt_ra_walk(node->stmt.for_stmt.loop_node, depth + 1);
+            opt_ra_walk(node->stmt.for_stmt.body_node, depth + 1);
+            opt_ra_scope_end(mark);
+            break;
+        }
+        case NODE_TYPE_STATEMENT_SWITCH:
+            opt_ra_walk(node->stmt.switch_stmt.exp, depth);
+            opt_ra_walk(node->stmt.switch_stmt.body, depth);
+            break;
+    }
+}
+
+int regalloc_function(struct compile_process* process, struct node* function, int registers, const int* dwarf){
+    opt_ra_count = 0;
+    if(!(process->flags & COMPILE_PROCESS_OPTIMIZE) || !function->func.body_n || opt_function_has_volatile(function->func.name)){
+        return 0;
+    }
+    opt_ra_process    = process;
+    opt_ra_candidates = vector_create(sizeof(struct opt_ra_candidate));
+    opt_ra_scope      = vector_create(sizeof(struct opt_ra_declaration));
+    opt_ra_taken      = vector_create(sizeof(const char*));
+    opt_ra_refused    = false;
+    struct vector* args = function->func.args.vector;
+    for(int i = 0; args && i < vector_count(args); i++){
+        struct node* param = *(struct node**)vector_at(args, i);
+        if(param && param->type == NODE_TYPE_VARIABLE){
+            opt_ra_declare(param, true);
+        }
+    }
+    opt_ra_walk(function->func.body_n, 0);
+    if(opt_ra_refused){
+        return 0;
+    }
+    if(registers > OPT_RA_MAX){
+        registers = OPT_RA_MAX;
+    }
+    int count = vector_count(opt_ra_candidates);
+    for(int i = 0; i < count; i++){
+        struct opt_ra_candidate* candidate = vector_at(opt_ra_candidates, i);
+        candidate->taken = opt_name_listed(opt_ra_taken, candidate->var->var.name);
+    }
+    // The heaviest first; of equal ones the one declared first.
+    while(opt_ra_count < registers){
+        struct opt_ra_candidate* best = 0;
+        for(int i = 0; i < count; i++){
+            struct opt_ra_candidate* candidate = vector_at(opt_ra_candidates, i);
+            if(!candidate->taken && candidate->weight >= OPT_RA_MIN_WEIGHT && (!best || candidate->weight > best->weight)){
+                best = candidate;
+            }
+        }
+        if(!best){
+            break;
+        }
+        best->taken = true;
+        opt_ra_dwarf[opt_ra_count] = dwarf ? dwarf[opt_ra_count] : -1;
+        opt_ra_vars[opt_ra_count++] = best->var;
+    }
+    return opt_ra_count;
+}
+
+int regalloc_register(struct node* var){
+    for(int k = 0; k < opt_ra_count; k++){
+        if(opt_ra_vars[k] == var){
+            return k;
+        }
+    }
+    return -1;
+}
+
+int regalloc_dwarf_register(struct node* var){
+    int k = regalloc_register(var);
+    return k >= 0 ? opt_ra_dwarf[k] : -1;
 }
 
 // ---------------------------------------------------------------

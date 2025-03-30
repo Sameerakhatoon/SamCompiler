@@ -258,6 +258,48 @@ static void aarch64_imm(int reg, long long value){
     codegen_mov_imm(aarch64_reg(reg), value);
 }
 
+// the callee-saved registers -O1 keeps variables in
+// (regalloc_function) and their DWARF numbers. The backend uses none of
+// them otherwise. A function that uses some saves them in slots under
+// its locals as it starts, and restores them before each return.
+static const char* codegen_saved_registers[] = { "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28" };
+static const int   codegen_saved_dwarf[] = { 19, 20, 21, 22, 23, 24, 25, 26, 27, 28 };
+#define CODEGEN_SAVED_COUNT ((int)(sizeof(codegen_saved_dwarf) / sizeof(codegen_saved_dwarf[0])))
+// The current function's: how many it uses, and the frame offset of the
+// first one's slot.
+static int codegen_saved_used;
+static int codegen_saved_base;
+
+static void aarch64_reg_get(int k){
+    asm_push("mov x0, %s", codegen_saved_registers[k]);
+}
+
+static void aarch64_reg_set(int k){
+    asm_push("mov %s, x0", codegen_saved_registers[k]);
+}
+
+// Save the registers the function uses; cfa is the CFA less the frame
+// register.
+static void codegen_save_registers(int cfa){
+    if(codegen_saved_used){
+        codegen_add_imm("x11", "x29", codegen_saved_base);
+    }
+    for(int k = 0; k < codegen_saved_used; k++){
+        asm_push("str %s, [x11, #%i]", codegen_saved_registers[k], DATA_SIZE_DDWORD * k);
+        debug_cfi_offset(current_process, codegen_saved_dwarf[k], codegen_saved_base + DATA_SIZE_DDWORD * k - cfa);
+    }
+}
+
+static void codegen_restore_registers(void){
+    if(codegen_saved_used){
+        codegen_add_imm("x11", "x29", codegen_saved_base);
+    }
+    for(int k = 0; k < codegen_saved_used; k++){
+        asm_push("ldr %s, [x11, #%i]", codegen_saved_registers[k], DATA_SIZE_DDWORD * k);
+        debug_cfi_restore(current_process, codegen_saved_dwarf[k]);
+    }
+}
+
 static void aarch64_frame_address(int offset){
     codegen_add_imm("x0", "x29", offset);
 }
@@ -883,6 +925,8 @@ static const struct exp64_ops aarch64_ops = {
     .branch_false   = aarch64_branch_false,
     .imm            = aarch64_imm,
     .frame_address  = aarch64_frame_address,
+    .reg_get        = aarch64_reg_get,
+    .reg_set        = aarch64_reg_set,
     .symbol_address = aarch64_symbol_address,
     .string_address = aarch64_string_address,
     .add_imm        = aarch64_add_imm,
@@ -1211,6 +1255,7 @@ static void codegen_generate_statement_return(struct node* node){
         codegen_generate_statement_return_exp(node);
     }
     debug_cfi_remember_state(current_process);
+    codegen_restore_registers();
     asm_push("mov sp, x29");
     asm_push("ldp x29, x30, [sp], #16");
     codegen_generate_epilogue_ret();
@@ -1366,11 +1411,20 @@ static void codegen_generate_function_with_body(struct node* node){
             asm_push("str d%i, [x11, #%i]", i, DATA_SIZE_DDWORD * i);
         }
     }
+    // the callee-saved registers the variables -O1 keeps in
+    // registers need, saved under everything else.
+    codegen_saved_used = regalloc_function(current_process, node, CODEGEN_SAVED_COUNT, codegen_saved_dwarf);
+    int saved_size = C_ALIGN(DATA_SIZE_DDWORD * codegen_saved_used);
+    codegen_saved_base = -(locals + fp_home_size + saved_size);
+    codegen_stack_sub(saved_size);
+    codegen_save_registers(cfa);
     codegen_new_scope(RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK);
     exp64_parameters(node, registers, 16 + codegen_home_area_size(), fp_home);
 
     codegen_generate_body(node->func.body_n, codegen_history_begin(IS_ALONE_STATEMENT));
     codegen_finish_scope();
+    codegen_restore_registers();
+    codegen_stack_add(saved_size);
     codegen_stack_add(fp_home_size);
     codegen_stack_add(locals);
     asm_pop_rbp();

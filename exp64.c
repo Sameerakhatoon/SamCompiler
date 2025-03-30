@@ -386,12 +386,42 @@ struct datatype exp64_typeof(struct node* node){
 // Names
 // ---------------------------------------------------------------
 
+// the register a local or parameter named by `node` lives in
+// at -O1 (regalloc_function), or -1; its type goes to *type. Such a
+// variable is read, assigned and stepped right in its register and
+// never has an address.
+static int exp64_register_of(struct node* node, struct datatype* type){
+    while(node && node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        node = node->parenthesis.exp;
+    }
+    if(!node || node->type != NODE_TYPE_IDENTIFIER || !ops->reg_get){
+        return -1;
+    }
+    struct resolver_entity* entity = resolver_get_variable(0, current_process->resolver, node->sval);
+    if(!entity){
+        return -1;
+    }
+    struct resolver_default_entity_data* data = resolver_default_entity_private(entity);
+    if(!data || !(data->flags & RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK)){
+        return -1;
+    }
+    int reg = regalloc_register(entity->node);
+    if(reg >= 0){
+        *type = entity->dtype;
+    }
+    return reg;
+}
+
 static struct datatype exp64_identifier_address(struct node* node){
     struct resolver_process* resolver = current_process->resolver;
     struct resolver_entity* entity = resolver_get_variable(0, resolver, node->sval);
     if(entity){
         struct resolver_default_entity_data* data = resolver_default_entity_private(entity);
         if(data && (data->flags & RESOLVER_DEFAULT_ENTITY_FLAG_IS_LOCAL_STACK)){
+            if(regalloc_register(entity->node) >= 0){
+                // regalloc_function missed a use that needs the object.
+                compiler_error(current_process, "Internal error: %s lives in a register and has no address\n", node->sval);
+            }
             ops->frame_address(data->offset);
             if(data->flags & RESOLVER_DEFAULT_ENTITY_FLAG_IS_REFERENCE){
                 // B1: a big struct parameter: the slot holds the
@@ -922,10 +952,103 @@ static struct datatype exp64_atomic_update(const char* op, struct datatype* lt, 
     return t;
 }
 
+// register k (of type t, an integer other than _Bool or a
+// pointer) += n of its steps: an element for a pointer, else 1. R0 is
+// the new value; false for a type this does not take.
+static bool exp64_register_step(int k, struct datatype* t, long long n){
+    long long step = 1;
+    if(exp64_is_pointer(t)){
+        struct datatype element = exp64_deref(t);
+        step = exp64_size(&element);
+        if(step <= 0){
+            return false;
+        }
+    } else if(exp64_is_floating(t) || (t->flags & DATATYPE_FLAG_IS_BOOL) || t->type == DATA_TYPE_VOID){
+        return false;
+    }
+    ops->reg_get(k);
+    ops->add_imm(n * step);
+    if(!exp64_is_pointer(t)){
+        // The sum in 64 bits, cut to x's type: what the int arithmetic
+        // and the conversion back give.
+        struct datatype wide = exp64_int_type(DATA_SIZE_DDWORD, true);
+        exp64_convert(0, &wide, t);
+    }
+    ops->reg_set(k);
+    return true;
+}
+
+// R0, the new value of a register variable exp64_register_step moved by
+// n steps, back to the old one (the value of x++ and x--).
+static void exp64_register_step_back(struct datatype* t, long long n){
+    if(exp64_is_pointer(t)){
+        struct datatype element = exp64_deref(t);
+        ops->add_imm(-n * (long long)exp64_size(&element));
+        return;
+    }
+    ops->add_imm(-n);
+    struct datatype wide = exp64_int_type(DATA_SIZE_DDWORD, true);
+    exp64_convert(0, &wide, t);
+}
+
+// `x = b` and `x op= b` for x in register k, of type lt. b
+// cannot change x (x has no address), so x is read after it.
+static struct datatype exp64_register_assignment(struct node* node, int k, struct datatype* lt){
+    const char* op = node->exp.op;
+    struct node* right = node->exp.right;
+    if((S_EQ(op, "+=") || S_EQ(op, "-=")) && right->type == NODE_TYPE_NUMBER
+       && !(right->num.flags & (NUMBER_FLAG_FLOATING | NUMBER_FLAG_FLOAT | NUMBER_FLAG_LONG_DOUBLE))
+       && exp64_number_type(right).size <= DATA_SIZE_DWORD){
+        long long n = exp64_number_value(right);
+        if(exp64_register_step(k, lt, S_EQ(op, "+=") ? n : -n)){
+            return *lt;
+        }
+    }
+    if(S_EQ(op, "=")){
+        struct datatype rt = exp64_value(node->exp.right);
+        exp64_convert(0, &rt, lt);
+        ops->reg_set(k);
+        return *lt;
+    }
+    char arith_op[4] = {0};
+    strncpy(arith_op, op, strlen(op) - 1);
+    struct datatype old = *lt;
+    struct datatype rt;
+    if(node->exp.right->type == NODE_TYPE_NUMBER && !(node->exp.right->num.flags & NUMBER_FLAG_LONG_DOUBLE)){
+        rt = exp64_number_type(node->exp.right);
+        ops->reg_get(k);
+        ops->imm(1, exp64_number_value(node->exp.right));
+    } else {
+        rt = exp64_value(node->exp.right);
+        if(exp64_is_ldouble(&rt)){
+            // worked out in long double, then converted.
+            struct datatype ld = rt;
+            int right = exp64_push_index();
+            ops->reg_get(k);
+            exp64_convert(0, &old, &ld);
+            int left = exp64_push_index();
+            exp64_ld_operate(arith_op, left, right);
+            exp64_convert(0, &ld, lt);
+            ops->reg_set(k);
+            return *lt;
+        }
+        ops->mov_r1();
+        ops->reg_get(k);
+    }
+    struct datatype result = exp64_arith(arith_op, &old, &rt);
+    exp64_convert(0, &result, lt);
+    ops->reg_set(k);
+    return *lt;
+}
+
 // `a = b` and `a op= b`. The target's address is worked out once.
 static struct datatype exp64_assignment(struct node* node){
     const char* op = node->exp.op;
     struct datatype lt;
+    int k = exp64_register_of(node->exp.left, &lt);
+    if(k >= 0){
+        return exp64_register_assignment(node, k, &lt);
+    }
     // A plain variable's address takes only R0, so the value can wait
     // in R1 instead of on the stack.
     bool simple = node->exp.left->type == NODE_TYPE_IDENTIFIER && !exp64_names_function(node->exp.left);
@@ -2209,6 +2332,15 @@ void exp64_parameters(struct node* function, int register_home, int stack_home, 
         }
         resolver_default_new_scope_entity(current_process->resolver, param, param->var.aoffset, flags);
         debug_parameter(current_process, param, a->kind == EXP64_ARG_REF);
+        int k = ops->reg_set ? regalloc_register(param) : -1;
+        if(k >= 0){
+            // a parameter that lives in a register goes there
+            // from its home slot (an integer or a pointer: never a
+            // struct or a floating one).
+            ops->frame_address(param->var.aoffset);
+            exp64_load(&param->var.type, true);
+            ops->reg_set(k);
+        }
     }
     exp64_va_scratch = assembly;
     // a variadic function on aarch64 that reads a long double
@@ -2500,6 +2632,30 @@ static struct datatype exp64_increment(struct node* node){
     const char* step_op = S_EQ(node->unary.op, "++") ? "+" : "-";
     const char* back_op = S_EQ(node->unary.op, "++") ? "-" : "+";
     struct datatype one = exp64_int_type(DATA_SIZE_DWORD, true);
+    struct datatype rlt;
+    int k = exp64_register_of(node->unary.operand, &rlt);
+    if(k >= 0){
+        // stepped in its register.
+        bool postfix = node->unary.flags & UNARY_FLAG_IS_POSTFIX;
+        long long n = S_EQ(node->unary.op, "++") ? 1 : -1;
+        if(exp64_register_step(k, &rlt, n)){
+            if(postfix){
+                exp64_register_step_back(&rlt, n);
+            }
+            return rlt;
+        }
+        ops->reg_get(k);
+        ops->imm(1, 1);
+        struct datatype result = exp64_arith(step_op, &rlt, &one);
+        exp64_convert(0, &result, &rlt);
+        ops->reg_set(k);
+        if(node->unary.flags & UNARY_FLAG_IS_POSTFIX){
+            ops->imm(1, 1);
+            result = exp64_arith(back_op, &rlt, &one);
+            exp64_convert(0, &result, &rlt);
+        }
+        return rlt;
+    }
     struct datatype lt = exp64_address(node->unary.operand);
     if(exp64_is_struct(&lt) || exp64_is_array(&lt)){
         compiler_error(current_process, "%s needs a scalar operand\n", node->unary.op);
@@ -2682,6 +2838,12 @@ static struct datatype exp64_rvalue_of(struct node* node, bool decay){
             return exp64_pointer_to(&t);
         }
         case NODE_TYPE_IDENTIFIER: {
+            struct datatype rt;
+            int k = exp64_register_of(node, &rt);
+            if(k >= 0){
+                ops->reg_get(k);
+                return rt;
+            }
             // A function used as a value is its address.
             struct datatype t = exp64_address(node);
             return exp64_names_function(node) ? t : exp64_load(&t, decay);
@@ -2821,6 +2983,14 @@ void exp64_initialize_local(struct node* var){
     struct node* value = var->var.val;
     int offset = var->var.aoffset;
     int mark = vector_count(current_function->func.frame.elements);
+    int k = ops->reg_set ? regalloc_register(var) : -1;
+    if(k >= 0){
+        // a register variable.
+        struct datatype rt = exp64_value(value);
+        exp64_convert(0, &rt, t);
+        ops->reg_set(k);
+        return;
+    }
     struct datatype vt = exp64_value(value);
     if(exp64_is_ldouble(t)){
         // the room of the value is dropped after the copy, so
