@@ -108,7 +108,7 @@ bool datatype_is_whole_array(struct datatype* dtype){
 // SysV rules on every target: on i386 a double or a 64-bit integer is
 // 4-aligned in a struct. An array aligns like its element (`size` is
 // the element size), a struct or union like its strictest member.
-size_t datatype_alignment(struct datatype* dtype){
+static size_t datatype_alignment_unqualified(struct datatype* dtype){
     size_t max = target_current()->pointer_size;
     if(dtype->flags & DATATYPE_FLAG_IS_POINTER){
         return max;
@@ -125,6 +125,22 @@ size_t datatype_alignment(struct datatype* dtype){
         return max == DATA_SIZE_DWORD ? DATA_SIZE_DWORD : 16;
     }
     return dtype->size < max ? dtype->size : max;
+}
+
+// as gcc, an _Atomic object (or array element) of 2, 4, 8 or
+// 16 bytes is aligned to its size, so that the lock-free instructions
+// (and libatomic's) can work on it: an `_Atomic struct { int a, b; }`
+// is 8-aligned, an i386 `_Atomic double` member too.
+size_t datatype_alignment(struct datatype* dtype){
+    size_t align = datatype_alignment_unqualified(dtype);
+    if(!dtype->atomic_level || dtype->pointer_depth != dtype->atomic_level - 1){
+        return align;
+    }
+    size_t size = dtype->flags & DATATYPE_FLAG_IS_ARRAY ? datatype_element_size(dtype) : datatype_size(dtype);
+    if((size == 2 || size == 4 || size == 8 || size == 16) && size > align){
+        return size;
+    }
+    return align;
 }
 
 // An int or long of `size` bytes, signed or not, as an operation or a

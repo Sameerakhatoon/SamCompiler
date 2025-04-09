@@ -92,8 +92,10 @@ reject(){
 }
 
 for target in x86_64 aarch64 riscv64; do
-    reject $target "an _Atomic struct" 'struct S { int a; }; _Atomic struct S s; int main(void){ struct S t = s; return t.a; }' \
-        "_Atomic struct, union or void"
+    # an _Atomic struct loads and stores; arithmetic on it is
+    # an error.
+    reject $target "+= on an _Atomic struct" 'struct S { int a; }; _Atomic struct S s; int main(void){ s += 1; return 0; }' \
+        "needs an integer, pointer or floating object"
     reject $target "fetch_add on a double" 'double d; int main(void){ __atomic_fetch_add(&d, 1, 5); return 0; }' \
         "needs an integer or pointer object"
 done
@@ -101,6 +103,10 @@ reject x86 "an 8-byte atomic on i386" 'double d; int main(void){ double x = __at
     "no 8-byte integers on i386"
 reject x86 "an _Atomic int += a double on i386" '_Atomic int i; int main(void){ i += 0.5; return 0; }' \
     "only supported for a float or double object"
+# it read the wrong stack slot.
+reject x86 "a member of an atomic struct value on i386" \
+    'struct S { int a, b; }; _Atomic struct S s; int main(void){ return __atomic_load_n(&s, 5).b; }' \
+    "assign the value to a variable first"
 for target in x86 x86_64 aarch64 riscv64; do
     reject $target "the wrong argument count" 'int a; int main(void){ return __atomic_load_n(&a); }' \
         "__atomic_load_n expects 2 arguments"

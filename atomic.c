@@ -5,9 +5,9 @@
 // gcc's __atomic and __sync builtins, which <stdatomic.h>
 // is written in. Each is a native function (preprocessor/native.c);
 // exp64_atomic_builtin generates them on the 64-bit targets and
-// codegen_x86_native_atomic on i386. The memory order arguments are
-// evaluated and otherwise ignored: every operation is sequentially
-// consistent, which is at least as strong as any order asked for.
+// codegen_x86_native_atomic on i386. A constant memory order argument
+// picks the instructions (atomic_order); any other is
+// evaluated and the operation is sequentially consistent.
 static const struct atomic_builtin atomic_builtins[] = {
     { "__atomic_load_n",              ATOMIC_BUILTIN_LOAD,             0,      2 },
     { "__atomic_load",                ATOMIC_BUILTIN_GENERIC_LOAD,     0,      3 },
@@ -93,6 +93,55 @@ const char* tls_alias(struct compile_process* process, const char* name){
     char* out = buffers[next++ % 4];
     snprintf(out, sizeof(buffers[0]), "%s.tls.%08x", name, hash);
     return out;
+}
+
+// the memory order argument `order` of an access, as gcc's
+// get_memmodel and its checks per builtin have it.
+int atomic_order(struct compile_process* process, struct node* order, int access, bool* constant){
+    struct constant c;
+    *constant = constant_fold(process, order, &c) && constant_is_integer(&c);
+    if(!*constant || c.value > ATOMIC_ORDER_SEQ_CST){
+        return ATOMIC_ORDER_SEQ_CST;
+    }
+    int o = (int)c.value;
+    if(o == ATOMIC_ORDER_CONSUME){
+        o = ATOMIC_ORDER_ACQUIRE;
+    }
+    if(access == ATOMIC_ACCESS_LOAD && (o == ATOMIC_ORDER_RELEASE || o == ATOMIC_ORDER_ACQ_REL)){
+        return ATOMIC_ORDER_SEQ_CST;
+    }
+    if(access == ATOMIC_ACCESS_STORE && (o == ATOMIC_ORDER_ACQUIRE || o == ATOMIC_ORDER_ACQ_REL)){
+        return ATOMIC_ORDER_SEQ_CST;
+    }
+    return o;
+}
+
+bool atomic_order_acquires(int order){
+    return order == ATOMIC_ORDER_CONSUME || order == ATOMIC_ORDER_ACQUIRE || order == ATOMIC_ORDER_ACQ_REL
+        || order == ATOMIC_ORDER_SEQ_CST;
+}
+
+bool atomic_order_releases(int order){
+    return order == ATOMIC_ORDER_RELEASE || order == ATOMIC_ORDER_ACQ_REL || order == ATOMIC_ORDER_SEQ_CST;
+}
+
+// A failure order that releases is seq_cst for both, and so is a
+// success order weaker than the failure one (gcc's checks). The
+// instructions then acquire when either order does and release when
+// the success one does.
+int atomic_order_cas(int success, int failure){
+    if(failure == ATOMIC_ORDER_RELEASE || failure == ATOMIC_ORDER_ACQ_REL || failure > success
+       || success == ATOMIC_ORDER_SEQ_CST || failure == ATOMIC_ORDER_SEQ_CST){
+        return ATOMIC_ORDER_SEQ_CST;
+    }
+    bool acquire = atomic_order_acquires(success) || atomic_order_acquires(failure);
+    bool release = atomic_order_releases(success);
+    return acquire && release ? ATOMIC_ORDER_ACQ_REL : acquire ? ATOMIC_ORDER_ACQUIRE
+         : release ? ATOMIC_ORDER_RELEASE : ATOMIC_ORDER_RELAXED;
+}
+
+bool atomic_size_is_lock_free(long long size){
+    return size == 1 || size == 2 || size == 4 || size == 8;
 }
 
 // Whether an object of type t is _Atomic: the type is, at its own

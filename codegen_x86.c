@@ -1018,6 +1018,73 @@ static void codegen_store_maybe_atomic(struct datatype* dtype, const char* mov_t
     asm_push("mov %s [%s], %s", mov_type, address, codegen_sub_register("eax", size));
 }
 
+// an _Atomic struct, union or long double of `size` bytes
+// copied atomically between the object at ecx and the buffer at edx
+// (into the object when `store`), with `order`. A lock-free size is one
+// access: a mov (xchg for a seq_cst store), 8 bytes through the x87 as
+// gcc -m32 does it (fild and fistp move any 64 bits) with mfence after
+// a seq_cst store. Any other size is libatomic's generic __atomic_load
+// or __atomic_store (size, object, buffer, order). eax, ecx and edx are
+// clobbered.
+static void codegen_x86_atomic_copy(bool store, int size, int order){
+    if(size == DATA_SIZE_BYTE || size == DATA_SIZE_WORD || size == DATA_SIZE_DWORD){
+        const char* keyword = size == DATA_SIZE_BYTE ? "byte" : size == DATA_SIZE_WORD ? "word" : "dword";
+        const char* eax = codegen_sub_register("eax", size);
+        if(!store){
+            asm_push("mov %s, %s [ecx]", eax, keyword);
+            asm_push("mov %s [edx], %s", keyword, eax);
+            return;
+        }
+        asm_push("mov %s, %s [edx]", eax, keyword);
+        asm_push("%s %s [ecx], %s", order == ATOMIC_ORDER_SEQ_CST ? "xchg" : "mov", keyword, eax);
+        return;
+    }
+    if(size == DATA_SIZE_DDWORD){
+        asm_push("fild qword [%s]", store ? "edx" : "ecx");
+        asm_push("fistp qword [%s]", store ? "ecx" : "edx");
+        if(store && order == ATOMIC_ORDER_SEQ_CST){
+            asm_push("mfence");
+        }
+        return;
+    }
+    const char* symbol = store ? "$__atomic_store" : "$__atomic_load";
+    asm_push("extern %s", symbol);
+    asm_push("push %i", order);
+    asm_push("push edx");
+    asm_push("push ecx");
+    asm_push("push %i", size);
+    asm_push("call %s", symbol);
+    asm_push("add esp, 16");
+}
+
+// push the value of the _Atomic struct or union of type dtype
+// at ebx, read atomically (seq_cst), as codegen_generate_structure_push
+// pushes a plain one: room for its dwords, then the copy into it.
+static void codegen_x86_atomic_structure_push(struct datatype* dtype){
+    int size = (int)datatype_size(dtype);
+    asm_push("; ATOMIC STRUCTURE PUSH");
+    for(int i = align_value(size, DATA_SIZE_DWORD) / DATA_SIZE_DWORD; i > 0; i--){
+        asm_push_ins_push_with_data("dword 0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+            &(struct stack_frame_data){.dtype = *dtype});
+    }
+    asm_push("mov ecx, ebx");
+    asm_push("mov edx, esp");
+    codegen_x86_atomic_copy(false, size, ATOMIC_ORDER_SEQ_CST);
+    asm_push("; END ATOMIC STRUCTURE PUSH");
+}
+
+// the struct value on top of the stack stored atomically
+// (seq_cst) to the _Atomic struct or union at `address`, then popped.
+static void codegen_x86_atomic_move_struct(struct datatype* dtype, const char* address){
+    int size = (int)datatype_size(dtype);
+    asm_push("lea ecx, [%s]", address);
+    asm_push("mov edx, esp");
+    codegen_x86_atomic_copy(true, size, ATOMIC_ORDER_SEQ_CST);
+    for(int i = align_value(size, DATA_SIZE_DWORD) / DATA_SIZE_DWORD; i > 0; i--){
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    }
+}
+
 // ch140: `lhs = value`, the value already on the stack. Single-entity
 // path: store directly into the resolved base address. Multi-entity
 // path: compute the address via the access walker, pop the addr (edx)
@@ -1549,6 +1616,40 @@ static bool codegen_struct_conditional(struct node* node, struct datatype* t_out
     return true;
 }
 
+// a call of __atomic_load_n or __atomic_exchange_n on an
+// _Atomic struct or union (as <stdatomic.h> makes them) pushes the
+// struct's dwords, like a struct-valued conditional; its type.
+static bool codegen_atomic_struct_value(struct node* node, struct datatype* t_out){
+    while(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        node = node->parenthesis.exp;
+    }
+    if(!is_parentheses_node(node) || node->exp.left->type != NODE_TYPE_IDENTIFIER){
+        return false;
+    }
+    const struct atomic_builtin* b = atomic_builtin_get(node->exp.left->sval);
+    if(!b || !(b->kind == ATOMIC_BUILTIN_LOAD || (b->kind == ATOMIC_BUILTIN_EXCHANGE && strncmp(b->name, "__sync_", 7)))){
+        return false;
+    }
+    struct node* first = node->exp.right;
+    if(first->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        first = first->parenthesis.exp;
+    }
+    while(first->type == NODE_TYPE_EXPRESSION && S_EQ(first->exp.op, ",")){
+        first = first->exp.left;
+    }
+    struct datatype t = x87_type(first);
+    if(!(t.flags & DATATYPE_FLAG_IS_POINTER) || t.pointer_depth != 1){
+        return false;
+    }
+    t.pointer_depth = 0;
+    t.flags &= ~DATATYPE_FLAG_IS_POINTER;
+    if(!datatype_is_struct_or_union_non_pointer(&t)){
+        return false;
+    }
+    *t_out = t;
+    return true;
+}
+
 // One operand of a struct-valued conditional, copied into the room
 // reserved under it. The operand leaves its dwords on the stack (a
 // variable, a call's result, a nested conditional) or, for a struct
@@ -1831,7 +1932,8 @@ static size_t codegen_call_arguments_size(struct resolver_entity* entity){
     struct vector* arguments = entity->func_call_data.arguments;
     for(int i = 0; i < vector_count(arguments); i++){
         struct datatype t;
-        if(codegen_struct_conditional(*(struct node**)vector_at(arguments, i), &t)){
+        if(codegen_struct_conditional(*(struct node**)vector_at(arguments, i), &t)
+           || codegen_atomic_struct_value(*(struct node**)vector_at(arguments, i), &t)){
             size += align_value(datatype_size(&t), DATA_SIZE_DWORD) - DATA_SIZE_DWORD;
         }
     }
@@ -1948,6 +2050,19 @@ static void codegen_generate_entity_access_for_function_call(struct resolver_res
 // acknowledge the top response with the resolved last_entity. Returns
 // false (without emitting) if the resolver fails.
 static bool codegen_resolve_node_return_result(struct node* node, struct history* history, struct resolver_result** result_out){
+    if(is_access_node(node)){
+        // the chain would go on from a struct value an atomic
+        // builtin pushed; the resolver drops the member and nothing here
+        // follows it.
+        struct node* left = node->exp.left;
+        while(left->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            left = left->parenthesis.exp;
+        }
+        if(is_parentheses_node(left) && left->exp.left->type == NODE_TYPE_IDENTIFIER && atomic_builtin_get(left->exp.left->sval)){
+            compiler_error(current_process, "x86: a member of the struct value of %s is not supported; assign the value to a variable first\n",
+                left->exp.left->sval);
+        }
+    }
     struct resolver_result* result = resolver_follow(current_process->resolver, node);
     if(resolver_result_ok(result)){
         struct resolver_entity* root = resolver_result_entity_root(result);
@@ -2450,7 +2565,40 @@ static bool x87_param_type(struct node* callee, int i, struct datatype* out){
     return true;
 }
 
+// a call of __atomic_load_n or __atomic_exchange_n on an
+// _Atomic long double, whose value is that long double (in st0, from
+// x87_atomic_ld_call); *t its type.
+static bool x87_atomic_ld_value(struct node* node, struct datatype* t){
+    node = x87_strip(node);
+    if(!is_parentheses_node(node) || x87_strip(node->exp.left)->type != NODE_TYPE_IDENTIFIER){
+        return false;
+    }
+    const struct atomic_builtin* b = atomic_builtin_get(x87_strip(node->exp.left)->sval);
+    if(!b || !(b->kind == ATOMIC_BUILTIN_LOAD || (b->kind == ATOMIC_BUILTIN_EXCHANGE && strncmp(b->name, "__sync_", 7)))){
+        return false;
+    }
+    struct vector* args = x87_call_arguments(node);
+    if(vector_count(args) != b->args){
+        return false;
+    }
+    struct datatype pt = x87_type(*(struct node**)vector_at(args, 0));
+    if(!(pt.flags & (DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_ARRAY))){
+        return false;
+    }
+    struct datatype e = x87_deref(&pt);
+    if(!x87_is_long(&e)){
+        return false;
+    }
+    e.atomic_level = 0;
+    *t = e;
+    return true;
+}
+
 static struct datatype x87_call_type(struct node* node){
+    struct datatype atomic;
+    if(x87_atomic_ld_value(node, &atomic)){
+        return atomic;
+    }
     struct resolver_entity* function = x87_called_function(node->exp.left);
     if(function){
         return function->dtype;
@@ -2829,6 +2977,17 @@ static void x87_address(struct node* node){
 
 // st0 or eax = the object of type t at the address in eax.
 static void x87_load(struct datatype* t){
+    if(x87_is_long(t) && datatype_is_atomic(t)){
+        // 12 bytes, not lock-free: libatomic, through room
+        // on the stack.
+        x87_reserve((int)t->size);
+        asm_push("mov ecx, eax");
+        asm_push("mov edx, esp");
+        codegen_x86_atomic_copy(false, (int)t->size, ATOMIC_ORDER_SEQ_CST);
+        asm_push("fld tword [esp]");
+        x87_release((int)t->size);
+        return;
+    }
     if(x87_is_floating(t)){
         asm_push("fld %s [eax]", x87_size_keyword(t->size));
         return;
@@ -2842,6 +3001,17 @@ static void x87_load(struct datatype* t){
 // floating one is followed by mfence, an integer one is an xchg from
 // edx (eax keeps the value).
 static void x87_store(struct datatype* t){
+    if(x87_is_long(t) && datatype_is_atomic(t)){
+        // the value to room on the stack (and back to st0),
+        // then libatomic's store from there.
+        x87_reserve((int)t->size);
+        asm_push("fstp tword [esp]");
+        asm_push("fld tword [esp]");
+        asm_push("mov edx, esp");
+        codegen_x86_atomic_copy(true, (int)t->size, ATOMIC_ORDER_SEQ_CST);
+        x87_release((int)t->size);
+        return;
+    }
     if(x87_is_long(t)){
         // fst has no tword form.
         asm_push("fstp tword [ecx]");
@@ -2999,9 +3169,98 @@ static struct datatype x87_compare(struct node* node){
 // holds the GOT under -fPIC). The room on the stack: [esp] the new bits,
 // [esp+8] the old ones, then the operand spilled as a qword (none for
 // ++ and --), then the address.
+static void codegen_x86_atomic_cas_memory(int size, int success, int failure);
+static void codegen_x86_atomic_exchange_memory(int size, int order);
+
+// st0 = __atomic_load_n(p, mo) or __atomic_exchange_n(p, v, mo)
+// on the _Atomic long double *p (of type t): through room on the stack
+// and libatomic. The room: [esp] the result, then the value given to an
+// exchange, then the address.
+static struct datatype x87_atomic_ld_call(struct node* node, struct datatype* t){
+    struct vector* args = x87_call_arguments(node);
+    const struct atomic_builtin* b = atomic_builtin_get(x87_strip(node->exp.left)->sval);
+    bool exchange = b->kind == ATOMIC_BUILTIN_EXCHANGE;
+    int size = (int)t->size;
+    struct node* order_node = *(struct node**)vector_at(args, b->args - 1);
+    bool constant;
+    int order = atomic_order(current_process, order_node, exchange ? ATOMIC_ACCESS_RMW : ATOMIC_ACCESS_LOAD, &constant);
+    if(!constant){
+        x87_effect(order_node);
+    }
+    x87_value(*(struct node**)vector_at(args, 0));
+    x87_reserve(DATA_SIZE_DWORD);
+    asm_push("mov [esp], eax");
+    if(exchange){
+        x87_operand_as(*(struct node**)vector_at(args, 1), t);
+        x87_spill_as(t);
+    }
+    x87_reserve(size);
+    if(exchange){
+        asm_push("mov ecx, [esp+%i]", 2 * size);
+        asm_push("lea edx, [esp+%i]", size);
+        asm_push("mov ebx, esp");
+        codegen_x86_atomic_exchange_memory(size, order);
+    } else {
+        asm_push("mov ecx, [esp+%i]", size);
+        asm_push("mov edx, esp");
+        codegen_x86_atomic_copy(false, size, order);
+    }
+    asm_push("fld tword [esp]");
+    x87_release(size + (exchange ? size : 0) + DATA_SIZE_DWORD);
+    return *t;
+}
+
+// the same on an _Atomic long double (12 bytes, not lock-free):
+// libatomic's load and compare-exchange around the x87 arithmetic, as
+// gcc -m32 does. The room: [esp] the new value, [esp+12] the old one,
+// then the operand as a long double (none for ++ and --), then the
+// address. A failed compare-exchange leaves what it found in the old
+// value for the next try.
+static struct datatype x87_atomic_ld_update(struct node* object, struct node* operand, const char* ins, bool postfix){
+    struct datatype lt = x87_type(object);
+    int size = (int)lt.size;
+    int label = codegen_label_count();
+    x87_scratch();
+    x87_address(object);
+    x87_reserve(DATA_SIZE_DWORD);
+    asm_push("mov [esp], eax");
+    int spill = 0;
+    if(operand){
+        x87_operand_as(operand, &lt);
+        x87_spill_as(&lt);
+        spill = x87_spill_size(&lt);
+    }
+    x87_reserve(2 * size);
+    int address = 2 * size + spill;
+    asm_push("mov ecx, [esp+%i]", address);
+    asm_push("lea edx, [esp+%i]", size);
+    codegen_x86_atomic_copy(false, size, ATOMIC_ORDER_SEQ_CST);
+    asm_push(".x87_atomic_%i:", label);
+    asm_push("fld tword [esp+%i]", size);
+    if(operand){
+        asm_push("fld tword [esp+%i]", 2 * size);
+        asm_push("%sp st1, st0", ins);
+    } else {
+        asm_push("%s dword [x87_one]", ins);
+    }
+    asm_push("fstp tword [esp]");
+    asm_push("mov ecx, [esp+%i]", address);
+    asm_push("lea edx, [esp+%i]", size);
+    asm_push("mov ebx, esp");
+    codegen_x86_atomic_cas_memory(size, ATOMIC_ORDER_SEQ_CST, ATOMIC_ORDER_SEQ_CST);
+    asm_push("test eax, eax");
+    asm_push("jz .x87_atomic_%i", label);
+    asm_push("fld tword [esp+%i]", postfix ? size : 0);
+    x87_release(2 * size + spill + DATA_SIZE_DWORD);
+    return lt;
+}
+
 static struct datatype x87_atomic_update(struct node* object, struct node* operand, const char* ins, bool postfix){
     struct datatype lt = x87_type(object);
     struct datatype c = lt;
+    if(x87_is_long(&lt)){
+        return x87_atomic_ld_update(object, operand, ins, postfix);
+    }
     if(operand){
         c = x87_common(object, operand);
     }
@@ -3227,6 +3486,19 @@ static struct datatype x87_ternary(struct node* node, struct datatype* t){
 static struct datatype x87_call_emit(struct node* node, bool struct_result){
     struct node* callee = x87_strip(node->exp.left);
     struct resolver_entity* function = x87_called_function(callee);
+    if(!struct_result && callee->type == NODE_TYPE_IDENTIFIER && atomic_builtin_get(callee->sval)
+       && native_function_get(current_process, callee->sval)
+       && !resolver_get_variable(0, current_process->resolver, callee->sval)){
+        // an atomic builtin with a long double operand is the
+        // integer generator's (codegen_x86_native_atomic), which works
+        // the operand out on the x87 itself; its result in eax.
+        struct native_function* native = native_function_get(current_process, callee->sval);
+        native->callbacks.call(&x86_codegen, native, x87_call_arguments(node));
+        struct datatype t = datatype_for_int();
+        asm_datatype_back(&t);
+        asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+        return t;
+    }
     struct datatype rtype = x87_call_type(node);
     if(callee->type == NODE_TYPE_IDENTIFIER && !function
        && !resolver_get_variable(0, current_process->resolver, callee->sval)){
@@ -3346,6 +3618,10 @@ static struct datatype x87_expression(struct node* node, struct datatype* t){
         return x87_ternary(node, t);
     }
     if(is_parentheses_node(node)){
+        struct datatype atomic;
+        if(x87_atomic_ld_value(node, &atomic)){
+            return x87_atomic_ld_call(node, &atomic);
+        }
         return x87_call_emit(node, false);
     }
     if(is_array_node(node) || is_access_node(node)){
@@ -3462,6 +3738,11 @@ static void codegen_plus_or_minus_string_for_value(char* out, int val, size_t le
 // stack in the canonical order callers expect.
 static void codegen_generate_structure_push(struct resolver_entity* entity, struct history* history, int start_pos){
     (void)history;
+    if(datatype_is_atomic(&entity->dtype) && start_pos == 0){
+        codegen_x86_atomic_structure_push(&entity->dtype);
+        codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_PUSHED_STRUCTURE});
+        return;
+    }
     asm_push("; STRUCTURE PUSH");
     size_t structure_size = align_value(entity->dtype.size, DATA_SIZE_DWORD);
     int pushes = structure_size / DATA_SIZE_DWORD;
@@ -3485,6 +3766,10 @@ static void codegen_generate_structure_push_or_return(struct resolver_entity* en
 // destination via `mov [base+offset], eax`. Used for struct-value
 // assignment (`s = t`).
 static void codegen_generate_move_struct(struct datatype* dtype, const char* base_address, int offset){
+    if(datatype_is_atomic(dtype) && offset == 0){
+        codegen_x86_atomic_move_struct(dtype, base_address);
+        return;
+    }
     size_t structure_size = align_value(datatype_size(dtype), DATA_SIZE_DWORD);
     int pops = structure_size / DATA_SIZE_DWORD;
     // the last dword of a struct whose size is not a multiple
@@ -4161,9 +4446,11 @@ static void codegen_generate_global_variable_for_primitive(struct node* node){
     // an _Atomic global is aligned to its size, as in gcc, so
     // a plain load or store of it (a double's fld and fst too) never
     // straddles a cache line and stays one access. Other globals keep
-    // the packed layout the locked golden output has.
-    if(datatype_is_atomic(&node->var.type) && variable_size(node) > DATA_SIZE_BYTE){
-        asm_push("align %lu, db 0", (unsigned long)variable_size(node));
+    // the packed layout the locked golden output has. The
+    // alignment gcc gives it (that of its size from 2 to 16 bytes, a
+    // 12-byte long double's 4).
+    if(datatype_is_atomic(&node->var.type) && datatype_alignment(&node->var.type) > DATA_SIZE_BYTE){
+        asm_push("align %lu, db 0", (unsigned long)datatype_alignment(&node->var.type));
     }
     if(node->var.val){
         if(node->var.val->type == NODE_TYPE_STRING){
@@ -4666,14 +4953,22 @@ static void codegen_x86_atomic_pop_argument(struct generator* generator, struct 
     asm_push_ins_pop(reg, STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
 }
 
-// The memory order arguments from `first` on: evaluated when they can
-// have side effects, otherwise ignored (every operation is seq_cst).
-static void codegen_x86_atomic_orders(struct generator* generator, struct vector* arguments, int first){
+// The memory order arguments from `first` on: one that is not a
+// constant is evaluated, for its side effects. The order of
+// the last one, for the access (seq_cst when it is not a constant). x86
+// is TSO: only a store and a fence weaker than seq_cst differ (a mov,
+// and nothing); loads are movs and read-modify-writes locked whatever
+// the order.
+static int codegen_x86_atomic_orders(struct generator* generator, struct vector* arguments, int first, int access){
+    int order = ATOMIC_ORDER_SEQ_CST;
     for(int i = first; i < vector_count(arguments); i++){
-        if(codegen_x86_atomic_argument(arguments, i)->type != NODE_TYPE_NUMBER){
+        bool constant;
+        order = atomic_order(current_process, codegen_x86_atomic_argument(arguments, i), access, &constant);
+        if(!constant){
             codegen_x86_atomic_pop_argument(generator, arguments, i, "ecx");
         }
     }
+    return order;
 }
 
 // The type of the object a pointer of type pt points to, not atomic.
@@ -4689,10 +4984,281 @@ static struct datatype codegen_x86_atomic_object(struct datatype* pt, const char
         t.flags &= ~DATATYPE_FLAG_IS_POINTER;
     }
     t.atomic_level = 0;
-    if(datatype_is_struct_or_union_non_pointer(&t) || (t.type == DATA_TYPE_VOID && !t.pointer_depth)){
+    if(t.type == DATA_TYPE_VOID && !t.pointer_depth){
         compiler_error(current_process, "%s needs an integer or pointer object\n", name);
     }
     return t;
+}
+
+// exchange the _Atomic object of `size` bytes at ecx with the
+// value at edx, its old value to ebx's buffer; compare-exchange it with
+// the expected value at edx (which a failure overwrites with what was
+// there) and the desired one at ebx, eax = 0 or 1. Lock-free sizes are
+// xchg, lock cmpxchg and lock cmpxchg8b (with esi and edi saved around
+// it); any other size libatomic's __atomic_exchange and
+// __atomic_compare_exchange. Every general register but esi, edi and
+// ebp is clobbered.
+static void codegen_x86_atomic_exchange_memory(int size, int order){
+    if(size == DATA_SIZE_BYTE || size == DATA_SIZE_WORD || size == DATA_SIZE_DWORD){
+        const char* keyword = size == DATA_SIZE_BYTE ? "byte" : size == DATA_SIZE_WORD ? "word" : "dword";
+        const char* eax = codegen_sub_register("eax", size);
+        asm_push("mov %s, %s [edx]", eax, keyword);
+        asm_push("xchg %s [ecx], %s", keyword, eax);
+        asm_push("mov %s [ebx], %s", keyword, eax);
+        return;
+    }
+    if(size == DATA_SIZE_DDWORD){
+        int label = ++codegen_x86_atomic_count;
+        asm_push("push esi");
+        asm_push("push edi");
+        asm_push("mov esi, ecx");
+        asm_push("mov edi, ebx");
+        asm_push("mov ebx, [edx]");
+        asm_push("mov ecx, [edx+4]");
+        asm_push("mov eax, [esi]");
+        asm_push("mov edx, [esi+4]");
+        asm_push(".atomic_%i:", label);
+        asm_push("lock cmpxchg8b [esi]");
+        asm_push("jne .atomic_%i", label);
+        asm_push("mov [edi], eax");
+        asm_push("mov [edi+4], edx");
+        asm_push("pop edi");
+        asm_push("pop esi");
+        return;
+    }
+    asm_push("extern $__atomic_exchange");
+    asm_push("push %i", order);
+    asm_push("push ebx");
+    asm_push("push edx");
+    asm_push("push ecx");
+    asm_push("push %i", size);
+    asm_push("call $__atomic_exchange");
+    asm_push("add esp, 20");
+}
+
+static void codegen_x86_atomic_cas_memory(int size, int success, int failure){
+    int label = ++codegen_x86_atomic_count;
+    if(size == DATA_SIZE_BYTE || size == DATA_SIZE_WORD || size == DATA_SIZE_DWORD){
+        const char* keyword = size == DATA_SIZE_BYTE ? "byte" : size == DATA_SIZE_WORD ? "word" : "dword";
+        const char* eax = codegen_sub_register("eax", size);
+        if(size == DATA_SIZE_DWORD){
+            asm_push("mov ebx, [ebx]");
+        } else {
+            asm_push("movzx ebx, %s [ebx]", keyword);
+        }
+        asm_push("mov %s, %s [edx]", eax, keyword);
+        asm_push("lock cmpxchg %s [ecx], %s", keyword, size == DATA_SIZE_BYTE ? "bl" : size == DATA_SIZE_WORD ? "bx" : "ebx");
+        asm_push("je .atomic_%i", label);
+        asm_push("mov %s [edx], %s", keyword, eax);
+        asm_push(".atomic_%i:", label);
+        asm_push("sete al");
+        asm_push("movzx eax, al");
+        return;
+    }
+    if(size == DATA_SIZE_DDWORD){
+        asm_push("push esi");
+        asm_push("push edi");
+        asm_push("mov esi, ecx");
+        asm_push("mov edi, edx");
+        asm_push("mov ecx, [ebx+4]");
+        asm_push("mov ebx, [ebx]");
+        asm_push("mov eax, [edi]");
+        asm_push("mov edx, [edi+4]");
+        asm_push("lock cmpxchg8b [esi]");
+        asm_push("je .atomic_%i", label);
+        asm_push("mov [edi], eax");
+        asm_push("mov [edi+4], edx");
+        asm_push(".atomic_%i:", label);
+        asm_push("pop edi");
+        asm_push("pop esi");
+        asm_push("sete al");
+        asm_push("movzx eax, al");
+        return;
+    }
+    asm_push("extern $__atomic_compare_exchange");
+    asm_push("push %i", failure);
+    asm_push("push %i", success);
+    asm_push("push ebx");
+    asm_push("push edx");
+    asm_push("push ecx");
+    asm_push("push %i", size);
+    asm_push("call $__atomic_compare_exchange");
+    asm_push("add esp, 24");
+    asm_push("movzx eax, al");
+}
+
+// the builtins on an _Atomic struct, union or long double, the
+// object's address pushed: the generic forms (values by address) on any
+// of them, and the _n forms <stdatomic.h> uses (values by value: a
+// struct's dwords on the stack, as a struct value is here) on a struct
+// or union. A long double by value is not done on i386 (its value is
+// the x87's, which these do not reach).
+static void codegen_x86_atomic_memory(struct generator* generator, const struct atomic_builtin* b, struct vector* arguments,
+                                      struct datatype* t){
+    int kind = b->kind;
+    int size = (int)datatype_size(t);
+    int words = align_value(size, DATA_SIZE_DWORD) / DATA_SIZE_DWORD;
+    struct datatype void_type;
+    datatype_set_void(&void_type);
+    struct datatype int_type = datatype_for_int();
+    bool by_value = kind == ATOMIC_BUILTIN_LOAD || kind == ATOMIC_BUILTIN_STORE
+                 || (kind == ATOMIC_BUILTIN_EXCHANGE && strncmp(b->name, "__sync_", 7)) || kind == ATOMIC_BUILTIN_CAS;
+    bool generic = kind == ATOMIC_BUILTIN_GENERIC_LOAD || kind == ATOMIC_BUILTIN_GENERIC_STORE
+                || kind == ATOMIC_BUILTIN_GENERIC_EXCHANGE || kind == ATOMIC_BUILTIN_GENERIC_CAS;
+    if(!generic && !by_value){
+        compiler_error(current_process, "%s needs an integer or pointer object\n", b->name);
+    }
+    bool ld = !datatype_is_struct_or_union_non_pointer(t);
+    if(by_value && ld && (kind == ATOMIC_BUILTIN_LOAD || kind == ATOMIC_BUILTIN_EXCHANGE)){
+        // x87_atomic_call does these where a long double is wanted.
+        compiler_error(current_process, "x86: %s on an _Atomic long double is only supported for a floating value\n", b->name);
+    }
+    // The orders: those that are not constants are evaluated here.
+    bool constant;
+    int order, failure = ATOMIC_ORDER_SEQ_CST;
+    if(kind == ATOMIC_BUILTIN_CAS || kind == ATOMIC_BUILTIN_GENERIC_CAS){
+        order = atomic_order(current_process, codegen_x86_atomic_argument(arguments, 4), ATOMIC_ACCESS_RMW, &constant);
+        failure = atomic_order(current_process, codegen_x86_atomic_argument(arguments, 5), ATOMIC_ACCESS_LOAD, &constant);
+        codegen_x86_atomic_orders(generator, arguments, 3, ATOMIC_ACCESS_RMW);
+    } else {
+        int access = kind == ATOMIC_BUILTIN_LOAD || kind == ATOMIC_BUILTIN_GENERIC_LOAD ? ATOMIC_ACCESS_LOAD
+                   : kind == ATOMIC_BUILTIN_STORE || kind == ATOMIC_BUILTIN_GENERIC_STORE ? ATOMIC_ACCESS_STORE
+                   : ATOMIC_ACCESS_RMW;
+        order = codegen_x86_atomic_orders(generator, arguments, b->args - 1, access);
+    }
+    switch(kind){
+        case ATOMIC_BUILTIN_GENERIC_LOAD:
+        case ATOMIC_BUILTIN_GENERIC_STORE:
+            codegen_x86_atomic_pop_argument(generator, arguments, 1, "edx");
+            asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            codegen_x86_atomic_copy(kind == ATOMIC_BUILTIN_GENERIC_STORE, size, order);
+            generator->ret(&void_type, "0");
+            return;
+        case ATOMIC_BUILTIN_GENERIC_EXCHANGE:
+        case ATOMIC_BUILTIN_GENERIC_CAS:
+            generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, 1), 0);
+            generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, 2), 0);
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("edx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            if(kind == ATOMIC_BUILTIN_GENERIC_EXCHANGE){
+                codegen_x86_atomic_exchange_memory(size, order);
+                generator->ret(&void_type, "0");
+                return;
+            }
+            codegen_x86_atomic_cas_memory(size, order, failure);
+            generator->ret(&int_type, "eax");
+            return;
+        case ATOMIC_BUILTIN_LOAD:
+            asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            codegen_x86_atomic_structure_push(t);
+            codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_PUSHED_STRUCTURE});
+            return;
+        case ATOMIC_BUILTIN_STORE:
+            if(ld){
+                // The value through the x87, spilled as a long double.
+                x87_operand_as(codegen_x86_atomic_argument(arguments, 1), t);
+                x87_spill_as(t);
+                asm_push("mov ecx, [esp+%i]", size);
+                asm_push("mov edx, esp");
+                codegen_x86_atomic_copy(true, size, order);
+                x87_release(size);
+                asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+                generator->ret(&void_type, "0");
+                return;
+            }
+            generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, 1), 0);
+            asm_push("mov ecx, [esp+%i]", DATA_SIZE_DWORD * words);
+            asm_push("mov edx, esp");
+            codegen_x86_atomic_copy(true, size, order);
+            for(int i = 0; i <= words; i++){
+                asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            }
+            generator->ret(&void_type, "0");
+            return;
+        case ATOMIC_BUILTIN_EXCHANGE:
+            // [A], the result's room, the value: the old value goes to
+            // the room, which then moves down over A.
+            for(int i = 0; i < words; i++){
+                asm_push_ins_push_with_data("dword 0", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value", 0,
+                    &(struct stack_frame_data){.dtype = *t});
+            }
+            generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, 1), 0);
+            asm_push("mov ecx, [esp+%i]", 2 * DATA_SIZE_DWORD * words);
+            asm_push("mov edx, esp");
+            asm_push("lea ebx, [esp+%i]", DATA_SIZE_DWORD * words);
+            codegen_x86_atomic_exchange_memory(size, order);
+            for(int i = 0; i < words; i++){
+                asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            }
+            for(int i = words - 1; i >= 0; i--){
+                asm_push("mov eax, [esp+%i]", DATA_SIZE_DWORD * i);
+                asm_push("mov [esp+%i], eax", DATA_SIZE_DWORD * (i + 1));
+            }
+            asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            codegen_response_acknowledge(&(struct response){.flags = RESPONSE_FLAG_PUSHED_STRUCTURE});
+            return;
+        case ATOMIC_BUILTIN_CAS:
+            generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, 1), 0);
+            if(ld){
+                x87_operand_as(codegen_x86_atomic_argument(arguments, 2), t);
+                x87_spill_as(t);
+                asm_push("mov ecx, [esp+%i]", size + DATA_SIZE_DWORD);
+                asm_push("mov edx, [esp+%i]", size);
+                asm_push("mov ebx, esp");
+                codegen_x86_atomic_cas_memory(size, order, failure);
+                x87_release(size);
+                asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+                asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+                generator->ret(&int_type, "eax");
+                return;
+            }
+            generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, 2), 0);
+            asm_push("mov ecx, [esp+%i]", DATA_SIZE_DWORD * (words + 1));
+            asm_push("mov edx, [esp+%i]", DATA_SIZE_DWORD * words);
+            asm_push("mov ebx, esp");
+            codegen_x86_atomic_cas_memory(size, order, failure);
+            for(int i = 0; i < words + 2; i++){
+                asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+            }
+            generator->ret(&int_type, "eax");
+            return;
+    }
+    compiler_error(current_process, "BUG: atomic builtin %s\n", b->name);
+}
+
+// __atomic_always_lock_free and __atomic_is_lock_free, as
+// exp64_atomic_lock_free: 1 for a constant size of 1, 2, 4 or 8 bytes
+// (8 through cmpxchg8b, as gcc -m32 says), else 0 for the first and
+// libatomic's answer for the second.
+static void codegen_x86_atomic_lock_free(struct generator* generator, const struct atomic_builtin* b, struct vector* arguments){
+    struct datatype int_type = datatype_for_int();
+    struct node* size = codegen_x86_atomic_argument(arguments, 0);
+    struct node* p = codegen_x86_atomic_argument(arguments, 1);
+    bool always = S_EQ(b->name, "__atomic_always_lock_free");
+    struct constant c;
+    if(constant_fold(current_process, size, &c) && constant_is_integer(&c)){
+        struct constant pc;
+        bool aligned = true;
+        if(c.value && constant_fold(current_process, p, &pc) && constant_is_integer(&pc)){
+            aligned = pc.value % c.value == 0;
+        }
+        if((atomic_size_is_lock_free((long long)c.value) && aligned) || always){
+            asm_push("mov eax, %i", atomic_size_is_lock_free((long long)c.value) && aligned);
+            generator->ret(&int_type, "eax");
+            return;
+        }
+    } else if(always){
+        compiler_error(current_process, "The size given to __atomic_always_lock_free must be a constant\n");
+    }
+    generator->gen_exp(generator, p, 0);
+    generator->gen_exp(generator, size, 0);
+    asm_push("extern $__atomic_is_lock_free");
+    asm_push("call $__atomic_is_lock_free");
+    asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push_ins_pop("ecx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
+    asm_push("movzx eax, al");
+    generator->ret(&int_type, "eax");
 }
 
 // the generic builtins (values by address) on an 8-byte object,
@@ -4702,7 +5268,7 @@ static struct datatype codegen_x86_atomic_object(struct datatype* pt, const char
 // compare-exchange is lock cmpxchg8b, which compares edx:eax and stores
 // ecx:ebx, so the object's address goes in esi, saved around it (esi
 // holds the GOT under -fPIC).
-static void codegen_x86_atomic_generic8(struct generator* generator, int kind, int label){
+static void codegen_x86_atomic_generic8(struct generator* generator, int kind, int label, int order){
     struct datatype void_type;
     datatype_set_void(&void_type);
     struct datatype int_type = datatype_for_int();
@@ -4719,7 +5285,9 @@ static void codegen_x86_atomic_generic8(struct generator* generator, int kind, i
             asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
             asm_push("fild qword [eax]");
             asm_push("fistp qword [ebx]");
-            asm_push("mfence");
+            if(order == ATOMIC_ORDER_SEQ_CST){
+                asm_push("mfence");
+            }
             generator->ret(&void_type, "0");
             return;
     }
@@ -4793,20 +5361,15 @@ void codegen_x86_native_atomic(struct generator* generator, struct native_functi
     datatype_set_void(&void_type);
     struct datatype int_type = datatype_for_int();
     if(kind == ATOMIC_BUILTIN_FENCE || kind == ATOMIC_BUILTIN_SIGNAL_FENCE){
-        codegen_x86_atomic_orders(generator, arguments, 0);
-        if(kind == ATOMIC_BUILTIN_FENCE){
+        int order = codegen_x86_atomic_orders(generator, arguments, 0, ATOMIC_ACCESS_FENCE);
+        if(kind == ATOMIC_BUILTIN_FENCE && order == ATOMIC_ORDER_SEQ_CST){
             asm_push("mfence");
         }
         generator->ret(&void_type, "0");
         return;
     }
     if(kind == ATOMIC_BUILTIN_LOCK_FREE){
-        codegen_x86_atomic_pop_argument(generator, arguments, 0, "eax");
-        // up to 8 bytes, through cmpxchg8b, as gcc -m32 says.
-        asm_push("cmp eax, %i", DATA_SIZE_DDWORD);
-        asm_push("setbe al");
-        asm_push("movzx eax, al");
-        generator->ret(&int_type, "eax");
+        codegen_x86_atomic_lock_free(generator, b, arguments);
         return;
     }
     // The pointer stays pushed while the operands are worked out.
@@ -4819,6 +5382,9 @@ void codegen_x86_native_atomic(struct generator* generator, struct native_functi
         t.size = DATA_SIZE_BYTE;
         t.type = DATA_TYPE_CHAR;
         t.flags &= ~DATATYPE_FLAG_IS_SIGNED;
+    } else if(datatype_is_struct_or_union_non_pointer(&t) || x87_is_long(&t)){
+        codegen_x86_atomic_memory(generator, b, arguments, &t);
+        return;
     }
     int size = codegen_x86_atomic_size(&t);
     bool generic = kind == ATOMIC_BUILTIN_GENERIC_LOAD || kind == ATOMIC_BUILTIN_GENERIC_STORE
@@ -4840,9 +5406,17 @@ void codegen_x86_native_atomic(struct generator* generator, struct native_functi
     for(int i = 1; i < operands; i++){
         generator->gen_exp(generator, codegen_x86_atomic_argument(arguments, i), 0);
     }
-    codegen_x86_atomic_orders(generator, arguments, operands);
+    int access = kind == ATOMIC_BUILTIN_LOAD || kind == ATOMIC_BUILTIN_GENERIC_LOAD ? ATOMIC_ACCESS_LOAD
+               : kind == ATOMIC_BUILTIN_STORE || kind == ATOMIC_BUILTIN_GENERIC_STORE || kind == ATOMIC_BUILTIN_CLEAR
+                 ? ATOMIC_ACCESS_STORE : ATOMIC_ACCESS_RMW;
+    int order = codegen_x86_atomic_orders(generator, arguments, operands, access);
+    if(kind == ATOMIC_BUILTIN_RELEASE){
+        order = ATOMIC_ORDER_RELEASE;
+    }
+    // a store weaker than seq_cst is a mov.
+    const char* store = order == ATOMIC_ORDER_SEQ_CST ? "xchg" : "mov";
     if(size == DATA_SIZE_DDWORD){
-        codegen_x86_atomic_generic8(generator, kind, label);
+        codegen_x86_atomic_generic8(generator, kind, label, order);
         return;
     }
     switch(kind){
@@ -4859,7 +5433,7 @@ void codegen_x86_native_atomic(struct generator* generator, struct native_functi
             if(kind == ATOMIC_BUILTIN_GENERIC_STORE){
                 codegen_load_eax("eax", size, is_signed);
             }
-            asm_push("xchg %s [ebx], %s", keyword, eax);
+            asm_push("%s %s [ebx], %s", kind == ATOMIC_BUILTIN_EXCHANGE ? "xchg" : store, keyword, eax);
             if(kind != ATOMIC_BUILTIN_EXCHANGE){
                 generator->ret(&void_type, "0");
                 return;
@@ -4872,7 +5446,7 @@ void codegen_x86_native_atomic(struct generator* generator, struct native_functi
         case ATOMIC_BUILTIN_TEST_AND_SET:
             asm_push_ins_pop("ebx", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
             asm_push("mov eax, %i", kind == ATOMIC_BUILTIN_TEST_AND_SET ? 1 : 0);
-            asm_push("xchg %s [ebx], %s", keyword, eax);
+            asm_push("%s %s [ebx], %s", kind == ATOMIC_BUILTIN_TEST_AND_SET ? "xchg" : store, keyword, eax);
             if(kind != ATOMIC_BUILTIN_TEST_AND_SET){
                 generator->ret(&void_type, "0");
                 return;

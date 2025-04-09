@@ -2,8 +2,10 @@
 #define STDATOMIC_H
 
 // C11 7.17 on gcc's __atomic builtins, as gcc's
-// own stdatomic.h is. Every operation is sequentially consistent
-// whatever memory order is given; the order is still evaluated.
+// own stdatomic.h is. A constant memory order picks the instructions
+//; any other is evaluated and is seq_cst. gcc's builds its
+// generic forms with __auto_type temporaries; here the _n builtins also
+// take an _Atomic struct, union or long double by value.
 // typedef is a token substitution here, so the types are written out.
 
 typedef int memory_order;
@@ -14,7 +16,9 @@ typedef int memory_order;
 #define memory_order_acq_rel __ATOMIC_ACQ_REL
 #define memory_order_seq_cst __ATOMIC_SEQ_CST
 
-// Every size this compiler has is lock-free.
+// Every scalar size this compiler has is lock-free, as gcc says on each
+// target; atomic_is_lock_free of a struct of another size asks
+// libatomic.
 #define ATOMIC_BOOL_LOCK_FREE     2
 #define ATOMIC_CHAR_LOCK_FREE     2
 #define ATOMIC_CHAR16_T_LOCK_FREE 2

@@ -66,6 +66,12 @@ static const struct codegen_backend codegen_backend_riscv64 = {
     .frame_register = "s0",
 };
 
+// libatomic, for the atomic accesses that have no lock-free
+// instruction (an _Atomic struct of 16 bytes, an _Atomic long double):
+// last on every glibc link line, as needed only, so a program that
+// calls none of it gets no dependency (and a static link no member).
+#define TARGET_LIBATOMIC " -Wl,--push-state,--as-needed -latomic -Wl,--pop-state"
+
 static const struct target target_x86_desc = {
     .name              = "x86",
     .pointer_size      = DATA_SIZE_DWORD,
@@ -82,12 +88,12 @@ static const struct target target_x86_desc = {
     //
     // -static-pie: position independent code that
     // still runs on an x86_64 host with no i386 loader or libc.
-    .link_cmd          = "i686-linux-gnu-gcc -static-pie %s -o %s",
+    .link_cmd          = "i686-linux-gnu-gcc -static-pie %s -o %s" TARGET_LIBATOMIC,
     // gcc-multilib brings the i386 loader, so the default dynamic PIE.
-    .link_fallback_cmd = "gcc -m32 %s -o %s",
-    .link_dynamic_cmd  = "i686-linux-gnu-gcc %s -o %s",
-    .link_shared_cmd   = "i686-linux-gnu-gcc -shared %s -o %s",
-    .link_shared_fallback_cmd = "gcc -m32 -shared %s -o %s",
+    .link_fallback_cmd = "gcc -m32 %s -o %s" TARGET_LIBATOMIC,
+    .link_dynamic_cmd  = "i686-linux-gnu-gcc %s -o %s" TARGET_LIBATOMIC,
+    .link_shared_cmd   = "i686-linux-gnu-gcc -shared %s -o %s" TARGET_LIBATOMIC,
+    .link_shared_fallback_cmd = "gcc -m32 -shared %s -o %s" TARGET_LIBATOMIC,
     .run_cmd           = "",
     .macros            = target_x86_macros,
 };
@@ -108,9 +114,9 @@ static const struct target target_x86_64_desc = {
     .asm_cmd           = "nasm -f elf64 %s -o %s",
     // gcc's default PIE: a symbol this file defines is reached
     // rip-relative, any other through the GOT.
-    .link_cmd          = "gcc %s -o %s",
+    .link_cmd          = "gcc %s -o %s" TARGET_LIBATOMIC,
     .link_fallback_cmd = 0,
-    .link_shared_cmd   = "gcc -shared %s -o %s",
+    .link_shared_cmd   = "gcc -shared %s -o %s" TARGET_LIBATOMIC,
     .run_cmd           = "",
     .macros            = target_x86_64_macros,
 };
@@ -133,12 +139,12 @@ static const struct target target_aarch64_desc = {
     .asm_cmd           = "aarch64-linux-gnu-as %s -o %s",
     // -static-pie: qemu-user then needs no aarch64 sysroot, and the
     // code is still checked as position independent.
-    .link_cmd          = "aarch64-linux-gnu-gcc -static-pie %s -o %s",
+    .link_cmd          = "aarch64-linux-gnu-gcc -static-pie %s -o %s" TARGET_LIBATOMIC,
     .link_fallback_cmd = 0,
     // With a shared library the program is a dynamic PIE; run it with
     // qemu-aarch64 -L /usr/aarch64-linux-gnu.
-    .link_dynamic_cmd  = "aarch64-linux-gnu-gcc %s -o %s",
-    .link_shared_cmd   = "aarch64-linux-gnu-gcc -shared %s -o %s",
+    .link_dynamic_cmd  = "aarch64-linux-gnu-gcc %s -o %s" TARGET_LIBATOMIC,
+    .link_shared_cmd   = "aarch64-linux-gnu-gcc -shared %s -o %s" TARGET_LIBATOMIC,
     .run_cmd           = "qemu-aarch64",
     .macros            = target_aarch64_macros,
 };
@@ -166,10 +172,10 @@ static const struct target target_riscv64_desc = {
     // `qemu-riscv64 -L /usr/riscv64-linux-gnu` for every run. The code
     // is position independent all the same: it links as a dynamic PIE
     // and as a shared object.
-    .link_cmd          = "riscv64-linux-gnu-gcc -static %s -o %s",
+    .link_cmd          = "riscv64-linux-gnu-gcc -static %s -o %s" TARGET_LIBATOMIC,
     .link_fallback_cmd = 0,
-    .link_dynamic_cmd  = "riscv64-linux-gnu-gcc %s -o %s",
-    .link_shared_cmd   = "riscv64-linux-gnu-gcc -shared %s -o %s",
+    .link_dynamic_cmd  = "riscv64-linux-gnu-gcc %s -o %s" TARGET_LIBATOMIC,
+    .link_shared_cmd   = "riscv64-linux-gnu-gcc -shared %s -o %s" TARGET_LIBATOMIC,
     .run_cmd           = "qemu-riscv64",
     .macros            = target_riscv64_macros,
 };

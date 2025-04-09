@@ -362,6 +362,38 @@ struct atomic_builtin {
 const struct atomic_builtin* atomic_builtin_get(const char* name);
 void atomic_builtins_register(struct compile_process* process);
 bool datatype_is_atomic(struct datatype* t);
+
+// the C11 memory orders, as gcc's __ATOMIC_* values.
+enum {
+    ATOMIC_ORDER_RELAXED,
+    ATOMIC_ORDER_CONSUME,
+    ATOMIC_ORDER_ACQUIRE,
+    ATOMIC_ORDER_RELEASE,
+    ATOMIC_ORDER_ACQ_REL,
+    ATOMIC_ORDER_SEQ_CST,
+};
+// What an order is given to (atomic_order).
+enum {
+    ATOMIC_ACCESS_LOAD,
+    ATOMIC_ACCESS_STORE,
+    ATOMIC_ACCESS_RMW,
+    ATOMIC_ACCESS_FENCE,
+};
+// The order a memory order argument asks for, made valid for the
+// access: seq_cst when it is not a constant, consume as acquire, and
+// seq_cst for an order the access cannot have (a release load, an
+// acquire store) or a value out of range, as gcc does. *constant says
+// whether it was a constant; if not, it is still to be evaluated for
+// its side effects.
+int  atomic_order(struct compile_process* process, struct node* order, int access, bool* constant);
+// The one order of a compare-exchange from its success and failure
+// orders, as gcc combines them.
+int  atomic_order_cas(int success, int failure);
+bool atomic_order_acquires(int order);
+bool atomic_order_releases(int order);
+// whether an object of `size` bytes has lock-free atomic
+// instructions here: 1, 2, 4 and 8, as gcc says on every target.
+bool atomic_size_is_lock_free(long long size);
 const char* tls_alias(struct compile_process* process, const char* name);
 void codegen_x86_native_atomic(struct generator* generator, struct native_function* func, struct vector* arguments);
 // i386's thread-local addresses (parser_thread_local_object).
@@ -1595,20 +1627,21 @@ struct exp64_ops {
     // aarch64: store the q register `reg` (a long double argument) at
     // the frame offset; NULL elsewhere.
     void (*ld_spill_q)(int reg, int offset);
-    // C11 atomics, every one sequentially consistent.
+    // C11 atomics. order is an ATOMIC_ORDER_* valid for the
+    // access (atomic_order).
     // reg = the expression stack's slot `depth` from the top (0 is the
     // top), which stays where it is.
     void (*peek)(int reg, int depth);
-    void (*atomic_load)(int size, bool is_signed);              // R0 = *R0
-    void (*atomic_store)(int size);                             // *R1 = R0, R0 kept
+    void (*atomic_load)(int size, bool is_signed, int order);   // R0 = *R0
+    void (*atomic_store)(int size, int order);                  // *R1 = R0, R0 kept
     // R0 = the old value at [R1] (its low `size` bytes count), which
     // becomes old op R0: + - & | ^, "nand" ~(old & R0), "=" R0.
-    void (*atomic_rmw)(const char* op, int size);
+    void (*atomic_rmw)(const char* op, int size, int order);
     // Compare and swap at the address in slot `depth`: when its `size`
     // bytes equal those of R1 they become R0's. R0 = the bytes that
     // were there (the low `size` count), R1 kept.
-    void (*atomic_cas)(int size, int depth);
-    void (*fence)(void);
+    void (*atomic_cas)(int size, int depth, int order);
+    void (*fence)(int order);
     // R0 = the address of this thread's `name`. defined_here:
     // this file defines it (local-exec where the assembler has it),
     // else initial-exec through the GOT.

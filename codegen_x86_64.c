@@ -1010,24 +1010,34 @@ static void x86_64_ld_to(int kind){
 
 // atomics. An aligned load or store is atomic on x86; a
 // sequentially consistent store is an xchg (locked), so the loads need
-// no fence: the C11 mapping gcc uses.
+// no fence: the C11 mapping gcc uses. X86 is TSO, so every
+// order but seq_cst needs nothing more than the plain access: a
+// relaxed or release store is a mov, a fence weaker than seq_cst is
+// none (it only stops the compiler, which moves nothing here). Locked
+// read-modify-writes are full barriers whatever the order.
 static int x86_64_atomic_count;
 
 static void x86_64_peek(int reg, int depth){
     asm_push("mov %s, [rsp+%i]", x86_64_reg(reg), DATA_SIZE_DDWORD * depth);
 }
 
-static void x86_64_atomic_load(int size, bool is_signed){
+static void x86_64_atomic_load(int size, bool is_signed, int order){
+    (void)order;
     codegen_load_register("rax", "rax", size, is_signed);
 }
 
-static void x86_64_atomic_store(int size){
+static void x86_64_atomic_store(int size, int order){
+    if(order != ATOMIC_ORDER_SEQ_CST){
+        x86_64_store(size);
+        return;
+    }
     asm_push("mov r11, rax");
     asm_push("xchg %s [rcx], %s", codegen_size_keyword(size), codegen_sub_register("r11", size));
 }
 
 // + and - are lock xadd, = an xchg; & | ^ and nand a lock cmpxchg loop.
-static void x86_64_atomic_rmw(const char* op, int size){
+static void x86_64_atomic_rmw(const char* op, int size, int order){
+    (void)order;
     const char* keyword = codegen_size_keyword(size);
     if(S_EQ(op, "+") || S_EQ(op, "-")){
         if(S_EQ(op, "-")){
@@ -1056,15 +1066,18 @@ static void x86_64_atomic_rmw(const char* op, int size){
 }
 
 // cmpxchg compares with rax and leaves what was there in it.
-static void x86_64_atomic_cas(int size, int depth){
+static void x86_64_atomic_cas(int size, int depth, int order){
+    (void)order;
     asm_push("mov r11, [rsp+%i]", DATA_SIZE_DDWORD * depth);
     asm_push("mov rdx, rax");
     asm_push("mov rax, rcx");
     asm_push("lock cmpxchg %s [r11], %s", codegen_size_keyword(size), codegen_sub_register("rdx", size));
 }
 
-static void x86_64_fence(void){
-    asm_push("mfence");
+static void x86_64_fence(int order){
+    if(order == ATOMIC_ORDER_SEQ_CST){
+        asm_push("mfence");
+    }
 }
 
 // NASM has no local-exec operator (`wrt ..tpoff`), so every

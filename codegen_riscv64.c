@@ -847,19 +847,44 @@ static void riscv64_ld_to(int kind){
 // `fence rw,rw` and `fence r,rw`, a store after `fence rw,w`, and the
 // read-modify-writes as amo*.aqrl or lr/sc.aqrl loops. A byte or
 // halfword has no lr/sc of its own: the loop runs on the aligned word
-// around it and changes only its bits. A slot is 16 bytes.
+// around it and changes only its bits. The weaker orders as
+// the same table has them: an acquire load without the leading fence, a
+// relaxed one with neither; a relaxed store without its fence; the aq
+// and rl bits of amo*, lr and sc only for the half the order needs. A
+// slot is 16 bytes.
 static void riscv64_peek(int reg, int depth){
     asm_push("ld %s, %i(sp)", riscv64_reg(reg), CODEGEN_SLOT * depth);
 }
 
-static void riscv64_atomic_load(int size, bool is_signed){
-    asm_push("fence rw,rw");
-    riscv64_load(size, is_signed);
-    asm_push("fence r,rw");
+// The ordering bits of an amo*, an lr and an sc for an order. seq_cst
+// keeps .aqrl on the sc as well (the psABI's minimum is .rl).
+static const char* riscv64_amo_order(int order){
+    return order == ATOMIC_ORDER_RELAXED ? "" : order == ATOMIC_ORDER_ACQUIRE ? ".aq"
+         : order == ATOMIC_ORDER_RELEASE ? ".rl" : ".aqrl";
 }
 
-static void riscv64_atomic_store(int size){
-    asm_push("fence rw,w");
+static const char* riscv64_lr_order(int order){
+    return order == ATOMIC_ORDER_SEQ_CST ? ".aqrl" : atomic_order_acquires(order) ? ".aq" : "";
+}
+
+static const char* riscv64_sc_order(int order){
+    return order == ATOMIC_ORDER_SEQ_CST ? ".aqrl" : atomic_order_releases(order) ? ".rl" : "";
+}
+
+static void riscv64_atomic_load(int size, bool is_signed, int order){
+    if(order == ATOMIC_ORDER_SEQ_CST){
+        asm_push("fence rw,rw");
+    }
+    riscv64_load(size, is_signed);
+    if(order != ATOMIC_ORDER_RELAXED){
+        asm_push("fence r,rw");
+    }
+}
+
+static void riscv64_atomic_store(int size, int order){
+    if(order != ATOMIC_ORDER_RELAXED){
+        asm_push("fence rw,w");
+    }
     riscv64_store(size);
 }
 
@@ -886,10 +911,12 @@ static const char* riscv64_atomic_ins(const char* op){
     return S_EQ(op, "+") ? "add" : S_EQ(op, "-") ? "sub" : S_EQ(op, "&") ? "and" : S_EQ(op, "|") ? "or" : "xor";
 }
 
-static void riscv64_atomic_rmw(const char* op, int size){
+static void riscv64_atomic_rmw(const char* op, int size, int order){
+    const char* lr = riscv64_lr_order(order);
+    const char* sc = riscv64_sc_order(order);
     if(size < DATA_SIZE_DWORD){
         riscv64_atomic_field("a1", size, "a0", "a3", 0, 0);
-        asm_push("1: lr.w.aqrl t5, (t4)");
+        asm_push("1: lr.w%s t5, (t4)", lr);
         if(S_EQ(op, "=")){
             asm_push("mv a5, a3");
         } else if(S_EQ(op, "nand")){
@@ -901,17 +928,17 @@ static void riscv64_atomic_rmw(const char* op, int size){
         asm_push("and a5, a5, a2");
         asm_push("and a6, t5, a4");
         asm_push("or a5, a5, a6");
-        asm_push("sc.w.aqrl a6, a5, (t4)");
+        asm_push("sc.w%s a6, a5, (t4)", sc);
         asm_push("bnez a6, 1b");
         asm_push("srl a0, t5, t6");
         return;
     }
     const char* w = size == DATA_SIZE_DDWORD ? "d" : "w";
     if(S_EQ(op, "nand")){
-        asm_push("1: lr.%s.aqrl t5, (a1)", w);
+        asm_push("1: lr.%s%s t5, (a1)", w, lr);
         asm_push("and t6, t5, a0");
         asm_push("not t6, t6");
-        asm_push("sc.%s.aqrl t4, t6, (a1)", w);
+        asm_push("sc.%s%s t4, t6, (a1)", w, sc);
         asm_push("bnez t4, 1b");
         asm_push("mv a0, t5");
         return;
@@ -920,37 +947,59 @@ static void riscv64_atomic_rmw(const char* op, int size){
         asm_push("neg a0, a0");
     }
     const char* amo = S_EQ(op, "=") ? "swap" : S_EQ(op, "+") || S_EQ(op, "-") ? "add" : riscv64_atomic_ins(op);
-    asm_push("amo%s.%s.aqrl a0, a0, (a1)", amo, w);
+    asm_push("amo%s.%s%s a0, a0, (a1)", amo, w, riscv64_amo_order(order));
 }
 
 // The expected value in a1 may be sign extended (a word is compared as
 // lr.w loads it, sign extended); a1 is kept.
-static void riscv64_atomic_cas(int size, int depth){
+static void riscv64_atomic_cas(int size, int depth, int order){
+    const char* lr = riscv64_lr_order(order);
+    const char* sc = riscv64_sc_order(order);
     asm_push("ld t4, %i(sp)", CODEGEN_SLOT * depth);
     if(size < DATA_SIZE_DWORD){
         asm_push("mv t5, t4");
         riscv64_atomic_field("t5", size, "a1", "a3", "a0", "a5");
-        asm_push("1: lr.w.aqrl t5, (t4)");
+        asm_push("1: lr.w%s t5, (t4)", lr);
         asm_push("and a6, t5, a2");
         asm_push("bne a6, a3, 2f");
         asm_push("and a6, t5, a4");
         asm_push("or a6, a6, a5");
-        asm_push("sc.w.aqrl a7, a6, (t4)");
+        asm_push("sc.w%s a7, a6, (t4)", sc);
         asm_push("bnez a7, 1b");
         asm_push("2: srl a0, t5, t6");
         return;
     }
     const char* w = size == DATA_SIZE_DDWORD ? "d" : "w";
     asm_push(size == DATA_SIZE_DDWORD ? "mv t6, a1" : "sext.w t6, a1");
-    asm_push("1: lr.%s.aqrl t5, (t4)", w);
+    asm_push("1: lr.%s%s t5, (t4)", w, lr);
     asm_push("bne t5, t6, 2f");
-    asm_push("sc.%s.aqrl a2, a0, (t4)", w);
+    asm_push("sc.%s%s a2, a0, (t4)", w, sc);
     asm_push("bnez a2, 1b");
     asm_push("2: mv a0, t5");
 }
 
-static void riscv64_fence(void){
-    asm_push("fence rw,rw");
+// an acquire fence orders the loads before it with what
+// follows, a release one what precedes it with the stores after it;
+// seq_cst orders everything; relaxed is nothing.
+static void riscv64_fence(int order){
+    switch(order){
+        case ATOMIC_ORDER_RELAXED:
+            break;
+        case ATOMIC_ORDER_ACQUIRE:
+            asm_push("fence r,rw");
+            break;
+        case ATOMIC_ORDER_RELEASE:
+            asm_push("fence rw,w");
+            break;
+        case ATOMIC_ORDER_ACQ_REL:
+            // Loads before it with everything after it, and everything
+            // before it with stores after it: fence.tso, as gcc has it.
+            asm_push("fence.tso");
+            break;
+        default:
+            asm_push("fence rw,rw");
+            break;
+    }
 }
 
 // tp is the thread pointer. A variable this file defines is

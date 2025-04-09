@@ -94,7 +94,8 @@ for src in "$dir"/*.c; do
         if [ -f "$cached" ]; then
             want=$(cat "$cached")
         else
-            if ! $(gcc_for "$t") -w -o "$ref" "$src" 2>"$tmp/gcc.log"; then
+            # libatomic for the atomics with no instruction.
+            if ! $(gcc_for "$t") -w -o "$ref" "$src" -latomic 2>"$tmp/gcc.log"; then
                 echo
                 echo "gcc rejected $name for $t:" >&2
                 cat "$tmp/gcc.log" >&2

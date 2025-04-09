@@ -826,7 +826,8 @@ static void aarch64_ld_load_q(int reg, int off, int off2){
 // atomics with load-acquire / store-release and the
 // exclusive pairs (ldaxr/stlxr), which every ARMv8.0 core has, so no
 // LSE instructions; ldar and stlr together are sequentially consistent.
-// A slot is 16 bytes.
+// weaker orders drop the acquire or the release half, as gcc
+// does. A slot is 16 bytes.
 static void aarch64_peek(int reg, int depth){
     asm_push("ldr %s, [sp, #%i]", aarch64_reg(reg), CODEGEN_SLOT * depth);
 }
@@ -844,24 +845,45 @@ static const char* aarch64_atomic_reg(int n, int size){
     return out;
 }
 
-static void aarch64_atomic_load(int size, bool is_signed){
+// the exclusive load acquires (ldaxr) when the order does,
+// else it is ldxr; the exclusive store releases (stlxr) when the order
+// does, else it is stxr.
+static const char* aarch64_exclusive_load(int order){
+    return atomic_order_acquires(order) ? "ldaxr" : "ldxr";
+}
+
+static const char* aarch64_exclusive_store(int order){
+    return atomic_order_releases(order) ? "stlxr" : "stxr";
+}
+
+// a relaxed load is a plain ldr, any other an ldar.
+static void aarch64_atomic_load(int size, bool is_signed, int order){
+    if(order == ATOMIC_ORDER_RELAXED){
+        aarch64_load(size, is_signed);
+        return;
+    }
     asm_push("ldar%s %s, [x0]", aarch64_atomic_suffix(size), aarch64_atomic_reg(0, size));
     if(is_signed && size < DATA_SIZE_DDWORD){
         asm_push("sxt%s x0, w0", size == DATA_SIZE_BYTE ? "b" : size == DATA_SIZE_WORD ? "h" : "w");
     }
 }
 
-static void aarch64_atomic_store(int size){
+// A relaxed store is a plain str, a release or seq_cst one an stlr.
+static void aarch64_atomic_store(int size, int order){
+    if(order == ATOMIC_ORDER_RELAXED){
+        aarch64_store(size);
+        return;
+    }
     asm_push("stlr%s %s, [x1]", aarch64_atomic_suffix(size), aarch64_atomic_reg(0, size));
 }
 
 // An exclusive load and store loop: x2 the old value, x3 the new.
-static void aarch64_atomic_rmw(const char* op, int size){
+static void aarch64_atomic_rmw(const char* op, int size, int order){
     const char* s = aarch64_atomic_suffix(size);
     const char* r0 = aarch64_atomic_reg(0, size);
     const char* r2 = aarch64_atomic_reg(2, size);
     const char* r3 = aarch64_atomic_reg(3, size);
-    asm_push("1: ldaxr%s %s, [x1]", s, r2);
+    asm_push("1: %s%s %s, [x1]", aarch64_exclusive_load(order), s, r2);
     if(S_EQ(op, "=")){
         asm_push("mov %s, %s", r3, r0);
     } else if(S_EQ(op, "nand")){
@@ -871,31 +893,38 @@ static void aarch64_atomic_rmw(const char* op, int size){
         const char* ins = S_EQ(op, "+") ? "add" : S_EQ(op, "-") ? "sub" : S_EQ(op, "&") ? "and" : S_EQ(op, "|") ? "orr" : "eor";
         asm_push("%s %s, %s, %s", ins, r3, r2, r0);
     }
-    asm_push("stlxr%s w4, %s, [x1]", s, r3);
+    asm_push("%s%s w4, %s, [x1]", aarch64_exclusive_store(order), s, r3);
     asm_push("cbnz w4, 1b");
     asm_push("mov x0, x2");
 }
 
 // The expected value in x1 may be sign extended: a byte or halfword is
 // compared with its low bits only (uxtb, uxth).
-static void aarch64_atomic_cas(int size, int depth){
+static void aarch64_atomic_cas(int size, int depth, int order){
     const char* s = aarch64_atomic_suffix(size);
     const char* r2 = aarch64_atomic_reg(2, size);
     asm_push("ldr x11, [sp, #%i]", CODEGEN_SLOT * depth);
-    asm_push("1: ldaxr%s %s, [x11]", s, r2);
+    asm_push("1: %s%s %s, [x11]", aarch64_exclusive_load(order), s, r2);
     if(size < DATA_SIZE_DWORD){
         asm_push("cmp w2, w1, %s", size == DATA_SIZE_BYTE ? "uxtb" : "uxth");
     } else {
         asm_push("cmp %s, %s", r2, aarch64_atomic_reg(1, size));
     }
     asm_push("b.ne 2f");
-    asm_push("stlxr%s w3, %s, [x11]", s, aarch64_atomic_reg(0, size));
+    asm_push("%s%s w3, %s, [x11]", aarch64_exclusive_store(order), s, aarch64_atomic_reg(0, size));
     asm_push("cbnz w3, 1b");
     asm_push("2: mov x0, x2");
 }
 
-static void aarch64_fence(void){
-    asm_push("dmb ish");
+// an acquire fence orders the loads before it (dmb ishld);
+// release, acq_rel and seq_cst ones everything (dmb ish); a relaxed
+// one is nothing.
+static void aarch64_fence(int order){
+    if(order == ATOMIC_ORDER_ACQUIRE){
+        asm_push("dmb ishld");
+    } else if(order != ATOMIC_ORDER_RELAXED){
+        asm_push("dmb ish");
+    }
 }
 
 // tpidr_el0 is the thread pointer. A variable this file

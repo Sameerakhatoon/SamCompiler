@@ -2820,6 +2820,11 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
     if(body && body->body.padded){
         variable_node(node)->var.padding = padding(upward_stack ? offset : -offset, DATA_SIZE_DWORD);
     }
+    // an _Atomic struct or union at its own alignment (that of
+    // its size, for 2 to 16 bytes), which its lock-free accesses need.
+    if(body && datatype_is_atomic(&node->var.type) && datatype_alignment(&node->var.type) > 1){
+        variable_node(node)->var.padding = padding(upward_stack ? offset : -offset, (int)datatype_alignment(&node->var.type));
+    }
     variable_node(node)->var.aoffset = offset + (upward_stack
         ?  variable_node(node)->var.padding
         : -variable_node(node)->var.padding);
