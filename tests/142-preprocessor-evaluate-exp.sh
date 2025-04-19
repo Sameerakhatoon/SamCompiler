@@ -35,6 +35,7 @@ int run_case(long long a, const char* op, long long b){
     push_num(cp->token_vec_original, a);
     push_op (cp->token_vec_original, op);
     push_num(cp->token_vec_original, b);
+    push_nl (cp->token_vec_original);
     push_kw (cp->token_vec_original, "int");
     push_id (cp->token_vec_original, "x");
     push_sym(cp->token_vec_original, ';');

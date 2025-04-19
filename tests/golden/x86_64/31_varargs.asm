@@ -14,57 +14,138 @@ push rdi
 push r11
 push rbp
 mov rbp, rsp
-sub rsp, 96
-sub rsp, 64
-movq [rbp-160], xmm0
-movq [rbp-152], xmm1
-movq [rbp-144], xmm2
-movq [rbp-136], xmm3
-movq [rbp-128], xmm4
-movq [rbp-120], xmm5
-movq [rbp-112], xmm6
-movq [rbp-104], xmm7
+sub rsp, 16
+sub rsp, 272
+movq [rbp-288], xmm0
+movq [rbp-280], xmm1
+movq [rbp-272], xmm2
+movq [rbp-264], xmm3
+movq [rbp-256], xmm4
+movq [rbp-248], xmm5
+movq [rbp-240], xmm6
+movq [rbp-232], xmm7
+lea rax, [rbp-224]
+mov rcx, rax
+lea rax, [rbp+16]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-216]
+mov rcx, rax
 lea rax, [rbp+24]
-push rax
-lea rax, [rbp-40]
-mov rcx, rax
-pop rax
+mov rax, qword [rax]
 mov qword [rcx], rax
-lea rax, [rbp+64]
-push rax
-lea rax, [rbp-40]
-add rax, 8
+lea rax, [rbp-208]
 mov rcx, rax
-pop rax
+lea rax, [rbp+32]
+mov rax, qword [rax]
 mov qword [rcx], rax
-lea rax, [rbp+64]
-push rax
-lea rax, [rbp-40]
-add rax, 16
+lea rax, [rbp-200]
 mov rcx, rax
-pop rax
+lea rax, [rbp+40]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-192]
+mov rcx, rax
+lea rax, [rbp+48]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-184]
+mov rcx, rax
+lea rax, [rbp+56]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-176]
+mov rcx, rax
+lea rax, [rbp-288]
+mov rax, qword [rax]
 mov qword [rcx], rax
 lea rax, [rbp-160]
-push rax
-lea rax, [rbp-40]
-add rax, 24
 mov rcx, rax
-pop rax
+lea rax, [rbp-280]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-144]
+mov rcx, rax
+lea rax, [rbp-272]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-128]
+mov rcx, rax
+lea rax, [rbp-264]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-112]
+mov rcx, rax
+lea rax, [rbp-256]
+mov rax, qword [rax]
 mov qword [rcx], rax
 lea rax, [rbp-96]
+mov rcx, rax
+lea rax, [rbp-248]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-80]
+mov rcx, rax
+lea rax, [rbp-240]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-64]
+mov rcx, rax
+lea rax, [rbp-232]
+mov rax, qword [rax]
+mov qword [rcx], rax
+lea rax, [rbp-48]
 push rax
-lea rax, [rbp-40]
-add rax, 32
+lea rax, [rbp-8]
 mov rcx, rax
 pop rax
 mov qword [rcx], rax
-lea rax, [rbp-40]
-mov rax, qword [rax]
-add rax, 8
+mov rax, 8
+push rax
+lea rax, [rbp-48]
+mov rcx, rax
+pop rax
+mov dword [rcx], eax
+mov rax, 48
+push rax
+lea rax, [rbp-44]
+mov rcx, rax
+pop rax
+mov dword [rcx], eax
+lea rax, [rbp+64]
 push rax
 lea rax, [rbp-40]
-add rax, 8
+mov rcx, rax
+pop rax
+mov qword [rcx], rax
+lea rax, [rbp-224]
+push rax
+lea rax, [rbp-32]
+mov rcx, rax
+pop rax
+mov qword [rcx], rax
+lea rax, [rbp-8]
 mov rax, qword [rax]
+add rax, 16
+mov rax, qword [rax]
+push rax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+mov eax, dword [rax]
+mov rcx, rax
+pop rax
+add rax, rcx
+add rax, 8
+push rax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 16
+mov rax, qword [rax]
+push rax
+mov rax, 48
+mov rcx, rax
+pop rax
+add rax, rcx
 mov rcx, rax
 pop rax
 cmp rax, rcx
@@ -72,47 +153,92 @@ seta al
 movzx eax, al
 cmp rax, 0
 jne .exp_3
-lea rax, [rbp-40]
+lea rax, [rbp-8]
 mov rax, qword [rax]
-add rax, 8
+add rax, 16
+mov rax, qword [rax]
 push rax
-lea rax, [rbp-40]
+lea rax, [rbp-8]
+mov rax, qword [rax]
+mov eax, dword [rax]
 mov rcx, rax
 pop rax
-mov qword [rcx], rax
-lea rax, [rbp-40]
+add rax, rcx
+add rax, 8
+push rax
+lea rax, [rbp-8]
 mov rax, qword [rax]
+add rax, 16
+mov rax, qword [rax]
+mov rcx, rax
+pop rax
+sub rax, rcx
+push rax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+mov rcx, rax
+pop rax
+mov dword [rcx], eax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 16
+mov rax, qword [rax]
+push rax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+mov eax, dword [rax]
+mov rcx, rax
+pop rax
+add rax, rcx
 add rax, -8
 jmp .exp_4
 .exp_3:
-lea rax, [rbp-40]
-add rax, 16
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 8
 mov rax, qword [rax]
 add rax, 8
 push rax
-lea rax, [rbp-40]
-add rax, 16
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 8
 mov rcx, rax
 pop rax
 mov qword [rcx], rax
-lea rax, [rbp-40]
-add rax, 16
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 8
 mov rax, qword [rax]
 add rax, -8
 .exp_4:
 movsxd rax, dword [rax]
 push rax
-lea rax, [rbp-44]
+lea rax, [rbp-12]
 mov rcx, rax
 pop rax
 mov dword [rcx], eax
-lea rax, [rbp-40]
+lea rax, [rbp-8]
 mov rax, qword [rax]
+add rax, 16
+mov rax, qword [rax]
+push rax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+mov eax, dword [rax]
+mov rcx, rax
+pop rax
+add rax, rcx
 add rax, 8
 push rax
-lea rax, [rbp-40]
-add rax, 8
+lea rax, [rbp-8]
 mov rax, qword [rax]
+add rax, 16
+mov rax, qword [rax]
+push rax
+mov rax, 48
+mov rcx, rax
+pop rax
+add rax, rcx
 mov rcx, rax
 pop rax
 cmp rax, rcx
@@ -120,44 +246,74 @@ seta al
 movzx eax, al
 cmp rax, 0
 jne .exp_7
-lea rax, [rbp-40]
+lea rax, [rbp-8]
 mov rax, qword [rax]
-add rax, 8
+add rax, 16
+mov rax, qword [rax]
 push rax
-lea rax, [rbp-40]
+lea rax, [rbp-8]
+mov rax, qword [rax]
+mov eax, dword [rax]
 mov rcx, rax
 pop rax
-mov qword [rcx], rax
-lea rax, [rbp-40]
+add rax, rcx
+add rax, 8
+push rax
+lea rax, [rbp-8]
 mov rax, qword [rax]
+add rax, 16
+mov rax, qword [rax]
+mov rcx, rax
+pop rax
+sub rax, rcx
+push rax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+mov rcx, rax
+pop rax
+mov dword [rcx], eax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 16
+mov rax, qword [rax]
+push rax
+lea rax, [rbp-8]
+mov rax, qword [rax]
+mov eax, dword [rax]
+mov rcx, rax
+pop rax
+add rax, rcx
 add rax, -8
 jmp .exp_8
 .exp_7:
-lea rax, [rbp-40]
-add rax, 16
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 8
 mov rax, qword [rax]
 add rax, 8
 push rax
-lea rax, [rbp-40]
-add rax, 16
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 8
 mov rcx, rax
 pop rax
 mov qword [rcx], rax
-lea rax, [rbp-40]
-add rax, 16
+lea rax, [rbp-8]
+mov rax, qword [rax]
+add rax, 8
 mov rax, qword [rax]
 add rax, -8
 .exp_8:
 movsxd rax, dword [rax]
 push rax
-lea rax, [rbp-48]
+lea rax, [rbp-16]
 mov rcx, rax
 pop rax
 mov dword [rcx], eax
-lea rax, [rbp-44]
+lea rax, [rbp-12]
 movsxd rax, dword [rax]
 push rax
-lea rax, [rbp-48]
+lea rax, [rbp-16]
 movsxd rax, dword [rax]
 mov rcx, rax
 pop rax
@@ -166,8 +322,8 @@ movsxd rax, eax
 mov rsp, rbp
 pop rbp
 ret 48
-add rsp, 64
-add rsp, 96
+add rsp, 272
+add rsp, 16
 pop rbp
 ret 48
 global $main

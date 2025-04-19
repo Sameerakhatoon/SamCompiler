@@ -3,7 +3,9 @@
 # print, per source file, "ok" or the first error. The libc headers are
 # the short declaration-only ones in tools/selfhost/include, then
 # pc_includes; glibc's own headers are not used. All of them compile
-#; tests/370-self-host.sh links and runs the result.
+#; tests/370-self-host.sh links and runs the result
+#. With glibc's own headers instead,
+# `./main -glibc -I. -target=x86_64`, see tests/580-self-host-glibc.sh.
 #
 # Usage: bash tools/selfhost.sh [file.c ...]
 

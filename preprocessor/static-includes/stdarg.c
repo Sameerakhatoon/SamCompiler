@@ -116,4 +116,9 @@ void preprocessor_stdarg_internal_include(struct preprocessor* preprocessor, str
 
     native_create_function(preprocessor->compiler, "va_end",
         &(struct native_function_callbacks){ .call = native_va_end });
+
+    // va_copy on x86_64, where the va_list is a pointer to
+    // state of its own (exp64_stdarg). The x86 backend never sees it.
+    native_create_function(preprocessor->compiler, "__builtin_va_copy",
+        &(struct native_function_callbacks){ .call = native_va_end });
 }

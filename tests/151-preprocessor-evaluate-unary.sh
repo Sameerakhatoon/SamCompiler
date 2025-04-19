@@ -5,7 +5,8 @@
 # Unknown ops compiler_error.
 #
 # Test: feed `#if !0` (should include body) and `#if !1` (should
-# skip body). Then `#if -1 > 0` (-1 > 0 is 0, skip).
+# skip body). Then `#if -1`, which is true: any value but 0 is
+# (the book's `result > 0` took it as false).
 . "$(dirname "$0")/lib.sh"
 
 ./build.sh >/dev/null 2>&1
@@ -34,6 +35,7 @@ int run_if_unary(const char* op, long long val){
     push_sym(cp->token_vec_original, '#'); push_id(cp->token_vec_original, "if");
     push_op (cp->token_vec_original, op);
     push_num(cp->token_vec_original, val);
+    push_nl (cp->token_vec_original);
     push_kw (cp->token_vec_original, "int");
     push_id (cp->token_vec_original, "x");
     push_sym(cp->token_vec_original, ';');
@@ -47,7 +49,7 @@ int run_if_unary(const char* op, long long val){
 int main(void){
     int n_not0 = run_if_unary("!", 0); // !0 = 1, include
     int n_not1 = run_if_unary("!", 1); // !1 = 0, skip
-    int n_neg  = run_if_unary("-", 1); // -1, not > 0, skip
+    int n_neg  = run_if_unary("-", 1); // -1 is true (C11 6.10.1), include
     printf("not0=%d not1=%d neg=%d\n", n_not0, n_not1, n_neg);
     return 0;
 }
@@ -55,5 +57,5 @@ EOF
 
 gcc -I"$REPO_ROOT" "$probe" $LINK_OBJS -o "$bin" 2>/dev/null || fail "ch221 unary probe failed to compile"
 got="$("$bin")"
-assert_contains "$got" "not0=3 not1=0 neg=0" "preprocessor unary operators (!, -) evaluate correctly in #if"
+assert_contains "$got" "not0=3 not1=0 neg=3" "preprocessor unary operators (!, -) evaluate correctly in #if"
 pass

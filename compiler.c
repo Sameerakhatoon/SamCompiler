@@ -55,30 +55,71 @@ static struct lex_process_functions compiler_memory_lex_functions = {
 // Put the -D / -U lines in front of the source's own tokens, so the
 // preprocessor defines and undefines them, in order, before line 1
 // (after the predefined macros, which -U can therefore remove).
-static int compiler_prepend_cli_macros(struct compile_process* process){
-    if(!compiler_cli_macro_lines || !vector_count(compiler_cli_macro_lines)){
-        return 0;
-    }
-    struct buffer* text = buffer_create();
-    vector_set_peek_pointer(compiler_cli_macro_lines, 0);
-    const char* line = vector_peek_ptr(compiler_cli_macro_lines);
-    while(line){
-        buffer_printf(text, "%s\n", line);
-        line = vector_peek_ptr(compiler_cli_macro_lines);
-    }
-    buffer_write(text, 0);
-    const char* source_text = buffer_ptr(text);
-    FILE* file = os_memory_file(source_text);
+// GNU builtins that are expressions of the language, as
+// macros ahead of every source: __builtin_expect(e, c) is e,
+// __builtin_constant_p(e) is 0 (gcc may answer 0 too, and e is not
+// evaluated), __builtin_offsetof(T, m) is offsetof, and the byte swaps
+// shifts and masks (unlike gcc's they evaluate the argument more than
+// once).
+static const char* compiler_builtin_macro_lines[] = {
+    "#define __builtin_expect(expression, expected) (expression)",
+    "#define __builtin_constant_p(expression) 0",
+    "#define __builtin_offsetof(type, member) ((unsigned long)&((type*)0)->member)",
+    "#define __builtin_bswap16(x) ((unsigned short)(((unsigned short)(x) >> 8) | ((unsigned short)(x) << 8)))",
+    "#define __builtin_bswap32(x) (((unsigned int)(x) >> 24) | (((unsigned int)(x) >> 8) & 0xff00u)"
+        " | (((unsigned int)(x) << 8) & 0xff0000u) | ((unsigned int)(x) << 24))",
+    "#define __builtin_bswap64(x) (((unsigned long long)__builtin_bswap32((unsigned int)(x)) << 32)"
+        " | __builtin_bswap32((unsigned int)((unsigned long long)(x) >> 32)))",
+    0
+};
+
+// The tokens of `text`, lexed as a file of the process; NULL on an error.
+static struct vector* compiler_lex_text(struct compile_process* process, const char* text){
+    FILE* file = os_memory_file(text);
     if(!file){
-        return -1;
+        return NULL;
     }
     struct lex_process* lex_process = lex_process_create(process, &compiler_memory_lex_functions, file);
     if(!lex_process || lex(lex_process) != LEXICAL_ANALYSIS_ALL_OK){
         fclose(file);
-        return -1;
+        return NULL;
     }
     fclose(file);
-    struct vector* tokens = lex_process_tokens(lex_process);
+    return lex_process_tokens(lex_process);
+}
+
+static int compiler_prepend_cli_macros(struct compile_process* process){
+    struct buffer* builtins = buffer_create();
+    for(int i = 0; compiler_builtin_macro_lines[i]; i++){
+        buffer_printf(builtins, "%s\n", compiler_builtin_macro_lines[i]);
+    }
+    buffer_write(builtins, 0);
+    struct vector* tokens = compiler_lex_text(process, buffer_ptr(builtins));
+    if(!tokens){
+        return -1;
+    }
+    // Line 0: -E starts no new line for their expansions, and the -D
+    // lines keep their own numbers.
+    for(int i = 0; i < vector_count(tokens); i++){
+        ((struct token*)vector_at(tokens, i))->pos.line = 0;
+    }
+    if(compiler_cli_macro_lines && vector_count(compiler_cli_macro_lines)){
+        struct buffer* text = buffer_create();
+        vector_set_peek_pointer(compiler_cli_macro_lines, 0);
+        const char* line = vector_peek_ptr(compiler_cli_macro_lines);
+        while(line){
+            buffer_printf(text, "%s\n", line);
+            line = vector_peek_ptr(compiler_cli_macro_lines);
+        }
+        buffer_write(text, 0);
+        struct vector* cli = compiler_lex_text(process, buffer_ptr(text));
+        if(!cli){
+            return -1;
+        }
+        for(int i = 0; i < vector_count(cli); i++){
+            vector_push(tokens, vector_at(cli, i));
+        }
+    }
     struct vector* source = process->token_vec_original;
     for(int i = 0; i < vector_count(source); i++){
         vector_push(tokens, vector_at(source, i));
@@ -145,6 +186,18 @@ static void compiler_emit_preprocessed(struct compile_process* process, FILE* ou
                 fputc(token->cval, out);
                 break;
             case TOKEN_TYPE_NUMBER:
+                // a floating constant keeps the bits of its
+                // double in llnum; it was printed as that integer.
+                if(token->num.flags & NUMBER_FLAG_FLOATING){
+                    double value;
+                    memcpy(&value, &token->llnum, sizeof(value));
+                    if(token->num.flags & NUMBER_FLAG_LONG_DOUBLE){
+                        fprintf(out, "%sL", token->num.text);
+                    } else {
+                        fprintf(out, "%a%s", value, (token->num.flags & NUMBER_FLAG_FLOAT) ? "f" : "");
+                    }
+                    break;
+                }
                 fprintf(out, (token->num.flags & NUMBER_FLAG_NOT_DECIMAL) ? "0x%llx" : "%llu", token->llnum);
                 if(token->num.flags & NUMBER_FLAG_UNSIGNED){
                     fputc('U', out);

@@ -32,6 +32,7 @@ int run_case(long long cond_val){
     // # if <cond> int x ; # endif
     push_sym(cp->token_vec_original, '#'); push_id(cp->token_vec_original, "if");
     push_num(cp->token_vec_original, cond_val);
+    push_nl (cp->token_vec_original);
     push_kw (cp->token_vec_original, "int");
     push_id (cp->token_vec_original, "x");
     push_sym(cp->token_vec_original, ';');

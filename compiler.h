@@ -158,6 +158,9 @@ struct token {
         int flags;
         // NUMBER_FLAG_LONG_DOUBLE: the constant without its suffix.
         const char* text;
+        // why the spelling is no constant (`0f`), or NULL;
+        // reported where the number is used, not where it is read.
+        const char* error;
     } num;
 
     // Set on a u"", U"" or L"" TOKEN_TYPE_STRING: the bytes of one code
@@ -498,6 +501,7 @@ struct preprocessor {
 
 struct preprocessor* preprocessor_create(struct compile_process* compiler);
 int                  preprocessor_run(struct compile_process* compiler);
+void                 preprocessor_hoist_typedef_bodies(struct compile_process* compiler);
 
 // ch227: native preprocessor definitions (e.g. __LINE__) plug in via
 // these helpers from preprocessor/native.c.
@@ -1100,6 +1104,10 @@ struct node {
             } frame;
             // Total bytes needed for locals.
             size_t stack_size;
+            // how many va_start and __builtin_va_copy the body
+            // has; on x86_64 each gets the psABI state of a va_list in
+            // the frame.
+            int va_lists;
         } func;
     };
 

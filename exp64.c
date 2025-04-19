@@ -52,8 +52,30 @@ static int                     exp64_va_scratch;
 // aarch64 function that reads long doubles, or 0.
 static int                     exp64_va_qhome;
 #define EXP64_VA_SCRATCH 32
+// on x86_64 a va_list points at the psABI's
+// `struct __va_list_tag`: the byte offsets of the next integer and
+// floating-point register in the register save area, the next stack
+// argument and the save area, which holds the six integer argument
+// registers and then the eight xmm registers 16 bytes apart. A variadic
+// function's prologue fills a save area (exp64_va_save), and each
+// va_start or __builtin_va_copy of the function has 24 bytes of its own
+// for the state, from exp64_va_slots on.
+#define EXP64_PSABI_GP_OFFSET 0
+#define EXP64_PSABI_FP_OFFSET 4
+#define EXP64_PSABI_OVERFLOW  8
+#define EXP64_PSABI_SAVE_AREA 16
+#define EXP64_PSABI_STATE     24
+#define EXP64_PSABI_GP_END    48
+#define EXP64_PSABI_FP_END    176
+#define EXP64_PSABI_FP_STEP   16
+static int                     exp64_va_save;
+static int                     exp64_va_slots;
+static int                     exp64_va_next_slot;
+static int                     exp64_va_gp_offset;
+static int                     exp64_va_fp_offset;
 static bool                    exp64_needs_scratch(struct node* function);
 static bool                    exp64_needs_qhome(struct node* function);
+static bool                    exp64_needs_save_area(struct node* function);
 
 static struct datatype exp64_value(struct node* node);
 static struct datatype exp64_rvalue(struct node* node, bool decay);
@@ -1298,22 +1320,100 @@ static struct vector* exp64_call_arguments(struct node* node){
 #define EXP64_VA_FP_END   32
 #define EXP64_VA_FIELDS   5
 
-// R0 = the va_list field at `field`.
-static void exp64_va_field(struct node* list, int field){
-    exp64_address(list);
-    ops->add_imm(field);
-    ops->load(DATA_SIZE_DDWORD, false);
+// whether the va_list is the psABI's (x86_64).
+static bool exp64_va_psabi(void){
+    return S_EQ(current_process->target->backend->name, "x86_64");
 }
 
-// The va_list field at `field` = R0.
+// R0 = the address of the list's state plus `offset`: on x86_64 the
+// va_list's value, elsewhere the va_list itself.
+static void exp64_va_state(struct node* list, int offset){
+    if(exp64_va_psabi()){
+        exp64_value(list);
+    } else {
+        exp64_address(list);
+    }
+    ops->add_imm(offset);
+}
+
+// R0 = the va_list field at `field`. On x86_64 the fields are worked
+// out of the psABI state: the register fields and their ends are
+// addresses in the save area.
+static void exp64_va_field(struct node* list, int field){
+    if(!exp64_va_psabi()){
+        exp64_va_state(list, field);
+        ops->load(DATA_SIZE_DDWORD, false);
+        return;
+    }
+    if(field == EXP64_VA_OVERFLOW){
+        exp64_va_state(list, EXP64_PSABI_OVERFLOW);
+        ops->load(DATA_SIZE_DDWORD, false);
+        return;
+    }
+    struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
+    exp64_va_state(list, EXP64_PSABI_SAVE_AREA);
+    ops->load(DATA_SIZE_DDWORD, false);
+    ops->push(&long_type);
+    if(field == EXP64_VA_GP_END || field == EXP64_VA_FP_END){
+        ops->imm(0, field == EXP64_VA_GP_END ? EXP64_PSABI_GP_END : EXP64_PSABI_FP_END);
+    } else {
+        exp64_va_state(list, field == EXP64_VA_GP ? EXP64_PSABI_GP_OFFSET : EXP64_PSABI_FP_OFFSET);
+        ops->load(DATA_SIZE_DWORD, false);
+    }
+    ops->mov_r1();
+    ops->pop(0);
+    ops->binop("+", DATA_SIZE_DDWORD, false);
+}
+
+// The va_list field at `field` = R0 (on x86_64 a register field takes
+// the offset of the address in the save area).
 static void exp64_va_set(struct node* list, int field){
     struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
     ops->push(&long_type);
+    if(!exp64_va_psabi() || field == EXP64_VA_OVERFLOW){
+        exp64_va_state(list, exp64_va_psabi() ? EXP64_PSABI_OVERFLOW : field);
+        ops->mov_r1();
+        ops->pop(0);
+        ops->store(DATA_SIZE_DDWORD);
+        return;
+    }
+    exp64_va_state(list, EXP64_PSABI_SAVE_AREA);
+    ops->load(DATA_SIZE_DDWORD, false);
+    ops->mov_r1();
+    ops->pop(0);
+    ops->binop("-", DATA_SIZE_DDWORD, false);
+    ops->push(&long_type);
+    exp64_va_state(list, field == EXP64_VA_GP ? EXP64_PSABI_GP_OFFSET : EXP64_PSABI_FP_OFFSET);
+    ops->mov_r1();
+    ops->pop(0);
+    ops->store(DATA_SIZE_DWORD);
+}
+
+// The frame bytes at `offset` = R0.
+static void exp64_frame_store(int offset, int size){
+    struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
+    ops->push(&long_type);
+    ops->frame_address(offset);
+    ops->mov_r1();
+    ops->pop(0);
+    ops->store(size);
+}
+
+// the va_list `list` = the address of the function's next
+// state slot (x86_64), whose offset is returned.
+static int exp64_va_new_state(struct node* list){
+    if(exp64_va_next_slot >= current_function->func.va_lists){
+        compiler_error(current_process, "BUG: more va_start and va_copy than the parser counted\n");
+    }
+    int slot = exp64_va_slots + EXP64_PSABI_STATE * exp64_va_next_slot++;
+    struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
+    ops->frame_address(slot);
+    ops->push(&long_type);
     exp64_address(list);
-    ops->add_imm(field);
     ops->mov_r1();
     ops->pop(0);
     ops->store(DATA_SIZE_DDWORD);
+    return slot;
 }
 
 // R0 = the va_list field at `field`, which then moves on `step` bytes.
@@ -1338,15 +1438,16 @@ static void exp64_va_compare(struct node* list, int field_a, int step, const cha
     ops->branch(label, EXP64_BRANCH_IF_NOT_ZERO);
 }
 
-// R0 = the address of the next `bytes` from `field` when `field + bytes
-// <= end`, else from the stack (overflow), where `field` is first set
-// to `end` with `close` (aarch64: once a value does not fit no register
-// is used again).
-static void exp64_va_take_or_overflow(struct node* list, int field, int bytes, int end, bool close){
+// R0 = the address of the next `bytes` from `field` when `field +
+// reg_bytes <= end` (stepping it `reg_bytes`: an xmm register's save
+// slot is 16 bytes on x86_64), else from the stack (overflow), where
+// `field` is first set to `end` with `close` (aarch64: once a value
+// does not fit no register is used again).
+static void exp64_va_take_or_overflow(struct node* list, int field, int bytes, int reg_bytes, int end, bool close){
     int stack_label = exp64_new_label();
     int end_label = exp64_new_label();
-    exp64_va_compare(list, field, bytes, ">", end, stack_label);
-    exp64_va_take(list, field, bytes);
+    exp64_va_compare(list, field, reg_bytes, ">", end, stack_label);
+    exp64_va_take(list, field, reg_bytes);
     ops->branch(end_label, EXP64_BRANCH_ALWAYS);
     ops->label(stack_label);
     if(close){
@@ -1423,7 +1524,10 @@ static void exp64_va_ldouble(struct node* list, bool x86_64, bool aarch64, int c
 static void exp64_va_pieces(struct node* list, struct exp64_piece* pieces, int count, int size, bool aarch64){
     struct datatype long_type = exp64_int_type(DATA_SIZE_DDWORD, true);
     int ints = 0;
-    bool in_place = true;
+    // on x86_64 the xmm registers' save slots are 16 bytes
+    // apart, so two pieces are never in place.
+    int fp_step = exp64_va_psabi() ? EXP64_PSABI_FP_STEP : DATA_SIZE_DDWORD;
+    bool in_place = !exp64_va_psabi() || count == 1;
     for(int i = 0; i < count; i++){
         ints += !pieces[i].fp;
         if(!pieces[i].fp || (aarch64 && pieces[i].size != DATA_SIZE_DDWORD)){
@@ -1433,16 +1537,16 @@ static void exp64_va_pieces(struct node* list, struct exp64_piece* pieces, int c
     int fps = count - ints;
     int stack_label = exp64_new_label();
     int end_label = exp64_new_label();
-    exp64_va_compare(list, EXP64_VA_FP, DATA_SIZE_DDWORD * fps, ">", EXP64_VA_FP_END, stack_label);
+    exp64_va_compare(list, EXP64_VA_FP, fp_step * fps, ">", EXP64_VA_FP_END, stack_label);
     if(ints){
         exp64_va_compare(list, EXP64_VA_GP, DATA_SIZE_DDWORD * ints, ">", EXP64_VA_GP_END, stack_label);
     }
     if(in_place){
-        exp64_va_take(list, EXP64_VA_FP, DATA_SIZE_DDWORD * fps);
+        exp64_va_take(list, EXP64_VA_FP, fp_step * fps);
     } else {
         for(int i = 0; i < count; i++){
             int field = pieces[i].fp ? EXP64_VA_FP : EXP64_VA_GP;
-            exp64_va_take(list, field, DATA_SIZE_DDWORD);
+            exp64_va_take(list, field, pieces[i].fp ? fp_step : DATA_SIZE_DDWORD);
             ops->load(pieces[i].size, false);
             ops->push(&long_type);
             ops->frame_address(exp64_va_scratch + pieces[i].offset);
@@ -1491,6 +1595,21 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
         ops->imm(0, 0);
         return exp64_int_type(DATA_SIZE_DWORD, true);
     }
+    if(S_EQ(name, "__builtin_va_copy")){
+        // On x86_64 dest gets a state of its own, a copy of src's.
+        if(vector_count(args) != 2 || !exp64_va_psabi()){
+            compiler_error(current_process, "__builtin_va_copy expects two va_lists (x86_64)\n");
+        }
+        struct node* source = *(struct node**)vector_at(args, 1);
+        int slot = exp64_va_new_state(*(struct node**)vector_at(args, 0));
+        for(int k = 0; k < EXP64_PSABI_STATE; k += DATA_SIZE_DDWORD){
+            exp64_va_state(source, k);
+            ops->load(DATA_SIZE_DDWORD, false);
+            exp64_frame_store(slot + k, DATA_SIZE_DDWORD);
+        }
+        ops->imm(0, 0);
+        return exp64_int_type(DATA_SIZE_DWORD, true);
+    }
     // The va_arg macro passes `(type*)0` as a third argument, which
     // gives the type: a double is read where floating-point arguments
     // went. A float passed to `...` was promoted to double, so there is
@@ -1529,6 +1648,21 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
         if(second->type != NODE_TYPE_IDENTIFIER || !resolver_get_variable(0, current_process->resolver, second->sval)){
             compiler_error(current_process, "va_start expects the last named parameter\n");
         }
+        if(exp64_va_psabi()){
+            if(!(current_function->func.flags & FUNCTION_NODE_FLAG_IS_VARIADIC)){
+                compiler_error(current_process, "va_start in a function without `...`\n");
+            }
+            int slot = exp64_va_new_state(list);
+            ops->imm(0, exp64_va_gp_offset);
+            exp64_frame_store(slot + EXP64_PSABI_GP_OFFSET, DATA_SIZE_DWORD);
+            ops->imm(0, exp64_va_fp_offset);
+            exp64_frame_store(slot + EXP64_PSABI_FP_OFFSET, DATA_SIZE_DWORD);
+            ops->frame_address(exp64_va_overflow);
+            exp64_frame_store(slot + EXP64_PSABI_OVERFLOW, DATA_SIZE_DDWORD);
+            ops->frame_address(exp64_va_save);
+            exp64_frame_store(slot + EXP64_PSABI_SAVE_AREA, DATA_SIZE_DDWORD);
+            return exp64_int_type(DATA_SIZE_DWORD, true);
+        }
         int fields[]  = { EXP64_VA_GP, EXP64_VA_GP_END, EXP64_VA_OVERFLOW, EXP64_VA_FP, EXP64_VA_FP_END };
         int offsets[] = { exp64_va_gp, exp64_va_gp_end, exp64_va_overflow, exp64_va_fp, exp64_va_fp_end };
         for(int i = 0; i < EXP64_VA_FIELDS; i++){
@@ -1547,7 +1681,8 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
     int bytes = align_value(second->llnum, DATA_SIZE_DDWORD);
     struct datatype result = exp64_pointer_to(&long_type);
     if(floating && (x86_64 || aarch64)){
-        exp64_va_take_or_overflow(list, EXP64_VA_FP, DATA_SIZE_DDWORD, EXP64_VA_FP_END, false);
+        exp64_va_take_or_overflow(list, EXP64_VA_FP, DATA_SIZE_DDWORD, x86_64 ? EXP64_PSABI_FP_STEP : DATA_SIZE_DDWORD,
+                                  EXP64_VA_FP_END, false);
         return result;
     }
     if(ldouble){
@@ -1577,7 +1712,7 @@ static struct datatype exp64_stdarg(const char* name, struct vector* args){
         bytes = DATA_SIZE_DDWORD;
     }
     if(x86_64 || aarch64){
-        exp64_va_take_or_overflow(list, EXP64_VA_GP, bytes, EXP64_VA_GP_END, aarch64);
+        exp64_va_take_or_overflow(list, EXP64_VA_GP, bytes, bytes, EXP64_VA_GP_END, aarch64);
     } else {
         if(aligned16 && !big){
             exp64_va_align(list, EXP64_VA_GP, EXP64_LD_SIZE);
@@ -2679,6 +2814,9 @@ void exp64_parameters(struct node* function, int register_home, int stack_home, 
     exp64_va_gp       = next_reg < max ? register_home + DATA_SIZE_DDWORD * next_reg : exp64_va_overflow;
     exp64_va_fp_end   = fp_home + DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS;
     exp64_va_fp       = next_fp < EXP64_FP_ARG_REGISTERS ? fp_home + DATA_SIZE_DDWORD * next_fp : exp64_va_fp_end;
+    exp64_va_gp_offset = DATA_SIZE_DDWORD * (next_reg < max ? next_reg : max);
+    exp64_va_fp_offset = EXP64_PSABI_GP_END
+                       + EXP64_PSABI_FP_STEP * (next_fp < EXP64_FP_ARG_REGISTERS ? next_fp : EXP64_FP_ARG_REGISTERS);
     int assembly = fp_home + DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS;
     for(int i = 0; i < count; i++){
         struct node* param = *(struct node**)vector_at(params, i);
@@ -2737,6 +2875,29 @@ void exp64_parameters(struct node* function, int register_home, int stack_home, 
             ops->ld_spill_q(k, exp64_va_qhome + EXP64_LD_SIZE * k);
         }
     }
+    // on x86_64 the psABI register save area of a variadic
+    // function, then the va_list states, after the rest of the home.
+    int end = assembly + (exp64_needs_scratch(function) ? EXP64_VA_SCRATCH : 0)
+            + (exp64_needs_qhome(function) ? EXP64_LD_SIZE * EXP64_FP_ARG_REGISTERS : 0);
+    exp64_va_save = end;
+    exp64_va_slots = end + (exp64_needs_save_area(function) ? EXP64_PSABI_FP_END : 0);
+    exp64_va_next_slot = 0;
+    if(exp64_needs_save_area(function)){
+        for(int k = 0; k < max; k++){
+            ops->frame_address(exp64_va_save + DATA_SIZE_DDWORD * k);
+            ops->mov_r1();
+            ops->frame_address(register_home + DATA_SIZE_DDWORD * k);
+            ops->load(DATA_SIZE_DDWORD, false);
+            ops->store(DATA_SIZE_DDWORD);
+        }
+        for(int k = 0; k < EXP64_FP_ARG_REGISTERS; k++){
+            ops->frame_address(exp64_va_save + EXP64_PSABI_GP_END + EXP64_PSABI_FP_STEP * k);
+            ops->mov_r1();
+            ops->frame_address(fp_home + DATA_SIZE_DDWORD * k);
+            ops->load(DATA_SIZE_DDWORD, false);
+            ops->store(DATA_SIZE_DDWORD);
+        }
+    }
     free(layout);
 }
 
@@ -2780,6 +2941,16 @@ static bool exp64_needs_qhome(struct node* function){
         && S_EQ(current_process->target->backend->name, "aarch64");
 }
 
+// a variadic function on x86_64 has a psABI register save area.
+static bool exp64_needs_save_area(struct node* function){
+    return (function->func.flags & FUNCTION_NODE_FLAG_IS_VARIADIC) && exp64_va_psabi();
+}
+
+// the va_list states of a function on x86_64.
+static int exp64_va_states_size(struct node* function){
+    return exp64_va_psabi() ? EXP64_PSABI_STATE * function->func.va_lists : 0;
+}
+
 // bytes of the floating-point home under the locals, which
 // the prologue makes when exp64_fp_parameter_registers is not 0: the
 // eight registers' slots, then a copy of each struct parameter that
@@ -2789,7 +2960,7 @@ static bool exp64_needs_qhome(struct node* function){
 // multiple of 16.
 int exp64_fp_home_size(struct node* function){
     bool scratch = exp64_needs_scratch(function);
-    if(!exp64_fp_parameter_registers(function) && !scratch){
+    if(!exp64_fp_parameter_registers(function) && !scratch && !exp64_va_states_size(function)){
         return 0;
     }
     int size = DATA_SIZE_DDWORD * EXP64_FP_ARG_REGISTERS;
@@ -2809,6 +2980,10 @@ int exp64_fp_home_size(struct node* function){
     if(exp64_needs_qhome(function)){
         size += EXP64_LD_SIZE * EXP64_FP_ARG_REGISTERS;
     }
+    if(exp64_needs_save_area(function)){
+        size += EXP64_PSABI_FP_END;
+    }
+    size += exp64_va_states_size(function);
     return align_value(size, 16);
 }
 

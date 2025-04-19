@@ -36,6 +36,7 @@ int run_if(long long cond, long long t, long long f){
     push_num(cp->token_vec_original, t);
     push_sym(cp->token_vec_original, ':');
     push_num(cp->token_vec_original, f);
+    push_nl (cp->token_vec_original);
     push_kw (cp->token_vec_original, "int");
     push_id (cp->token_vec_original, "x");
     push_sym(cp->token_vec_original, ';');

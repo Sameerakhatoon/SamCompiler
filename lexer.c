@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <ctype.h>
+#include <stdarg.h>
 #include "compiler.h"
 #include "helpers/vector.h"
 #include "helpers/buffer.h"
@@ -201,6 +202,25 @@ static char lexer_peek_second(void){
 static struct token* token_make_integer(const char* text);
 static struct token* token_make_floating(const char* text);
 
+// a preprocessing number need not be a constant (C11 6.4.8):
+// `0f` in a group #if skips, or in a macro that is never used, is no
+// error. The first problem with the spelling stays with the token
+// (num.error) and is reported where the number is used: by the parser
+// or in an #if condition.
+static char* lexer_number_error;
+
+static void lexer_number_invalid(const char* fmt, ...){
+    if(lexer_number_error){
+        return;
+    }
+    char message[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+    lexer_number_error = strdup(message);
+}
+
 // A preprocessing number (C11 6.4.8): digits, letters, `_` and `.`,
 // and a sign right after an exponent letter (e or E, p or P in hex).
 // `prefix` is a `.` already read (`.5`), or 0. The spelling is a
@@ -233,7 +253,10 @@ static struct token* token_make_number_with_prefix(char prefix){
     }
     buffer_write(buffer, 0x00);
     const char* text = buffer_ptr(buffer);
-    return floating ? token_make_floating(text) : token_make_integer(text);
+    lexer_number_error = 0;
+    struct token* token = floating ? token_make_floating(text) : token_make_integer(text);
+    token->num.error = lexer_number_error;
+    return token;
 }
 
 static struct token* token_make_number(void){
@@ -264,7 +287,7 @@ static struct token* token_make_floating(const char* text){
         digits[--len] = 0;
     }
     if(hex && !strpbrk(digits, "pP")){
-        compiler_error(lex_process->compiler, "The hexadecimal floating constant %s needs a p exponent\n", text);
+        lexer_number_invalid("The hexadecimal floating constant %s needs a p exponent\n", text);
     }
     char* end = 0;
     double value = 0;
@@ -274,7 +297,7 @@ static struct token* token_make_floating(const char* text){
         value = strtod(digits, &end);
     }
     if(len == 0 || *end != 0 || end == digits){
-        compiler_error(lex_process->compiler, "Invalid floating constant %s\n", text);
+        lexer_number_invalid("Invalid floating constant %s\n", text);
     }
     const char* spelling = 0;
     if(flags & NUMBER_FLAG_LONG_DOUBLE){
@@ -316,16 +339,16 @@ static struct token* token_make_integer(const char* text){
     while(*p && lexer_digit_value(*p) < base){
         unsigned long long digit = lexer_digit_value(*p);
         if(value > (~0ULL - digit) / base){
-            compiler_error(lex_process->compiler, "The integer constant %s does not fit in 64 bits\n", text);
+            lexer_number_invalid("The integer constant %s does not fit in 64 bits\n", text);
         }
         value = value * base + digit;
         p++;
     }
     if(isdigit(*p) || (base == 16 && isxdigit(*p))){
-        compiler_error(lex_process->compiler, "Invalid digit '%c' in the integer constant %s\n", *p, text);
+        lexer_number_invalid("Invalid digit '%c' in the integer constant %s\n", *p, text);
     }
     if(p == digits){
-        compiler_error(lex_process->compiler, "The integer constant %s has no digits\n", text);
+        lexer_number_invalid("The integer constant %s has no digits\n", text);
     }
 
     int number_type = NUMBER_TYPE_NORMAL;
@@ -342,7 +365,8 @@ static struct token* token_make_integer(const char* text){
                 // ll / LL, but not lL
                 p += (p[1] == p[0]) ? 2 : 1;
             } else {
-                compiler_error(lex_process->compiler, "Invalid suffix \"%s\" on the integer constant %s\n", suffix, text);
+                lexer_number_invalid("Invalid suffix \"%s\" on the integer constant %s\n", suffix, text);
+                break;
             }
         }
         if(seen_u){
@@ -430,6 +454,15 @@ static struct token* token_make_string(char start_delim, char end_delim){
     for(c = nextc(); c != end_delim; c = nextc()){
         if(c == EOF || c == '\n'){
             compiler_error(lex_process->compiler, "Missing the closing %c of a string\n", end_delim);
+        }
+        if(c == '\\' && (peekc() == '\n' || peekc() == '\r')){
+            // a backslash at the end of a line joins the next
+            // one, inside a literal too (C11 5.1.1.2 phase 2; glibc's
+            // <pthread.h> continues a message that way).
+            if(nextc() == '\r' && peekc() == '\n'){
+                nextc();
+            }
+            continue;
         }
         if(c == '\\' && end_delim == '"'){
             // ch182: real escape-sequence handling.
@@ -1017,8 +1050,11 @@ struct token* read_next_token(void){
         case ' ':
         case '\t':
         // A CRLF file: the \r before each \n is whitespace. It was an
-        // unexpected character before.
+        // unexpected character before. So are a form feed and a vertical
+        // tab (C11 6.4p3; glibc's <sys/stat.h> has a form feed).
         case '\r':
+        case '\f':
+        case '\v':
             token = handle_whitespace();
             break;
 

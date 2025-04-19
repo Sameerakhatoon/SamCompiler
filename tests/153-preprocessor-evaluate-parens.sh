@@ -38,6 +38,7 @@ int main(void){
     push_sym(cp->token_vec_original, ')');
     push_op (cp->token_vec_original, ">");
     push_num(cp->token_vec_original, 0);
+    push_nl (cp->token_vec_original);
     push_kw (cp->token_vec_original, "int");
     push_id (cp->token_vec_original, "x");
     push_sym(cp->token_vec_original, ';');

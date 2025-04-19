@@ -40,6 +40,7 @@ int main(void){
     push_sym(cp1->token_vec_original, '#'); push_id(cp1->token_vec_original, "if");
     push_id (cp1->token_vec_original, "defined");
     push_id (cp1->token_vec_original, "FOO");
+    push_nl (cp1->token_vec_original);
     push_kw (cp1->token_vec_original, "int");
     push_id (cp1->token_vec_original, "x");
     push_sym(cp1->token_vec_original, ';');
@@ -54,6 +55,7 @@ int main(void){
     push_sym(cp2->token_vec_original, '#'); push_id(cp2->token_vec_original, "if");
     push_id (cp2->token_vec_original, "defined");
     push_id (cp2->token_vec_original, "BAR");
+    push_nl (cp2->token_vec_original);
     push_kw (cp2->token_vec_original, "int");
     push_id (cp2->token_vec_original, "y");
     push_sym(cp2->token_vec_original, ';');

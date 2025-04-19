@@ -69,8 +69,11 @@ assert_contains "$out" "mov rdi, [rsp+56]" "small struct argument in rdi"
 assert_contains "$out" $'lea rax, [rbp+64]\nadd rax, 16' "callee finds the stack struct above the home area"
 
 out=$(asm_for tests/golden/inputs/31_varargs.c)
-assert_contains "$out" $'lea rax, [rbp+24]\npush rax\nlea rax, [rbp-40]\nmov rcx, rax\npop rax\nmov qword [rcx], rax' "va_start points gp past the named argument"
-assert_contains "$out" $'lea rax, [rbp+64]\npush rax\nlea rax, [rbp-40]\nadd rax, 16' "va_start points overflow at the stack arguments"
+# the psABI va_list, a pointer to its state in the frame. The
+# prologue copies the argument registers into the register save area.
+assert_contains "$out" $'lea rax, [rbp-224]\nmov rcx, rax\nlea rax, [rbp+16]\nmov rax, qword [rax]\nmov qword [rcx], rax' "the save area gets rdi"
+assert_contains "$out" $'mov rax, 8\npush rax\nlea rax, [rbp-48]\nmov rcx, rax\npop rax\nmov dword [rcx], eax' "va_start sets gp_offset past the named argument"
+assert_contains "$out" $'lea rax, [rbp+64]\npush rax\nlea rax, [rbp-40]\nmov rcx, rax\npop rax\nmov qword [rcx], rax' "va_start points overflow_arg_area at the stack arguments"
 assert_contains "$out" $'cmp rax, rcx\nseta al' "va_arg goes to the stack when the registers run out"
 assert_contains "$out" $'mov rax, qword [rax]\nadd rax, -8' "va_arg gives the slot it stepped past"
 

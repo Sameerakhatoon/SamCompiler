@@ -5,28 +5,6 @@
 
 enum
 {
-    TYPEDEF_TYPE_STANDARD,
-    // A structure typedef is basically "typedef struct ABC { int x; } AAA;"
-    TYPEDEF_TYPE_STRUCTURE_TYPEDEF
-};
-
-struct typedef_type
-{
-    int type;
-    const char *definiton_name;
-    struct vector *value;
-    struct typedef_structure
-    {
-        // "struct" or "union".
-        const char *keyword;
-        const char *sname;
-        // typedef struct Point P; names a type without defining it.
-        bool no_body;
-    } structure;
-};
-
-enum
-{
     PREPROCESSOR_FLAG_EVALUATE_NODE = 0b00000001
 };
 
@@ -1113,6 +1091,7 @@ void preprocessor_skip_to_endif(struct compile_process *compiler)
 }
 
 int preprocessor_parse_evaluate(struct compile_process *compiler, struct vector *token_vec);
+bool preprocessor_if_condition(struct compile_process *compiler);
 
 // Drop the rest of a directive line.
 static void preprocessor_skip_line(struct compile_process *compiler)
@@ -1173,7 +1152,7 @@ void preprocessor_read_to_end_if(struct compile_process *compiler, bool true_cla
             }
             else
             {
-                active = preprocessor_parse_evaluate(compiler, compiler->token_vec_original) > 0;
+                active = preprocessor_if_condition(compiler);
                 taken  = active;
             }
             continue;
@@ -1307,251 +1286,126 @@ void preprocessor_token_vec_push_src_token_to_dst(struct compile_process *compil
     vector_push(dst_vec, token);
 }
 
-bool preprocessor_token_is_typedef(struct token *token)
-{
-    if (!preprocessor_token_is_preprocessor_keyword(token))
-    {
-        return false;
-    }
+// a typedef with a struct, union or enum body,
+// `typedef struct S { ... } T, *PT;`, comes out as `struct S { ... };`
+// and `typedef struct S T, *PT;`, so the parser's typedef
+// holds only `struct S`; an untagged body gets the tag `__anonymous_N`.
+// This runs over the preprocessed tokens, once a whole file is read,
+// so the typedef keyword, the body and the names may each come out of a
+// macro (glibc's `__STD_TYPE __FSID_T_TYPE __fsid_t;` with
+// `#define __FSID_T_TYPE struct { int __val[2]; }`) and the body may hold
+// directives. Reading the declaration ahead from the raw tokens, as this
+// used to, saw neither.
+static int preprocessor_typedef_anonymous_count;
 
-    return S_EQ(token->sval, "typedef");
+static bool preprocessor_token_is_tag_keyword(struct token *token)
+{
+    return token_is_keyword(token, "struct") || token_is_keyword(token, "union") || token_is_keyword(token, "enum");
 }
 
-void preprocessor_handle_typedef_body_for_non_struct_or_union(struct compile_process *compiler, struct vector *token_vec, struct typedef_type *td, struct vector *src_vec, bool overflow_use_token_vec)
+void preprocessor_hoist_typedef_bodies(struct compile_process *compiler)
 {
-    td->type = TYPEDEF_TYPE_STANDARD;
-    struct token *token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    while (token)
+    struct vector *in = compiler->token_vec;
+    struct vector *out = vector_create(sizeof(struct token));
+    int count = vector_count(in);
+    for (int i = 0; i < count; i++)
     {
-        if (token_is_symbol(token, ';'))
+        struct token *token = vector_at(in, i);
+        if (!token_is_keyword(token, "typedef"))
         {
-            break;
-        }
-
-        preprocessor_token_vec_push_src_resolve_definition(compiler, src_vec, token_vec, token);
-        token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    }
-}
-
-void preprocessor_handle_typedef_body_for_brackets(struct compile_process *compiler, struct vector *token_vec, struct vector *src_vec, bool overflow_use_token_vec)
-{
-    struct token *token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    while (token)
-    {
-        if (token_is_symbol(token, '{'))
-        {
-            vector_push(token_vec, token);
-            preprocessor_handle_typedef_body_for_brackets(compiler, token_vec, src_vec, overflow_use_token_vec);
-            token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
+            vector_push(out, token);
             continue;
         }
 
-        vector_push(token_vec, token);
-        if (token_is_symbol(token, '}'))
+        // Qualifiers before the keyword stay with the typedef.
+        int k = i + 1;
+        while (k < count && (token_is_keyword(vector_at(in, k), "const") || token_is_keyword(vector_at(in, k), "volatile")))
         {
-            break;
+            k++;
         }
-        token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    }
-}
-
-void preprocessor_handle_typedef_body_for_struct_or_union(struct compile_process *compiler, struct vector *token_vec, struct typedef_type *td, struct vector *src_vec, bool overflow_use_token_vec)
-{
-    struct token *token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    assert(token_is_keyword(token, "struct") || token_is_keyword(token, "union") || token_is_keyword(token, "enum"));
-
-    td->type = TYPEDEF_TYPE_STRUCTURE_TYPEDEF;
-    td->structure.keyword = token->sval;
-
-    // Push the struct or union keyword
-    vector_push(token_vec, token);
-
-    token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    while (token && token->type == TOKEN_TYPE_NEWLINE)
-    {
-        token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    }
-    if (!token)
-    {
-        // `typedef enum` at the end of the file.
-        compiler_error(compiler, "The typedef of a %s ends at the end of the file", td->structure.keyword);
-    }
-    // Do we have a name for this structure
-    if (token->type == TOKEN_TYPE_IDENTIFIER)
-    {
-        td->structure.sname = token->sval;
-        vector_push(token_vec, token);
-        token = preprocessor_peek_next_token_with_vector_no_increment(compiler, src_vec, overflow_use_token_vec);
-        // `typedef struct _iobuf` then `{` on the next line.
-        while (token && token->type == TOKEN_TYPE_NEWLINE)
+        int open = k + 1;
+        if (k < count && open < count && ((struct token *)vector_at(in, open))->type == TOKEN_TYPE_IDENTIFIER)
         {
-            preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-            token = preprocessor_peek_next_token_with_vector_no_increment(compiler, src_vec, overflow_use_token_vec);
+            open++;
         }
-        if (!token_is_symbol(token, '{'))
+        if (k >= count || !preprocessor_token_is_tag_keyword(vector_at(in, k)) || open >= count || !token_is_symbol(vector_at(in, open), '{'))
         {
-            // No body: typedef struct Point point; or ... *point_ptr;
-            token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-            while (token && !token_is_symbol(token, ';'))
+            vector_push(out, token);
+            continue;
+        }
+        int close = open;
+        int depth = 0;
+        for (; close < count; close++)
+        {
+            struct token *t = vector_at(in, close);
+            if (token_is_symbol(t, '{'))
             {
-                vector_push(token_vec, token);
-                token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
+                depth++;
             }
-            td->structure.no_body = true;
-            return;
-        }
-    }
-    else
-    {
-        // typedef struct { ... } T; the body needs a name the type can
-        // refer to. Names starting with __ belong to the implementation.
-        static int anonymous_count = 0;
-        struct buffer *name = buffer_create();
-        buffer_printf(name, "__anonymous_%i", anonymous_count++);
-        struct token name_token = {};
-        name_token.type = TOKEN_TYPE_IDENTIFIER;
-        name_token.sval = buffer_ptr(name);
-        name_token.pos = token->pos;
-        td->structure.sname = name_token.sval;
-        vector_push(token_vec, &name_token);
-        if (token_is_symbol(token, '{'))
-        {
-            // The { is already consumed here, unlike the named case
-            // the loop below handles.
-            vector_push(token_vec, token);
-            preprocessor_handle_typedef_body_for_brackets(compiler, token_vec, src_vec, overflow_use_token_vec);
-            token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-        }
-    }
-
-    // Handle typedef structure with body.
-    while (token)
-    {
-        if (token_is_symbol(token, '{'))
-        {
-            // Structure typedef
-            td->type = TYPEDEF_TYPE_STRUCTURE_TYPEDEF;
-            vector_push(token_vec, token);
-            // Upstream peeked the leading "{" but never consumed it, so
-            // for_brackets re-fetches it via next_token and pushes a
-            // second "{" before reading the body. Consume here so
-            // for_brackets starts at the first real body token. See
-            preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-            preprocessor_handle_typedef_body_for_brackets(compiler, token_vec, src_vec, overflow_use_token_vec);
-            token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-            continue;
-        }
-
-        if (token_is_symbol(token, ';'))
-        {
-            break;
-        }
-
-        preprocessor_token_vec_push_src_resolve_definition(compiler, src_vec, token_vec, token);
-        token = preprocessor_next_token_with_vector(compiler, src_vec, overflow_use_token_vec);
-    }
-}
-
-void preprocessor_handle_typedef_body(struct compile_process *compiler, struct vector *token_vec, struct typedef_type *td, struct vector *src_vec, bool overflow_use_token_vec)
-{
-    memset(td, 0, sizeof(struct typedef_type));
-
-    struct token *token = preprocessor_peek_next_token_with_vector_no_increment(compiler, src_vec, overflow_use_token_vec);
-    // An enum body is emitted once, like a struct body, so its constants
-    // are declared even when the typedef name is never used.
-    if (token_is_keyword(token, "struct") || token_is_keyword(token, "union") || token_is_keyword(token, "enum"))
-    {
-        preprocessor_handle_typedef_body_for_struct_or_union(compiler, token_vec, td, src_vec, overflow_use_token_vec);
-    }
-    else
-    {
-        preprocessor_handle_typedef_body_for_non_struct_or_union(compiler, token_vec, td, src_vec, overflow_use_token_vec);
-    }
-}
-
-void preprocessor_token_push_semicolon(struct compile_process *compiler)
-{
-    struct token t1 = {};
-    t1.type = TOKEN_TYPE_SYMBOL;
-    t1.cval = ';';
-    vector_push(compiler->token_vec, &t1);
-}
-
-void preprocessor_handle_typedef_token(struct compile_process *compiler, struct vector *src_vec, bool overflow_use_token_vec)
-{
-    // We expect a format like " typedef unsigned int ABC;"
-    struct vector *token_vec = vector_create(sizeof(struct token));
-    struct typedef_type td;
-    preprocessor_handle_typedef_body(compiler, token_vec, &td, src_vec, overflow_use_token_vec);
-
-    // a typedef is a declaration with a scope, which the parser
-    // keeps (parse_typedef): it comes out as `typedef T name;` and the
-    // name is no macro here. Only a struct, union or enum body comes out
-    // first, once, as `struct S { ... };` (under an `__anonymous_N` tag
-    // when it has none), and the typedef then names `struct S` plus what
-    // followed the body: `typedef struct S name;`, `... *name_ptr;`.
-    if (td.type == TYPEDEF_TYPE_STRUCTURE_TYPEDEF && !td.structure.no_body)
-    {
-        // The suffix starts after the body's closing }.
-        int suffix_start = 2;
-        for (int i = vector_count(token_vec) - 1; i >= 0; i--)
-        {
-            if (token_is_symbol(vector_at(token_vec, i), '}'))
+            else if (token_is_symbol(t, '}') && --depth == 0)
             {
-                suffix_start = i + 1;
                 break;
             }
         }
-
-        struct vector *value_vec = vector_create(sizeof(struct token));
-        preprocessor_token_vec_push_keyword_and_identifier(value_vec, td.structure.keyword, td.structure.sname);
-        for (int i = 0; i < 2; i++)
+        if (close >= count)
         {
-            struct token *made = vector_at(value_vec, i);
-            made->whitespace = true;
-            made->pos = ((struct token *)vector_at(token_vec, 0))->pos;
-        }
-        for (int i = suffix_start; i < vector_count(token_vec); i++)
-        {
-            vector_push(value_vec, vector_at(token_vec, i));
+            // An unclosed body: the parser reports it.
+            vector_push(out, token);
+            continue;
         }
 
-        while (vector_count(token_vec) > suffix_start)
+        struct token *keyword = vector_at(in, k);
+        struct token tag;
+        if (open == k + 2)
         {
-            vector_pop(token_vec);
+            tag = *(struct token *)vector_at(in, k + 1);
         }
-        // The body was read without expanding anything: its macros
-        // (`unsigned char e_ident[EI_NIDENT];` in <elf.h>) expand on the
-        // way out.
-        preprocessor_token_vec_push_src_resolve_definitions(compiler, token_vec, compiler->token_vec);
-        preprocessor_token_push_semicolon(compiler);
-        token_vec = value_vec;
-    }
+        else
+        {
+            // Names starting with __ belong to the implementation.
+            struct buffer *name = buffer_create();
+            buffer_printf(name, "__anonymous_%i", preprocessor_typedef_anonymous_count++);
+            memset(&tag, 0, sizeof(tag));
+            tag.type = TOKEN_TYPE_IDENTIFIER;
+            tag.sval = buffer_ptr(name);
+            tag.pos = ((struct token *)vector_at(in, open))->pos;
+        }
 
-    if (!vector_count(token_vec))
-    {
-        compiler_error(compiler, "We expected a name token for your typedef");
+        // struct S { ... };
+        vector_push(out, keyword);
+        vector_push(out, &tag);
+        for (int j = open; j <= close; j++)
+        {
+            vector_push(out, vector_at(in, j));
+        }
+        struct token semicolon = {};
+        semicolon.type = TOKEN_TYPE_SYMBOL;
+        semicolon.cval = ';';
+        vector_push(out, &semicolon);
+
+        // typedef [qualifiers] struct S, then the declarators after the body.
+        struct token typedef_token = *token;
+        typedef_token.whitespace = true;
+        typedef_token.pos = keyword->pos;
+        vector_push(out, &typedef_token);
+        for (int j = i + 1; j < k; j++)
+        {
+            vector_push(out, vector_at(in, j));
+        }
+        struct token named[2] = {*keyword, tag};
+        for (int j = 0; j < 2; j++)
+        {
+            named[j].whitespace = true;
+            named[j].pos = keyword->pos;
+            vector_push(out, &named[j]);
+        }
+        i = close;
     }
-    struct token typedef_token = {};
-    typedef_token.type = TOKEN_TYPE_KEYWORD;
-    typedef_token.sval = "typedef";
-    typedef_token.whitespace = true;
-    typedef_token.pos = ((struct token *)vector_at(token_vec, 0))->pos;
-    vector_push(compiler->token_vec, &typedef_token);
-    for (int i = 0; i < vector_count(token_vec); i++)
-    {
-        vector_push(compiler->token_vec, vector_at(token_vec, i));
-    }
-    preprocessor_token_push_semicolon(compiler);
+    compiler->token_vec = out;
 }
+
 void preprocessor_token_vec_push_src_resolve_definition(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec, struct token *token)
 {
-    if (preprocessor_token_is_typedef(token))
-    {
-        preprocessor_handle_typedef_token(compiler, src_vec, true);
-        return;
-    }
-
     if (token->type == TOKEN_TYPE_IDENTIFIER)
     {
         preprocessor_handle_identifier_for_token_vector(compiler, src_vec, dst_vec, token);
@@ -1609,6 +1463,8 @@ void preprocessor_handle_concat_finalize(struct compile_process *compiler, struc
     preprocessor_token_vec_push_src_to_dst(compiler, joined_vec, value_vec_target);
 }
 
+bool preprocessor_is_next_double_hash(struct vector *definition_token_vec);
+
 void preprocessor_handle_concat(struct compile_process *compiler, struct preprocessor_definition *definition,
                                 struct preprocessor_function_arguments *arguments, struct token *arg_token, struct vector *definition_token_vec,
                                 struct vector *value_vec_target)
@@ -1626,7 +1482,25 @@ void preprocessor_handle_concat(struct compile_process *compiler, struct preproc
     struct vector *tmp_vec = vector_create(sizeof(struct token));
     preprocessor_handle_concat_part(compiler, definition, arguments, arg_token, definition_token_vec, tmp_vec);
     preprocessor_handle_concat_part(compiler, definition, arguments, right_token, definition_token_vec, tmp_vec);
-    preprocessor_handle_concat_finalize(compiler, tmp_vec, value_vec_target);
+    // `a ## b ## c` is one token of the three (glibc's
+    // __MATH_PRECNAME, `name##f##r`). The third operand's `##` went to
+    // the stringizing `#` before.
+    while (preprocessor_is_next_double_hash(definition_token_vec))
+    {
+        vector_peek(definition_token_vec);
+        vector_peek(definition_token_vec);
+        right_token = vector_peek(definition_token_vec);
+        if (!right_token)
+        {
+            compiler_error(compiler, "No right operand provided for concat preprocessor operator ##");
+        }
+        preprocessor_handle_concat_part(compiler, definition, arguments, right_token, definition_token_vec, tmp_vec);
+    }
+    // Empty arguments on both sides leave nothing (C11 6.10.3.3p3).
+    if (vector_count(tmp_vec))
+    {
+        preprocessor_handle_concat_finalize(compiler, tmp_vec, value_vec_target);
+    }
 }
 
 bool preprocessor_is_next_double_hash(struct vector *definition_token_vec)
@@ -1895,10 +1769,428 @@ int preprocessor_parse_evaluate(struct compile_process *compiler, struct vector 
     return preprocessor_evaluate(compiler, root_node);
 }
 
+// the condition of #if and #elif (C11 6.10.1). The rest of
+// the line, with `defined X` and `defined(X)` replaced by 1 or 0, has
+// its macros expanded; a `defined` a macro gave is read the same way
+// (as gcc does), every identifier or keyword left is 0, and the result
+// is worked out in intmax_t or uintmax_t by the usual conversions. A
+// name that is not a macro, followed by parentheses (`__has_include(
+// <x.h>)`, `__has_attribute(...)`), is 0 too, with what is in them.
+// The expression used to be parsed from the raw tokens with macros
+// looked up on the way: `!defined A && !defined B` read as
+// `!defined (A && ...)`, which glibc's guards are full of, and
+// `#if -1` was false.
+struct preprocessor_if_value
+{
+    long long value;
+    bool is_unsigned;
+};
+
+struct preprocessor_if_reader
+{
+    struct compile_process *compiler;
+    struct vector *tokens;
+    int at;
+    // Inside the operand of && or || or ?: that is not evaluated, where
+    // a division by zero is no error.
+    int unevaluated;
+};
+
+static struct token *preprocessor_if_peek(struct preprocessor_if_reader *reader)
+{
+    return reader->at < vector_count(reader->tokens) ? vector_at(reader->tokens, reader->at) : NULL;
+}
+
+static bool preprocessor_if_is(struct token *token, const char *op)
+{
+    if (!token)
+    {
+        return false;
+    }
+    if (token->type == TOKEN_TYPE_OPERATOR)
+    {
+        return S_EQ(token->sval, op);
+    }
+    return token->type == TOKEN_TYPE_SYMBOL && !op[1] && token->cval == op[0];
+}
+
+static bool preprocessor_if_take(struct preprocessor_if_reader *reader, const char *op)
+{
+    if (!preprocessor_if_is(preprocessor_if_peek(reader), op))
+    {
+        return false;
+    }
+    reader->at++;
+    return true;
+}
+
+static bool preprocessor_if_is_name(struct token *token)
+{
+    return token && (token->type == TOKEN_TYPE_IDENTIFIER || token->type == TOKEN_TYPE_KEYWORD);
+}
+
+// `defined X` or `defined ( X )` at `*at` of `tokens` (the `defined`
+// already read): whether X is a macro, and *at past it.
+static bool preprocessor_if_defined(struct compile_process *compiler, struct vector *tokens, int *at)
+{
+    bool parenthesis = *at < vector_count(tokens) && preprocessor_if_is(vector_at(tokens, *at), "(");
+    if (parenthesis)
+    {
+        (*at)++;
+    }
+    struct token *name = *at < vector_count(tokens) ? vector_at(tokens, *at) : NULL;
+    if (!preprocessor_if_is_name(name))
+    {
+        compiler_error(compiler, "Expected a macro name after defined");
+    }
+    (*at)++;
+    if (parenthesis)
+    {
+        if (*at >= vector_count(tokens) || !preprocessor_if_is(vector_at(tokens, *at), ")"))
+        {
+            compiler_error(compiler, "Expected ')' after defined(%s", name->sval);
+        }
+        (*at)++;
+    }
+    struct preprocessor_definition *definition = preprocessor_get_definition(compiler->preprocessor, name->sval);
+    return definition && definition->type != PREPROCESSOR_DEFINITION_TYPEDEF;
+}
+
+static struct token preprocessor_if_number(long long value)
+{
+    struct token number = {};
+    number.type = TOKEN_TYPE_NUMBER;
+    number.llnum = value;
+    return number;
+}
+
+static struct preprocessor_if_value preprocessor_if_conditional(struct preprocessor_if_reader *reader);
+
+static struct preprocessor_if_value preprocessor_if_primary(struct preprocessor_if_reader *reader)
+{
+    struct preprocessor_if_value result = {0, false};
+    struct token *token = preprocessor_if_peek(reader);
+    if (!token)
+    {
+        compiler_error(reader->compiler, "The #if expression ends too early");
+    }
+    reader->at++;
+    if (token->type == TOKEN_TYPE_NUMBER)
+    {
+        if (token->num.error)
+        {
+            compiler_error(reader->compiler, "%s", token->num.error);
+        }
+        if (token->num.flags & NUMBER_FLAG_FLOATING)
+        {
+            compiler_error(reader->compiler, "A floating constant in an #if expression");
+        }
+        result.value = token->llnum;
+        result.is_unsigned = (token->num.flags & NUMBER_FLAG_UNSIGNED) != 0;
+        return result;
+    }
+    if (preprocessor_if_is(token, "("))
+    {
+        result = preprocessor_if_conditional(reader);
+        while (preprocessor_if_take(reader, ","))
+        {
+            result = preprocessor_if_conditional(reader);
+        }
+        if (!preprocessor_if_take(reader, ")"))
+        {
+            compiler_error(reader->compiler, "Expected ')' in the #if expression");
+        }
+        return result;
+    }
+    if (preprocessor_if_is_name(token))
+    {
+        if (S_EQ(token->sval, "defined"))
+        {
+            result.value = preprocessor_if_defined(reader->compiler, reader->tokens, &reader->at);
+            return result;
+        }
+        if (preprocessor_if_is(preprocessor_if_peek(reader), "("))
+        {
+            int depth = 0;
+            do
+            {
+                struct token *t = preprocessor_if_peek(reader);
+                if (!t)
+                {
+                    compiler_error(reader->compiler, "Expected ')' after %s( in the #if expression", token->sval);
+                }
+                depth += preprocessor_if_is(t, "(") - preprocessor_if_is(t, ")");
+                reader->at++;
+            } while (depth > 0);
+        }
+        return result;
+    }
+    compiler_error(reader->compiler, "Unexpected token in the #if expression");
+    return result;
+}
+
+static struct preprocessor_if_value preprocessor_if_unary(struct preprocessor_if_reader *reader)
+{
+    const char *ops[] = {"-", "+", "!", "~"};
+    for (int i = 0; i < 4; i++)
+    {
+        if (preprocessor_if_take(reader, ops[i]))
+        {
+            struct preprocessor_if_value v = preprocessor_if_unary(reader);
+            switch (ops[i][0])
+            {
+            case '-':
+                v.value = (long long)(0ULL - (unsigned long long)v.value);
+                break;
+            case '!':
+                v.value = !v.value;
+                v.is_unsigned = false;
+                break;
+            case '~':
+                v.value = ~v.value;
+                break;
+            }
+            return v;
+        }
+    }
+    return preprocessor_if_primary(reader);
+}
+
+// One binary operator on a and b, after the usual arithmetic conversions.
+static struct preprocessor_if_value preprocessor_if_apply(struct preprocessor_if_reader *reader, const char *op,
+                                                          struct preprocessor_if_value a, struct preprocessor_if_value b)
+{
+    struct preprocessor_if_value r = {0, a.is_unsigned || b.is_unsigned};
+    unsigned long long ua = a.value;
+    unsigned long long ub = b.value;
+    bool u = r.is_unsigned;
+    if (S_EQ(op, "<<") || S_EQ(op, ">>"))
+    {
+        r.is_unsigned = a.is_unsigned;
+        int count = (int)(b.value & 63);
+        if (S_EQ(op, "<<"))
+        {
+            r.value = (long long)(ua << count);
+        }
+        else
+        {
+            r.value = a.is_unsigned ? (long long)(ua >> count) : a.value >> count;
+        }
+        return r;
+    }
+    if ((S_EQ(op, "/") || S_EQ(op, "%")) && b.value == 0)
+    {
+        if (!reader->unevaluated)
+        {
+            compiler_error(reader->compiler, "Division by zero in an #if expression");
+        }
+        return r;
+    }
+    bool compare = true;
+    if (S_EQ(op, "<"))
+        r.value = u ? ua < ub : a.value < b.value;
+    else if (S_EQ(op, ">"))
+        r.value = u ? ua > ub : a.value > b.value;
+    else if (S_EQ(op, "<="))
+        r.value = u ? ua <= ub : a.value <= b.value;
+    else if (S_EQ(op, ">="))
+        r.value = u ? ua >= ub : a.value >= b.value;
+    else if (S_EQ(op, "=="))
+        r.value = ua == ub;
+    else if (S_EQ(op, "!="))
+        r.value = ua != ub;
+    else
+        compare = false;
+    if (compare)
+    {
+        r.is_unsigned = false;
+        return r;
+    }
+    switch (op[0])
+    {
+    case '*':
+        r.value = (long long)(ua * ub);
+        break;
+    case '/':
+        r.value = u ? (long long)(ua / ub) : a.value / b.value;
+        break;
+    case '%':
+        r.value = u ? (long long)(ua % ub) : a.value % b.value;
+        break;
+    case '+':
+        r.value = (long long)(ua + ub);
+        break;
+    case '-':
+        r.value = (long long)(ua - ub);
+        break;
+    case '&':
+        r.value = (long long)(ua & ub);
+        break;
+    case '^':
+        r.value = (long long)(ua ^ ub);
+        break;
+    case '|':
+        r.value = (long long)(ua | ub);
+        break;
+    }
+    return r;
+}
+
+// The binary operators from the loosest (level 0, |) to the tightest.
+static const char *preprocessor_if_levels[][5] = {
+    {"|", 0},
+    {"^", 0},
+    {"&", 0},
+    {"==", "!=", 0},
+    {"<", ">", "<=", ">=", 0},
+    {"<<", ">>", 0},
+    {"+", "-", 0},
+    {"*", "/", "%", 0},
+};
+
+static struct preprocessor_if_value preprocessor_if_binary(struct preprocessor_if_reader *reader, int level)
+{
+    if (level == (int)(sizeof(preprocessor_if_levels) / sizeof(preprocessor_if_levels[0])))
+    {
+        return preprocessor_if_unary(reader);
+    }
+    struct preprocessor_if_value left = preprocessor_if_binary(reader, level + 1);
+    while (true)
+    {
+        const char *op = NULL;
+        for (int i = 0; preprocessor_if_levels[level][i]; i++)
+        {
+            if (preprocessor_if_is(preprocessor_if_peek(reader), preprocessor_if_levels[level][i]))
+            {
+                op = preprocessor_if_levels[level][i];
+            }
+        }
+        if (!op)
+        {
+            return left;
+        }
+        reader->at++;
+        struct preprocessor_if_value right = preprocessor_if_binary(reader, level + 1);
+        left = preprocessor_if_apply(reader, op, left, right);
+    }
+}
+
+static struct preprocessor_if_value preprocessor_if_logical_and(struct preprocessor_if_reader *reader)
+{
+    struct preprocessor_if_value left = preprocessor_if_binary(reader, 0);
+    while (preprocessor_if_take(reader, "&&"))
+    {
+        bool skip = !left.value;
+        reader->unevaluated += skip;
+        struct preprocessor_if_value right = preprocessor_if_binary(reader, 0);
+        reader->unevaluated -= skip;
+        left.value = left.value && right.value;
+        left.is_unsigned = false;
+    }
+    return left;
+}
+
+static struct preprocessor_if_value preprocessor_if_logical_or(struct preprocessor_if_reader *reader)
+{
+    struct preprocessor_if_value left = preprocessor_if_logical_and(reader);
+    while (preprocessor_if_take(reader, "||"))
+    {
+        bool skip = left.value != 0;
+        reader->unevaluated += skip;
+        struct preprocessor_if_value right = preprocessor_if_logical_and(reader);
+        reader->unevaluated -= skip;
+        left.value = left.value || right.value;
+        left.is_unsigned = false;
+    }
+    return left;
+}
+
+static struct preprocessor_if_value preprocessor_if_conditional(struct preprocessor_if_reader *reader)
+{
+    struct preprocessor_if_value condition = preprocessor_if_logical_or(reader);
+    if (!preprocessor_if_take(reader, "?"))
+    {
+        return condition;
+    }
+    reader->unevaluated += !condition.value;
+    struct preprocessor_if_value yes = preprocessor_if_conditional(reader);
+    reader->unevaluated -= !condition.value;
+    if (!preprocessor_if_take(reader, ":"))
+    {
+        compiler_error(reader->compiler, "Expected ':' in the #if expression");
+    }
+    reader->unevaluated += condition.value != 0;
+    struct preprocessor_if_value no = preprocessor_if_conditional(reader);
+    reader->unevaluated -= condition.value != 0;
+    struct preprocessor_if_value result = condition.value ? yes : no;
+    result.is_unsigned = yes.is_unsigned || no.is_unsigned;
+    return result;
+}
+
+bool preprocessor_if_condition(struct compile_process *compiler)
+{
+    struct vector *line = vector_create(sizeof(struct token));
+    struct token *token = preprocessor_next_token_no_increment(compiler);
+    while (token && token->type != TOKEN_TYPE_NEWLINE)
+    {
+        preprocessor_next_token(compiler);
+        if (token_is_symbol(token, '\\'))
+        {
+            // A backslash at the end of the line goes on on the next.
+            struct token *next = preprocessor_next_token_no_increment(compiler);
+            if (next && next->type == TOKEN_TYPE_NEWLINE)
+            {
+                preprocessor_next_token(compiler);
+            }
+            token = preprocessor_next_token_no_increment(compiler);
+            continue;
+        }
+        if (token->type != TOKEN_TYPE_COMMENT)
+        {
+            vector_push(line, token);
+        }
+        token = preprocessor_next_token_no_increment(compiler);
+    }
+    if (!vector_count(line))
+    {
+        compiler_error(compiler, "Expected an expression after #if or #elif");
+    }
+
+    // defined, before the macros are expanded.
+    struct vector *known = vector_create(sizeof(struct token));
+    for (int at = 0; at < vector_count(line);)
+    {
+        struct token *t = vector_at(line, at++);
+        if (preprocessor_if_is_name(t) && S_EQ(t->sval, "defined"))
+        {
+            struct token number = preprocessor_if_number(preprocessor_if_defined(compiler, line, &at));
+            vector_push(known, &number);
+            continue;
+        }
+        vector_push(known, t);
+    }
+
+    struct vector *expanded = vector_create(sizeof(struct token));
+    preprocessor_token_vec_push_src_resolve_definitions(compiler, known, expanded);
+    struct preprocessor_if_reader reader = {compiler, expanded, 0, 0};
+    struct preprocessor_if_value value = preprocessor_if_conditional(&reader);
+    while (preprocessor_if_take(&reader, ","))
+    {
+        value = preprocessor_if_conditional(&reader);
+    }
+    if (reader.at != vector_count(expanded))
+    {
+        compiler_error(compiler, "Unexpected token in the #if expression");
+    }
+    vector_free(line);
+    vector_free(known);
+    vector_free(expanded);
+    return value.value != 0;
+}
+
 void preprocessor_handle_if_token(struct compile_process *compiler)
 {
-    int result = preprocessor_parse_evaluate(compiler, compiler->token_vec_original);
-    preprocessor_read_to_end_if(compiler, result > 0);
+    preprocessor_read_to_end_if(compiler, preprocessor_if_condition(compiler));
 }
 
 void preprocessor_handle_ifdef_token(struct compile_process *compiler)
@@ -2230,12 +2522,6 @@ int preprocessor_handle_identifier(struct compile_process *compiler, struct toke
 }
 void preprocessor_handle_keyword(struct compile_process *compiler, struct token *token)
 {
-    if (preprocessor_token_is_typedef(token))
-    {
-        preprocessor_handle_typedef_token(compiler, compiler->token_vec_original, false);
-        return;
-    }
-
     // This is not for us to deal with
     preprocessor_token_push_dst(compiler, token);
 }
@@ -2276,6 +2562,9 @@ int preprocessor_run(struct compile_process *compiler)
         preprocessor_handle_token(compiler, token);
         token = preprocessor_next_token(compiler);
     }
+    // An included file's typedefs are lifted already; doing it again
+    // finds no body after `typedef struct S`.
+    preprocessor_hoist_typedef_bodies(compiler);
 
     return 0;
 }

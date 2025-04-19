@@ -37,6 +37,8 @@ static const char* main_link_cmd(const struct target* target, int kind);
 
 static const char* main_prog = "main";
 static const char* main_sysroot;
+// -glibc, the C library's own headers before pc_includes.
+static bool main_glibc;
 static const char* main_own_includes;
 static bool        main_verbose;
 static int         main_pid;
@@ -215,6 +217,7 @@ static void main_usage(FILE* out){
         "  -target=T        x86 (default), x86_64, aarch64, riscv64, samos-x86_64,\n"
         "                   samos-aarch64 or samos-riscv64\n"
         "  -sysroot=DIR     the SamOS sysroot of a samos target (or SAMOS_SYSROOT)\n"
+        "  -glibc           x86_64: glibc's headers in /usr/include before pc_includes\n"
         "  -v               print the assembler and linker commands\n"
         "  -h, --help       print this help\n"
         "\n"
@@ -913,6 +916,8 @@ int main(int argc, char** argv){
             main_compile_flags |= COMPILE_PROCESS_DEBUG;
         } else if(S_EQ(arg, "-g0")){
             main_compile_flags &= ~COMPILE_PROCESS_DEBUG;
+        } else if(S_EQ(arg, "-glibc")){
+            main_glibc = true;
         } else {
             main_error("unknown option %s (see %s --help)", arg, main_prog);
             return 1;
@@ -929,6 +934,18 @@ int main(int argc, char** argv){
     }
     target_set_current(target);
     main_find_own_includes();
+    // glibc's headers, after the -I directories and before
+    // pc_includes, which then only gives what glibc leaves to the
+    // compiler (stdarg.h, stddef.h, stdbool.h). /usr/include holds them
+    // for this machine, so only for x86_64.
+    if(main_glibc){
+        if(!S_EQ(target->name, "x86_64")){
+            main_error("-glibc needs -target=x86_64: /usr/include has glibc's headers for x86_64 Linux");
+            return 1;
+        }
+        compiler_add_include_dir("/usr/include/x86_64-linux-gnu");
+        compiler_add_include_dir("/usr/include");
+    }
     if(target->samos && main_setup_samos(target) < 0){
         return 1;
     }

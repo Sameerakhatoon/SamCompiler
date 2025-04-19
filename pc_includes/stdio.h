@@ -38,7 +38,8 @@ int    scanf(const char* fmt, ...);
 int    fscanf(FILE* stream, const char* fmt, ...);
 int    sscanf(const char* str, const char* fmt, ...);
 // No vprintf family: SamCompiler's va_list is not the C library's on
-// x86_64 and aarch64, so passing one on would read the wrong memory.
+// aarch64 and riscv64, so passing one on would read the wrong memory.
+// On x86_64 it is; -glibc gives glibc's own stdio.h there.
 
 int    fgetc(FILE* stream);
 int    getc(FILE* stream);
