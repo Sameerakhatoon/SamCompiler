@@ -551,6 +551,16 @@ static bool ph_has_hidden_uses(struct ph_ins* ins, int family){
     if(ph_eq(m, "push") || ph_eq(m, "pop") || ph_eq(m, "leave") || ph_eq(m, "enter")){
         return family == PH_X86_RSP || family == 6;
     }
+    // cmpxchg8b/16b read edx:eax and ecx:ebx (rbx is family 3) without
+    // naming them; a `lock` line (the prefix parses as the mnemonic) may
+    // be one. The copy-forward and dead-def rules dropped the
+    // `mov ebx, [ebx]` that set the low half of the new value, and the
+    // x86 atomics of 8-byte structs stored garbage at -O1.
+    if(ph_eq(m, "lock") || ph_eq(m, "cmpxchg8b") || ph_eq(m, "cmpxchg16b")){
+        if(family == PH_X86_RAX || family == 3 || family == PH_X86_RCX || family == PH_X86_RDX){
+            return true;
+        }
+    }
     if(family != PH_X86_RAX && family != PH_X86_RCX && family != PH_X86_RDX && family != PH_X86_RSI && family != PH_X86_RDI){
         return false;
     }
