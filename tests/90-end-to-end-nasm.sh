@@ -25,7 +25,7 @@ printf 'int main() { int a = 3 + 4; }' > "$scratch"
 # Drive the CLI in "asm-only" mode by passing "object" so nasm runs
 # but the gcc link step is skipped (we only need to confirm nasm
 # accepts the asm).
-"$REPO_ROOT/main" "$scratch" "$asm_out" object >/tmp/_e2e_log 2>&1 || {
+samcc "$scratch" "$asm_out" object >/tmp/_e2e_log 2>&1 || {
     cat /tmp/_e2e_log
     fail "main exited non-zero on the end-to-end run"
 }

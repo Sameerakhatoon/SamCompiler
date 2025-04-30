@@ -710,6 +710,19 @@ struct datatype* resolver_get_datatype(struct resolver_process* resolver, struct
     return &result->last_entity->dtype;
 }
 
+// Whether the entity is an array as a whole (or a row of a
+// multi-dimensional one), which a use as a value decays to a pointer,
+// rather than an element.
+static bool resolver_entity_is_whole_array(struct resolver_entity* entity){
+    if(!(entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)){
+        return false;
+    }
+    if(entity->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET || (entity->flags & RESOLVER_ENTITY_FLAG_USES_ARRAY_BRACKETS)){
+        return entity->array.index + 1 < (int)array_brackets_count(&entity->dtype);
+    }
+    return true;
+}
+
 // ch128: walk a (possibly nested) argument expression and push each
 // leaf onto func_call_entity->func_call_data.arguments while
 // summing the byte cost into *total_size_out.
@@ -724,7 +737,16 @@ void resolver_build_function_call_arguments(struct resolver_process* resolver, s
         // every argument takes at least one target arg slot.
         size_t arg_slot_size = resolver->compiler->target->arg_slot_size;
         size_t stack_change = arg_slot_size;
-        struct datatype* dtype = resolver_get_datatype(resolver, argument_node);
+        struct resolver_result* result = resolver_follow(resolver, argument_node);
+        struct datatype* dtype = resolver_result_ok(result) ? &result->last_entity->dtype : 0;
+        // an array argument decays to a pointer, one slot. Its
+        // element's size was counted: a jmp_buf (an array of one struct,
+        // setjmp(env)) or `double d[2]` took the element's bytes, and
+        // the call stopped with "call arguments do not match their
+        // stack size".
+        if(dtype && resolver_entity_is_whole_array(result->last_entity)){
+            dtype = 0;
+        }
         if(dtype){
             stack_change = datatype_element_size(dtype);
             if(stack_change < arg_slot_size){
@@ -885,6 +907,18 @@ struct resolver_entity* resolver_follow_indirection(struct resolver_process* res
     (void)last_entity;
     struct resolver_entity* unary_ind = resolver_create_new_unary_indirection_entity(resolver, result, node, node->unary.indirection.depth);
     resolver_result_entity_push(result, unary_ind);
+    // the type is the operand's with the pointer levels taken
+    // off, known now. Only the last entity got it (in finalize), so a
+    // subscript after it (`(*pp)[2]`, and `name[1]` of a thread-local
+    // `char* name`, which is that on i386) indexed a type of nothing
+    // and pushed the element's address instead of its value.
+    if(unary_ind->prev){
+        unary_ind->dtype = unary_ind->prev->dtype;
+        unary_ind->dtype.pointer_depth -= unary_ind->indirection.depth;
+        if(unary_ind->dtype.pointer_depth <= 0){
+            unary_ind->dtype.flags &= ~DATATYPE_FLAG_IS_POINTER;
+        }
+    }
     return unary_ind;
 }
 

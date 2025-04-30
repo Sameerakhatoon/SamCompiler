@@ -23,13 +23,13 @@ int main()
     return a - b - c;
 }
 EOF2
-"$REPO_ROOT/main" "$tmp/sub.c" "$tmp/sub.asm" object >/dev/null 2>&1 || true
+samcc "$tmp/sub.c" "$tmp/sub.asm" object >/dev/null 2>&1 || true
 got=$(cat "$tmp/sub.asm")
 # (a - b) is computed first, then c is pushed and subtracted.
 assert_contains "$got" $'push dword [ebp-4]\npush dword [ebp-8]\npop ecx\npop eax\nsub eax, ecx\npush eax\npush dword [ebp-12]\npop ecx\npop eax\nsub eax, ecx' "a - b - c groups as (a - b) - c"
 
 need_tools nasm
-"$REPO_ROOT/main" tests/golden/inputs/41_left_assoc.c "$tmp/la" >/dev/null 2>&1 || true
+samcc tests/golden/inputs/41_left_assoc.c "$tmp/la" >/dev/null 2>&1 || true
 [ -x "$tmp/la" ] || fail "41_left_assoc did not build"
 "$tmp/la" && ec=0 || ec=$?
 assert_eq "111" "$ec" "chained -, /, %, <<, >> and #if subtraction"

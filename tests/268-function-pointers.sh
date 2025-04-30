@@ -10,7 +10,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 printf 'int main(void){ int x = 3; return x(1); }\n' > "$tmp/bad.c"
 rc=0
-err=$(./main -target=x86_64 "$tmp/bad.c" "$tmp/bad" 2>&1 >/dev/null) || rc=$?
+err=$(samcc -target=x86_64 "$tmp/bad.c" "$tmp/bad" 2>&1 >/dev/null) || rc=$?
 [ $rc != 0 ] || fail "calling an int compiled without an error"
 assert_contains "$err" "Called object is not a function or function pointer" "call of a non-function"
 
@@ -28,7 +28,7 @@ int main(void){
 }
 EOF
 for target in x86 x86_64; do
-    ./main -target=$target "$tmp/table.c" "$tmp/table_$target" >/dev/null 2>&1 || fail "$target: table.c did not compile"
+    samcc -target=$target "$tmp/table.c" "$tmp/table_$target" >/dev/null 2>&1 || fail "$target: table.c did not compile"
     rc=0
     "$tmp/table_$target" || rc=$?
     assert_eq 19 "$rc" "$target calls through a table of function pointers"

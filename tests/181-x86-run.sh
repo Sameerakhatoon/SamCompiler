@@ -21,7 +21,7 @@ for src in tests/golden/inputs/*.c samples/*.c; do
     # lib.sh runs with set -e and pipefail: a grep that matches nothing
     # or a failed build must not end the loop.
     expected=$(grep -oP 'EXPECTED EXIT: \K[0-9]+' "$src" | head -1 || true)
-    "$REPO_ROOT/main" "$src" "$tmp/$base" >"$tmp/$base.log" 2>&1 || true
+    samcc "$src" "$tmp/$base" >"$tmp/$base.log" 2>&1 || true
     if [ ! -x "$tmp/$base" ]; then
         failures="$failures $base(build)"
         continue

@@ -16,7 +16,7 @@ for src in samples/*.c tests/golden/inputs/*.c; do
     base=$(basename "$src" .c)
     golden="tests/golden/x86/$base.asm"
     [ -f "$golden" ] || fail "missing golden file $golden"
-    "$REPO_ROOT/main" "$src" "$tmp/$base.asm" object >"$tmp/$base.log" 2>&1 || true
+    samcc "$src" "$tmp/$base.asm" object >"$tmp/$base.log" 2>&1 || true
     grep -q "everything compiled fine" "$tmp/$base.log" || fail "$src did not compile: $(tail -2 "$tmp/$base.log")"
     if ! cmp -s "$golden" "$tmp/$base.asm"; then
         # diff exits 1 on a difference; keep set -e from ending the

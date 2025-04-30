@@ -14,7 +14,7 @@ expect_error(){
     printf '%s\n' "$1" > "$tmp/c$n.c"
     for target in x86 x86_64; do
         local rc=0 err
-        err=$(./main -target=$target "$tmp/c$n.c" "$tmp/c$n.o" object 2>&1 >/dev/null) || rc=$?
+        err=$(samcc -target=$target "$tmp/c$n.c" "$tmp/c$n.o" object 2>&1 >/dev/null) || rc=$?
         [ $rc != 0 ] || fail "'$1' ($target): compiled without an error"
         assert_contains "$err" "$2" "'$1' ($target)"
     done
@@ -45,7 +45,7 @@ int main(void){
 }
 SRC
 for target in x86 x86_64; do
-    ./main -target=$target "$tmp/valid.c" "$tmp/valid_$target" >/dev/null 2>&1 || fail "valid const use rejected ($target)"
+    samcc -target=$target "$tmp/valid.c" "$tmp/valid_$target" >/dev/null 2>&1 || fail "valid const use rejected ($target)"
 done
 rc=0
 "$tmp/valid_x86_64" || rc=$?

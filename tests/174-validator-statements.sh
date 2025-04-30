@@ -25,7 +25,7 @@ void foo() { return 5; }
 int main() { foo(); return 0; }
 EOF
 
-out=$("$REPO_ROOT/main" "$src_bad" "$asm" 2>&1 || true)
+out=$(samcc "$src_bad" "$asm" 2>&1 || true)
 case "$out" in
     *"returning a value"*|*"void"*) ;;
     *) fail "expected void-return diagnostic; got: $out" ;;
@@ -37,7 +37,7 @@ void foo() { return; }
 int main() { foo(); return 0; }
 EOF
 
-out=$("$REPO_ROOT/main" "$src_ok" "$asm" 2>&1 || true)
+out=$(samcc "$src_ok" "$asm" 2>&1 || true)
 case "$out" in
     *"everything compiled fine"*|*"Issue assemblign"*) ;;
     *) fail "void function with bare return should compile; got: $out" ;;

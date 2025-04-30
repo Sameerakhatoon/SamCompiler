@@ -34,7 +34,7 @@ EOF
 
 expect_asm(){
     local target="$1"; shift
-    ./main -target=$target -S -o "$tmp/shape_$target.s" "$tmp/shape.c" >"$tmp/log" 2>&1 \
+    samcc -target=$target -S -o "$tmp/shape_$target.s" "$tmp/shape.c" >"$tmp/log" 2>&1 \
         || fail "$target: shape.c did not compile: $(tail -2 "$tmp/log")"
     local ins
     for ins in "$@"; do
@@ -49,7 +49,7 @@ expect_asm riscv64 "amoadd.w.aqrl" "amoadd.d.aqrl" "lr.w.aqrl" "sc.w.aqrl" "fenc
 
 # A plain int keeps its plain code.
 printf 'int a;\nint f(void){ a++; a = 2; return a; }\n' > "$tmp/plain.c"
-./main -target=x86_64 -S -o "$tmp/plain.s" "$tmp/plain.c" >/dev/null 2>&1 || fail "plain.c did not compile"
+samcc -target=x86_64 -S -o "$tmp/plain.s" "$tmp/plain.c" >/dev/null 2>&1 || fail "plain.c did not compile"
 if grep -qE 'lock|xchg [a-z]+ \[|mfence' "$tmp/plain.s"; then
     fail "x86_64: atomic instructions for a plain int"
 fi
@@ -74,7 +74,7 @@ for target in x86 x86_64 aarch64 riscv64; do
         riscv64) run="qemu-riscv64" ;;
     esac
     have_tools ${run:-true} || continue
-    ./main -target=$target "$tmp/fp.c" "$tmp/fp_$target" >"$tmp/log" 2>&1 || fail "$target: fp.c: $(tail -2 "$tmp/log")"
+    samcc -target=$target "$tmp/fp.c" "$tmp/fp_$target" >"$tmp/log" 2>&1 || fail "$target: fp.c: $(tail -2 "$tmp/log")"
     set +e
     $run "$tmp/fp_$target"
     rc=$?
@@ -85,7 +85,7 @@ done
 reject(){
     local target="$1" what="$2" src="$3"
     printf '%s\n' "$src" > "$tmp/bad.c"
-    if ./main -target=$target "$tmp/bad.c" "$tmp/bad" >"$tmp/log" 2>&1; then
+    if samcc -target=$target "$tmp/bad.c" "$tmp/bad" >"$tmp/log" 2>&1; then
         fail "$target: $what was accepted"
     fi
     grep -q "$4" "$tmp/log" || fail "$target: $what: unexpected message: $(grep -v '^\s' "$tmp/log" | tail -2)"

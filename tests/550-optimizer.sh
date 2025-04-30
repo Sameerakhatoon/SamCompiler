@@ -13,7 +13,7 @@ trap 'rm -rf "$tmp"' EXIT
 for target in x86 x86_64 aarch64 riscv64; do
     for src in samples/*.c tests/golden/inputs/*.c; do
         base=$(basename "$src" .c)
-        ./main -target="$target" -O0 -S "$src" -o "$tmp/$base.s" >"$tmp/log" 2>&1 || fail "-O0 $src ($target): $(head -2 "$tmp/log")"
+        samcc -target="$target" -O0 -S "$src" -o "$tmp/$base.s" >"$tmp/log" 2>&1 || fail "-O0 $src ($target): $(head -2 "$tmp/log")"
         cmp -s "$tmp/$base.s" "tests/golden/$target/$base.asm" || fail "-O0 output for $src ($target) differs from the golden file"
     done
 done
@@ -25,8 +25,8 @@ count_add(){
 }
 printf 'int add(int a, int b){ return a + b; }\n' > "$tmp/add.c"
 for target in x86 x86_64 aarch64 riscv64; do
-    ./main -target="$target" -S "$tmp/add.c" -o "$tmp/add0.s" >/dev/null 2>&1 || fail "add.c -O0 ($target)"
-    ./main -target="$target" -O1 -S "$tmp/add.c" -o "$tmp/add1.s" >/dev/null 2>&1 || fail "add.c -O1 ($target)"
+    samcc -target="$target" -S "$tmp/add.c" -o "$tmp/add0.s" >/dev/null 2>&1 || fail "add.c -O0 ($target)"
+    samcc -target="$target" -O1 -S "$tmp/add.c" -o "$tmp/add1.s" >/dev/null 2>&1 || fail "add.c -O1 ($target)"
     o0=$(count_add "$tmp/add0.s")
     o1=$(count_add "$tmp/add1.s")
     [ "$o1" -lt "$o0" ] || fail "-O1 does not shorten add on $target ($o0 -> $o1)"
@@ -37,15 +37,15 @@ cat > "$tmp/goto.c" <<'EOF'
 int f(int n){ int r = 0; if(n > 100){ goto inside; } if(0){ inside: r += 50; } return r; }
 EOF
 for target in aarch64 riscv64; do
-    ./main -target="$target" -O1 -S "$tmp/goto.c" -o "$tmp/goto.s" >/dev/null 2>&1 || fail "goto.c -O1 ($target)"
+    samcc -target="$target" -O1 -S "$tmp/goto.c" -o "$tmp/goto.s" >/dev/null 2>&1 || fail "goto.c -O1 ($target)"
     # The label is .Llabel_f_inside on both.
     grep -q 'label_f_inside:$' "$tmp/goto.s" || fail "-O1 dropped the goto label ($target)"
     grep -q '#\?50$' "$tmp/goto.s" || fail "-O1 dropped r += 50 after a goto label ($target)"
 done
 
 # -O on its own and the later options win.
-./main -target=x86_64 -O -O0 -S "$tmp/add.c" -o "$tmp/a.s" >/dev/null 2>&1 || fail "-O -O0"
-./main -target=x86_64 -S "$tmp/add.c" -o "$tmp/b.s" >/dev/null 2>&1 || fail "default"
+samcc -target=x86_64 -O -O0 -S "$tmp/add.c" -o "$tmp/a.s" >/dev/null 2>&1 || fail "-O -O0"
+samcc -target=x86_64 -S "$tmp/add.c" -o "$tmp/b.s" >/dev/null 2>&1 || fail "default"
 cmp -s "$tmp/a.s" "$tmp/b.s" || fail "-O -O0 is not -O0"
 
 SAMCC_FLAGS=-O1 bash tools/gcc_differential.sh tests/diff > "$tmp/diff" 2>&1 || {

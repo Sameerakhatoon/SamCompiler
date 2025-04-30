@@ -21,6 +21,23 @@ LINK_OBJS="$(ls "$REPO_ROOT"/build/*.o "$REPO_ROOT"/build/helpers/*.o "$REPO_ROO
 
 fail() { echo "$test_name ... FAIL: $*" >&2; exit 1; }
 
+# Run the compiler under a memory and a time cap: a runaway
+# compile (a loop, or an allocation that keeps growing) fails the test
+# with a non-zero status, 124 for the timeout, instead of taking the
+# machine's memory from every other job. Tests run the compiler as
+# `samcc ARGS...` (it is "$REPO_ROOT/main", so the directory does not
+# matter). SAMCC_MEMORY_CAP is bytes of address space, SAMCC_TIMEOUT
+# seconds: generous, so a loaded machine does not fail a slow compile.
+SAMCC_MEMORY_CAP="${SAMCC_MEMORY_CAP:-4294967296}"
+SAMCC_TIMEOUT="${SAMCC_TIMEOUT:-600}"
+samcc() {
+    if command -v prlimit >/dev/null 2>&1; then
+        timeout "$SAMCC_TIMEOUT" prlimit --as="$SAMCC_MEMORY_CAP" "$REPO_ROOT/main" "$@"
+    else
+        timeout "$SAMCC_TIMEOUT" "$REPO_ROOT/main" "$@"
+    fi
+}
+
 # Missing toolchains. A test that needs a tool asks for it with
 # need_tools (the whole test needs it) or have_tools (one part of the
 # test, such as one target, needs it). A missing tool fails the test,

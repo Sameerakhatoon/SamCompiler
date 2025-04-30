@@ -11,7 +11,7 @@ trap 'rm -rf "$tmp"' EXIT
 expect_error(){
     printf '%s\n' "$2" > "$tmp/$1.c"
     local rc=0 err
-    err=$(./main -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
+    err=$(samcc -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
     [ $rc != 0 ] || fail "$1: compiled without an error"
     assert_contains "$err" "$3" "$1 diagnostic"
 }

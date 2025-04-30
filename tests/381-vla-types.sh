@@ -16,7 +16,7 @@ expect_error(){
     printf '%s\n' "$1" > "$tmp/c$n.c"
     for target in x86 x86_64; do
         local rc=0 err
-        err=$(./main -target=$target "$tmp/c$n.c" "$tmp/c$n.o" object 2>&1 >/dev/null) || rc=$?
+        err=$(samcc -target=$target "$tmp/c$n.c" "$tmp/c$n.o" object 2>&1 >/dev/null) || rc=$?
         [ $rc != 0 ] || fail "'$1' ($target): compiled without an error"
         assert_contains "$err" "$2" "'$1' ($target)"
     done
@@ -67,7 +67,7 @@ gcc -w -o "$tmp/valid_gcc" "$tmp/valid.c" || fail "gcc rejects the valid program
 want=0
 "$tmp/valid_gcc" || want=$?
 for target in x86 x86_64; do
-    ./main -target=$target "$tmp/valid.c" "$tmp/valid_$target" >/dev/null 2>&1 || fail "valid program rejected ($target)"
+    samcc -target=$target "$tmp/valid.c" "$tmp/valid_$target" >/dev/null 2>&1 || fail "valid program rejected ($target)"
     rc=0
     "$tmp/valid_$target" || rc=$?
     assert_eq "$want" "$rc" "exit status of the valid program ($target)"

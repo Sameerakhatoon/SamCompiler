@@ -11,7 +11,7 @@ trap 'rm -rf "$tmp"' EXIT
 expect_error(){
     printf '%s\n' "$2" > "$tmp/$1.c"
     local rc=0 err
-    err=$(./main -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
+    err=$(samcc -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
     [ $rc != 0 ] || fail "$1: compiled without an error"
     assert_contains "$err" "$3" "$1 diagnostic"
 }
@@ -24,7 +24,7 @@ cat > "$tmp/q.c" <<'EOF'
 int main(void){ const char* s = "it's"; return s[2] + s[3]; }
 EOF
 for t in x86 x86_64; do
-    ./main -target=$t "$tmp/q.c" "$tmp/q_$t" >/dev/null 2>&1 || fail "$t: did not compile"
+    samcc -target=$t "$tmp/q.c" "$tmp/q_$t" >/dev/null 2>&1 || fail "$t: did not compile"
     rc=0
     "$tmp/q_$t" || rc=$?
     assert_eq 154 "$rc" "$t exit status (' + s)"

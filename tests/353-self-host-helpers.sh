@@ -13,7 +13,7 @@ tmp=$(mktemp -d /tmp/sam_selfhost.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
 for f in vector arena buffer; do
-    ./main -Itools/selfhost/include -target=x86_64 "helpers/$f.c" "$tmp/$f.s" object >"$tmp/$f.log" 2>&1 \
+    samcc -Itools/selfhost/include -target=x86_64 "helpers/$f.c" "$tmp/$f.s" object >"$tmp/$f.log" 2>&1 \
         || fail "helpers/$f.c: $(grep -v '^nasm\|^everything' "$tmp/$f.log" | head -3)"
 done
 
@@ -84,7 +84,7 @@ int main(void){
 }
 EOF
 for t in x86_64 x86; do
-    ./main -target=$t "$tmp/gnu.c" "$tmp/gnu.$t" >"$tmp/gnu.log" 2>&1 \
+    samcc -target=$t "$tmp/gnu.c" "$tmp/gnu.$t" >"$tmp/gnu.log" 2>&1 \
         || fail "gnu.c on $t: $(grep -v '^nasm\|^everything' "$tmp/gnu.log" | head -3)"
 done
 rc=0

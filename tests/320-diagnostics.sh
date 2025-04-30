@@ -13,7 +13,7 @@ trap 'rm -rf "$tmp"' EXIT
 # stderr in $err.
 compile_err(){
     local rc=0
-    err=$(./main -target="$2" "$tmp/$1.c" "$tmp/$1.o" object 2>&1 >/dev/null) || rc=$?
+    err=$(samcc -target="$2" "$tmp/$1.c" "$tmp/$1.o" object 2>&1 >/dev/null) || rc=$?
     [ $rc != 0 ] || fail "$1 ($2): compiled without an error"
     [ $rc -lt 128 ] || [ $rc = 255 ] || fail "$1 ($2): died with status $rc: $err"
 }
@@ -85,7 +85,7 @@ assert_contains "$err" "1 error generated." "parser count"
 
 # A warning says so and does not fail the compile.
 printf 'int main(void){ int unused; return 0; }\n' > "$tmp/warn.c"
-err=$(./main -target=x86_64 "$tmp/warn.c" "$tmp/warn.o" object 2>&1 >/dev/null) || fail "a warning failed the compile: $err"
+err=$(samcc -target=x86_64 "$tmp/warn.c" "$tmp/warn.o" object 2>&1 >/dev/null) || fail "a warning failed the compile: $err"
 assert_contains "$err" "warning: Unused variable unused on line 1," "warning format"
 
 pass

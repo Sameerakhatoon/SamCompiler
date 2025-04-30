@@ -11,10 +11,10 @@
 tmp=$(mktemp -d /tmp/sam_cm2.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
-"$REPO_ROOT/main" -target=x86 samples/09_factorial_recursion.c "$tmp/flag.asm" object >/dev/null 2>&1 || true
+samcc -target=x86 samples/09_factorial_recursion.c "$tmp/flag.asm" object >/dev/null 2>&1 || true
 cmp -s "$tmp/flag.asm" tests/golden/x86/09_factorial_recursion.asm || fail "-target=x86 output differs from the default"
 
-out=$("$REPO_ROOT/main" -target=sparc samples/09_factorial_recursion.c "$tmp/x" 2>&1 && echo "rc=0" || echo "rc=$?")
+out=$(samcc -target=sparc samples/09_factorial_recursion.c "$tmp/x" 2>&1 && echo "rc=0" || echo "rc=$?")
 assert_contains "$out" "Unknown target sparc" "unknown target message"
 assert_contains "$out" "rc=1" "unknown target exit code"
 

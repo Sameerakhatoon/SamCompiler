@@ -11,7 +11,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 expect_error(){
     local name="$1" want="$2" rc=0 err
-    err=$(./main -target=x86_64 "$tmp/$name.c" "$tmp/$name" 2>&1 >/dev/null) || rc=$?
+    err=$(samcc -target=x86_64 "$tmp/$name.c" "$tmp/$name" 2>&1 >/dev/null) || rc=$?
     [ $rc != 0 ] || fail "$name.c compiled without an error"
     assert_contains "$err" "$want" "$name.c"
 }
@@ -43,7 +43,7 @@ int main(void){
 EOF
 for target in x86_64 aarch64 riscv64; do
     command -v qemu-$target >/dev/null || [ $target = x86_64 ] || continue
-    ./main -target=$target "$tmp/long.c" "$tmp/long_$target" >/dev/null 2>&1 || fail "$target: long.c did not compile"
+    samcc -target=$target "$tmp/long.c" "$tmp/long_$target" >/dev/null 2>&1 || fail "$target: long.c did not compile"
     case $target in x86_64) run="";; *) run="qemu-$target";; esac
     rc=0
     $run "$tmp/long_$target" || rc=$?

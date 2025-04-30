@@ -27,7 +27,6 @@ lea rax, [rbp-8]
 mov rcx, rax
 pop rax
 mov dword [rcx], eax
-.entry_point_1:
 .do_while_start_3:
 .entry_point_4:
 .switch_stmt_6:
@@ -129,6 +128,7 @@ mov rcx, rax
 lea rax, [rbp-8]
 xchg rax, rcx
 mov dword [rcx], eax
+.entry_point_1:
 lea rax, [rbp-8]
 movsxd rax, dword [rax]
 mov rcx, 6

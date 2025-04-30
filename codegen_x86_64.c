@@ -52,6 +52,8 @@ static void          codegen_generate_global_variable(struct node* node);
 static void          codegen_generate_body(struct node* node, struct history* history);
 static int           codegen_label_count(void);
 static void          codegen_begin_entry_exit_point(void);
+static void          codegen_register_entry_point(int entry_point_id);
+static void          codegen_begin_exit_point(void);
 static void          codegen_end_entry_exit_point(void);
 static void          codegen_goto_exit_point(struct node* node);
 static void          codegen_goto_exit_point_maintain_stack(struct node* node);
@@ -1380,11 +1382,14 @@ static void codegen_generate_switch_stmt(struct node* node){
 }
 
 static void codegen_generate_goto_stmt(struct node* node){
-    asm_push("jmp label_%s", node->stmt._goto.label->sval);
+    asm_push("jmp ..@label_%s", node->stmt._goto.label->sval);
 }
 
 static void codegen_generate_label(struct node* node){
-    asm_push("label_%s:", node->stmt.label.name->sval);
+    // a `..@` label is not a NASM non-local label, so the
+    // `.name` labels after it (an if's, a loop's) keep the function's
+    // scope; `label_f_x:` started a new one and left them undefined.
+    asm_push("..@label_%s:", node->stmt.label.name->sval);
 }
 
 static void codegen_generate_switch_case_stmt(struct node* node){
@@ -1404,10 +1409,15 @@ static void codegen_generate_continue_stmt(struct node* node){
 }
 
 static void codegen_generate_do_while_stmt(struct node* node){
-    codegen_begin_entry_exit_point();
+    // `continue` goes to the condition, so the entry point is
+    // placed after the body, not at the start (same label numbers).
+    int entry_point_id = codegen_label_count();
+    codegen_register_entry_point(entry_point_id);
+    codegen_begin_exit_point();
     int do_while_start_id = codegen_label_count();
     asm_push(".do_while_start_%i:", do_while_start_id);
     codegen_generate_body(node->stmt.do_while_stmt.body_node, codegen_history_begin(IS_ALONE_STATEMENT));
+    asm_push(".entry_point_%i:", entry_point_id);
     codegen_generate_condition(node->stmt.do_while_stmt.exp_node);
     asm_push("jne .do_while_start_%i", do_while_start_id);
     codegen_end_entry_exit_point();
@@ -1774,6 +1784,13 @@ static void codegen_generate_global_variable_for_primitive(struct node* node){
     char value[RESOLVER_ADDRESS_MAX] = "0";
     if(node->var.val){
         codegen_value_asm(node->var.val, value, sizeof(value));
+    }
+    // an _Atomic global is aligned to its size, as in gcc and
+    // as the i386 backend does, so a plain load or store of it is one
+    // access. Other scalar globals keep the packed layout the locked
+    // golden output has.
+    if(datatype_is_atomic(&node->var.type) && variable_size(node) > DATA_SIZE_BYTE){
+        asm_push("align %lu, db 0", (unsigned long)variable_size(node));
     }
     asm_push("%s: %s %s", codegen_symbol(node->var.name),
         asm_keyword_for_size(variable_size(node), tmp_buf), value);

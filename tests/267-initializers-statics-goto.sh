@@ -11,7 +11,7 @@ trap 'rm -rf "$tmp"' EXIT
 expect_error(){
     printf '%s\n' "$2" > "$tmp/$1.c"
     local rc=0 err
-    err=$(./main -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
+    err=$(samcc -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
     [ $rc != 0 ] || fail "$1: compiled without an error"
     assert_contains "$err" "$3" "$1 diagnostic"
 }
@@ -25,7 +25,7 @@ expect_error label_twice  'int main(void){ a: a: return 0; }' 'Label a is define
 # A static local is a global: two calls see the same object, and the
 # assembly names it after its function.
 printf 'int f(void){ static int n = 41; return ++n; }\nint main(void){ f(); return f(); }\n' > "$tmp/s.c"
-./main -target=x86_64 "$tmp/s.c" "$tmp/s" >/dev/null 2>&1 || fail "static local did not compile"
+samcc -target=x86_64 "$tmp/s.c" "$tmp/s" >/dev/null 2>&1 || fail "static local did not compile"
 rc=0
 "$tmp/s" || rc=$?
 assert_eq 43 "$rc" "static local keeps its value"

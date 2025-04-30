@@ -15,7 +15,7 @@ expect_error(){
     printf '%s\n' "$1" > "$tmp/e$n.c"
     for target in x86 x86_64; do
         local rc=0 err
-        err=$(./main -target=$target "$tmp/e$n.c" "$tmp/e$n.o" object 2>&1 >/dev/null) || rc=$?
+        err=$(samcc -target=$target "$tmp/e$n.c" "$tmp/e$n.o" object 2>&1 >/dev/null) || rc=$?
         [ $rc != 0 ] || fail "'$1' ($target): compiled without an error"
         [ $rc -lt 128 ] || [ $rc = 255 ] || fail "'$1' ($target): died with status $rc: $err"
         assert_contains "$err" "$2" "'$1' ($target)"
@@ -68,7 +68,7 @@ int main(void){
     return 42;
 }
 SRC
-./main -target=x86_64 "$tmp/valid.c" "$tmp/valid" >"$tmp/valid.log" 2>&1 || { cat "$tmp/valid.log" >&2; fail "the valid program was rejected"; }
+samcc -target=x86_64 "$tmp/valid.c" "$tmp/valid" >"$tmp/valid.log" 2>&1 || { cat "$tmp/valid.log" >&2; fail "the valid program was rejected"; }
 # (The linker's own .note.GNU-stack warning, B8, is not ours.)
 grep -v GNU-stack "$tmp/valid.log" | grep -q "^warning:" && { cat "$tmp/valid.log" >&2; fail "the valid program gave a warning"; }
 rc=0

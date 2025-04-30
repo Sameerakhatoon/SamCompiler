@@ -16,6 +16,6 @@ printf 'int main(){ return 0; }\n' > ./.portable_probe.c
 trap 'rm -f ./.portable_probe.c ./.portable_probe.s ./.portable_probe.s.o' EXIT
 # (`main a.c a.c` is two inputs to the gcc-style driver; -o names the
 # output.)
-out=$(./main ./.portable_probe.c -o ./.portable_probe.c 2>&1 && echo rc=0 || echo rc=$?)
+out=$(samcc ./.portable_probe.c -o ./.portable_probe.c 2>&1 && echo rc=0 || echo rc=$?)
 assert_contains "$out" "is the input file" "same-file check through compiler_real_path"
 pass

@@ -24,7 +24,7 @@ int foo(int a, int a) { return a; }
 int main() { return foo(1, 2); }
 EOF
 
-out=$("$REPO_ROOT/main" "$src_dup" "$asm" 2>&1 || true)
+out=$(samcc "$src_dup" "$asm" 2>&1 || true)
 case "$out" in
     *"You have already defined the variable"*) ;;
     *) fail "expected duplicate-variable diagnostic; got: $out" ;;
@@ -36,7 +36,7 @@ int foo(int a, int b) { return a; }
 int main() { return foo(1, 2); }
 EOF
 
-out=$("$REPO_ROOT/main" "$src_ok" "$asm" 2>&1 || true)
+out=$(samcc "$src_ok" "$asm" 2>&1 || true)
 case "$out" in
     *"everything compiled fine"*|*"Issue assemblign"*) ;;
     *) fail "distinct-arg source should reach codegen; got: $out" ;;

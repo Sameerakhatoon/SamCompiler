@@ -25,7 +25,7 @@ for target in x86 x86_64 aarch64 riscv64; do
     [ -z "$run" ] || command -v "$run" >/dev/null || fail "$target: $run is missing"
 
     # object mode: the asm goes to the named file, the object next to it.
-    ./main -target=$target tests/float/sam.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
+    samcc -target=$target tests/float/sam.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
         || fail "$target: sam.c did not compile: $(tail -2 "$tmp/log")"
     $cc -c tests/float/gcc.c -o "$tmp/gcc_$target.o" || fail "$target: gcc rejected gcc.c"
     $cc "$tmp/gcc_$target.o" "$tmp/sam_$target.s.o" -o "$tmp/interop_$target" 2>"$tmp/log" \

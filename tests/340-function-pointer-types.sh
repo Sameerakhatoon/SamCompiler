@@ -14,7 +14,7 @@ expect_error(){
     local name="$1" want="$2"
     for target in x86 x86_64 aarch64; do
         local rc=0 err
-        err=$(./main -target=$target "$tmp/$name.c" "$tmp/$name" 2>&1 >/dev/null) || rc=$?
+        err=$(samcc -target=$target "$tmp/$name.c" "$tmp/$name" 2>&1 >/dev/null) || rc=$?
         [ $rc != 0 ] || fail "$target: $name.c compiled without an error"
         assert_contains "$err" "$want" "$target: $name.c"
     done
@@ -41,7 +41,7 @@ int main(void){
 }
 EOF
 for target in x86 x86_64; do
-    ./main -target=$target "$tmp/ok.c" "$tmp/ok_$target" >/dev/null 2>&1 || fail "$target: ok.c did not compile"
+    samcc -target=$target "$tmp/ok.c" "$tmp/ok_$target" >/dev/null 2>&1 || fail "$target: ok.c did not compile"
     rc=0
     "$tmp/ok_$target" || rc=$?
     assert_eq 13 "$rc" "$target: unspecified, variadic and returned function pointers"

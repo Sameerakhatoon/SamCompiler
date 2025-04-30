@@ -19,7 +19,6 @@ sub x0, x29, #4
 mov x1, x0
 ldr x0, [sp], #16
 str w0, [x1]
-.Lentry_point_1:
 .Ldo_while_start_3:
 sub x0, x29, #4
 ldrsw x0, [x0]
@@ -32,6 +31,7 @@ mov x12, x0
 mov x0, x1
 mov x1, x12
 str w0, [x1]
+.Lentry_point_1:
 sub x0, x29, #4
 ldrsw x0, [x0]
 mov x1, #4

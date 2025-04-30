@@ -28,7 +28,7 @@ EOF
 
 expect_asm(){
     local target="$1"; shift
-    ./main -target=$target -S -o "$tmp/shape_$target.s" "$tmp/shape.c" >"$tmp/log" 2>&1 \
+    samcc -target=$target -S -o "$tmp/shape_$target.s" "$tmp/shape.c" >"$tmp/log" 2>&1 \
         || fail "$target: shape.c did not compile: $(tail -2 "$tmp/log")"
     local text
     for text in "$@"; do
@@ -70,7 +70,7 @@ for target in x86 x86_64 aarch64 riscv64; do
         riscv64) run="qemu-riscv64" ;;
     esac
     have_tools ${run:-true} || continue
-    ./main -target=$target -o "$tmp/two_$target" "$tmp/one.c" "$tmp/two.c" >"$tmp/log" 2>&1 \
+    samcc -target=$target -o "$tmp/two_$target" "$tmp/one.c" "$tmp/two.c" >"$tmp/log" 2>&1 \
         || fail "$target: one.c + two.c: $(tail -3 "$tmp/log")"
     set +e
     $run "$tmp/two_$target"
@@ -94,9 +94,9 @@ for target in x86 x86_64 aarch64 riscv64; do
     esac
     have_tools $cc || continue
     rm -f "$tmp/libtls.so"
-    ./main -target=$target -shared "$tmp/tlib.c" -o "$tmp/libtls.so" >"$tmp/log" 2>&1 \
+    samcc -target=$target -shared "$tmp/tlib.c" -o "$tmp/libtls.so" >"$tmp/log" 2>&1 \
         || fail "$target: thread-local shared object: $(tail -3 "$tmp/log")"
-    ./main -target=$target "$tmp/tmain.c" "$tmp/libtls.so" -o "$tmp/tmain_$target" >"$tmp/log" 2>&1 \
+    samcc -target=$target "$tmp/tmain.c" "$tmp/libtls.so" -o "$tmp/tmain_$target" >"$tmp/log" 2>&1 \
         || fail "$target: program with the thread-local shared object: $(tail -3 "$tmp/log")"
     set +e
     $run "$tmp/tmain_$target"
@@ -107,7 +107,7 @@ done
 
 printf 'int main(void){ _Thread_local int x = 1; return x; }\n' > "$tmp/bad.c"
 for target in x86 x86_64 aarch64 riscv64; do
-    if ./main -target=$target "$tmp/bad.c" "$tmp/bad" >"$tmp/log" 2>&1; then
+    if samcc -target=$target "$tmp/bad.c" "$tmp/bad" >"$tmp/log" 2>&1; then
         fail "$target: a block-scope _Thread_local without static was accepted"
     fi
     grep -q "must be a global, static or extern variable" "$tmp/log" || fail "$target: unexpected message: $(tail -2 "$tmp/log")"

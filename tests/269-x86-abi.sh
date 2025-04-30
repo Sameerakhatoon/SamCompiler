@@ -74,7 +74,7 @@ int sam_calls_back(void){
 }
 EOF
 
-./main -target=x86 "$tmp/s.c" "$tmp/s.asm" object >"$tmp/s.log" 2>&1 \
+samcc -target=x86 "$tmp/s.c" "$tmp/s.asm" object >"$tmp/s.log" 2>&1 \
     || fail "s.c did not compile: $(tail -2 "$tmp/s.log")"
 i686-linux-gnu-gcc -O1 -masm=intel -fno-omit-frame-pointer -c "$tmp/g.c" -o "$tmp/g.o" \
     || fail "gcc could not build the gcc side"

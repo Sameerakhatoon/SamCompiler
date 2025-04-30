@@ -22,7 +22,7 @@ int main(void){
     return r;   /* 63 */
 }
 EOF
-./main -target=x86_64 "$tmp/s.c" "$tmp/s" >/dev/null 2>&1 || fail "did not compile"
+samcc -target=x86_64 "$tmp/s.c" "$tmp/s" >/dev/null 2>&1 || fail "did not compile"
 rc=0
 "$tmp/s" || rc=$?
 assert_eq 63 "$rc" "exit status"

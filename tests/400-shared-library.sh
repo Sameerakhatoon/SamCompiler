@@ -31,7 +31,7 @@ for target in $targets; do
         riscv64) cc="riscv64-linux-gnu-gcc"; run="qemu-riscv64 -L /usr/riscv64-linux-gnu -E LD_LIBRARY_PATH=$dir" ;;
     esac
 
-    ./main -target=$target -shared tests/shared/lib.c -o "$dir/libsam.so" 2>"$dir/log" \
+    samcc -target=$target -shared tests/shared/lib.c -o "$dir/libsam.so" 2>"$dir/log" \
         || fail "$target: -shared failed: $(tail -3 "$dir/log")"
     [ ! -s "$dir/log" ] || fail "$target: -shared warned: $(cat "$dir/log")"
     file "$dir/libsam.so" | grep -q 'shared object' || fail "$target: not a shared object: $(file "$dir/libsam.so")"
@@ -51,7 +51,7 @@ for target in $targets; do
     # gcc's program with SamCompiler's library.
     $cc -w tests/shared/main.c "$dir/libsam.so" -o "$dir/gcc_main" || fail "$target: gcc link against libsam.so failed"
     # SamCompiler's program with SamCompiler's and with gcc's library.
-    ./main -target=$target tests/shared/main.c "$dir/libsam.so" -o "$dir/sam_main" 2>"$dir/log" \
+    samcc -target=$target tests/shared/main.c "$dir/libsam.so" -o "$dir/sam_main" 2>"$dir/log" \
         || fail "$target: main.c with libsam.so failed: $(tail -3 "$dir/log")"
     [ ! -s "$dir/log" ] || fail "$target: the link warned: $(cat "$dir/log")"
     mkdir -p "$dir/g"
@@ -75,14 +75,14 @@ done
 
 # -fPIC objects linked into a shared object by hand, and the SamOS
 # targets refuse -shared.
-./main -target=x86_64 -fPIC -c tests/shared/lib.c -o "$tmp/lib_pic.o" || fail "x86_64: -fPIC -c failed"
+samcc -target=x86_64 -fPIC -c tests/shared/lib.c -o "$tmp/lib_pic.o" || fail "x86_64: -fPIC -c failed"
 gcc -shared "$tmp/lib_pic.o" -o "$tmp/lib_pic.so" 2>"$tmp/log" || fail "x86_64: -fPIC object did not link: $(cat "$tmp/log")"
 [ ! -s "$tmp/log" ] || fail "x86_64: -fPIC link warned: $(cat "$tmp/log")"
 # The exported counter is reached by its symbol (a word the dynamic
 # linker fills), not through its section as NASM would write it.
 readelf -rW "$tmp/lib_pic.o" | grep -q 'R_X86_64_64 .* counter' \
     || fail "x86_64: -fPIC does not reach counter by its symbol"
-if ./main -target=samos-x86_64 -shared tests/shared/lib.c -o "$tmp/x.so" 2>"$tmp/log"; then
+if samcc -target=samos-x86_64 -shared tests/shared/lib.c -o "$tmp/x.so" 2>"$tmp/log"; then
     fail "samos-x86_64 accepted -shared"
 fi
 assert_contains "$(cat "$tmp/log")" "no shared objects"

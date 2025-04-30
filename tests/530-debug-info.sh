@@ -65,12 +65,12 @@ for target in x86 x86_64 aarch64 riscv64; do
         riscv64) objcopy=riscv64-linux-gnu-objcopy; readelf=riscv64-linux-gnu-readelf; frames=".eh_frame" ;;
     esac
     have_tools $objcopy $readelf objdump || continue
-    ./main -target=$target -S "$tmp/dbg.c" -o "$tmp/plain_$target.s" >"$tmp/log" 2>&1 || fail "$target: -S: $(tail -2 "$tmp/log")"
+    samcc -target=$target -S "$tmp/dbg.c" -o "$tmp/plain_$target.s" >"$tmp/log" 2>&1 || fail "$target: -S: $(tail -2 "$tmp/log")"
     if grep -qE '\.loc |\.cfi_|\.\.@dbg|debug_info' "$tmp/plain_$target.s"; then
         fail "$target: debug directives without -g"
     fi
-    ./main -target=$target -c "$tmp/dbg.c" -o "$tmp/plain_$target.o" >"$tmp/log" 2>&1 || fail "$target: -c: $(tail -2 "$tmp/log")"
-    ./main -target=$target -g -c "$tmp/dbg.c" -o "$tmp/g_$target.o" >"$tmp/log" 2>&1 || fail "$target: -g -c: $(tail -2 "$tmp/log")"
+    samcc -target=$target -c "$tmp/dbg.c" -o "$tmp/plain_$target.o" >"$tmp/log" 2>&1 || fail "$target: -c: $(tail -2 "$tmp/log")"
+    samcc -target=$target -g -c "$tmp/dbg.c" -o "$tmp/g_$target.o" >"$tmp/log" 2>&1 || fail "$target: -g -c: $(tail -2 "$tmp/log")"
     $objcopy -O binary --only-section=.text "$tmp/plain_$target.o" "$tmp/plain.bin"
     $objcopy -O binary --only-section=.text "$tmp/g_$target.o" "$tmp/g.bin"
     cmp -s "$tmp/plain.bin" "$tmp/g.bin" || fail "$target: -g changed the code"
@@ -112,7 +112,7 @@ commands=(-ex "break cmp" -ex "START" -ex "bt" -ex "delete"
           -ex "break dbg.c:23" -ex "continue" -ex "bt" -ex "info locals" -ex "print *p" -ex "print counter" -ex "delete 2"
           -ex "break fact if n == 1" -ex "continue" -ex "bt")
 for target in x86 x86_64 aarch64 riscv64; do
-    ./main -target=$target -g "$tmp/dbg.c" -o "$tmp/dbg_$target" >"$tmp/log" 2>&1 || fail "$target: -g link: $(tail -2 "$tmp/log")"
+    samcc -target=$target -g "$tmp/dbg.c" -o "$tmp/dbg_$target" >"$tmp/log" 2>&1 || fail "$target: -g link: $(tail -2 "$tmp/log")"
     case $target in
         x86|x86_64)
             "$tmp/dbg_$target" || fail "$target: the -g program failed"

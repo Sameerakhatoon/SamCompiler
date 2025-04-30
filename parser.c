@@ -733,6 +733,25 @@ static bool parser_typedef_was_function;
 // Where its tokens start.
 static int parser_typedef_expand_at = -1;
 
+// The `*`s of the last typedef parser_typedef_expand put in place, when
+// its type is a plain pointer (`typedef char* str;` 1); 0 for any other
+// type, a function pointer among them.
+static int parser_typedef_pointer_levels;
+
+static int parser_typedef_count_pointer_levels(struct vector* tokens){
+    int levels = 0;
+    for(int i = 0; i < vector_count(tokens); i++){
+        struct token* token = vector_at(tokens, i);
+        if(token_is_operator(token, "(") || token_is_operator(token, "[")){
+            return 0;
+        }
+        if(token_is_operator(token, "*")){
+            levels++;
+        }
+    }
+    return levels;
+}
+
 // Where a type may start: a visible typedef name next becomes its type.
 static bool parser_typedef_expand(void){
     struct token* token = token_peek_next();
@@ -740,6 +759,7 @@ static bool parser_typedef_expand(void){
     if(!e){
         return false;
     }
+    parser_typedef_pointer_levels = parser_typedef_count_pointer_levels(e->tokens);
     parser_typedef_stars_seen = 0;
     for(int i = vector_count(e->tokens) - 1; i >= 0 && token_is_operator(vector_at(e->tokens, i), "*"); i--){
         parser_typedef_stars_seen++;
@@ -2320,7 +2340,21 @@ static void parse_datatype_type(struct datatype* dtype){
     // A typedef name is the type, unless `signed` or
     // `unsigned` was the type: then it is the declarator. Its tokens may
     // begin with qualifiers of their own (`unsigned long`, `_Atomic int`).
+    // A qualifier before the name of a pointer typedef qualifies the
+    // pointer: `const str s` with `typedef char* str;` is
+    // `char* const s`, where the tokens read `const char* s`.
+    int typedef_levels = 0;
+    bool lead_const = false, lead_atomic = false;
     if(!parser_sign_given && parser_typedef_expand()){
+        typedef_levels = parser_typedef_pointer_levels;
+        if(typedef_levels > 0){
+            lead_const  = dtype->flags & DATATYPE_FLAG_IS_CONST;
+            lead_atomic = dtype->atomic_level == 1;
+            dtype->flags &= ~DATATYPE_FLAG_IS_CONST;
+            if(lead_atomic){
+                dtype->atomic_level = 0;
+            }
+        }
         parser_sign_given = parse_datatype_modifiers(dtype);
     }
     if(parser_atomic_specifier_next()){
@@ -2391,6 +2425,14 @@ static void parse_datatype_type(struct datatype* dtype){
     dtype->pointer_const = pointer_const;
     if(pointer_depth > 0){
         dtype->flags |= DATATYPE_FLAG_IS_POINTER;
+    }
+    // The typedef's own `*`s come first among them: its top one is bit
+    // typedef_levels - 1.
+    if(lead_const && typedef_levels <= pointer_depth){
+        dtype->pointer_const |= 1 << (typedef_levels - 1);
+    }
+    if(lead_atomic && typedef_levels <= pointer_depth){
+        dtype->atomic_level = typedef_levels + 1;
     }
 
     // once. A second parser_datatype_init_type_and_size here
@@ -6136,19 +6178,92 @@ static struct node* parse_else_or_else_if(struct history* history){
     return parse_else(history_down(history, history->flags));
 }
 
+// the compound literals of a controlling expression. Their
+// hidden declarations and stores (parser_preceding_statements) go before
+// the whole statement, not before the first statement of its body, which
+// took them and left the condition with a name declared only inside
+// the body. parser_hold_preceding keeps them while the body is parsed,
+// parser_release_preceding puts them back for the enclosing body.
+static struct vector* parser_hold_preceding(void){
+    struct vector* held = vector_create(sizeof(struct node*));
+    for(int i = 0; i < vector_count(parser_preceding_statements); i++){
+        vector_push(held, vector_at(parser_preceding_statements, i));
+    }
+    vector_clear(parser_preceding_statements);
+    return held;
+}
+
+static void parser_release_preceding(struct vector* held){
+    struct vector* later = parser_hold_preceding();
+    for(int i = 0; i < vector_count(held); i++){
+        vector_push(parser_preceding_statements, vector_at(held, i));
+    }
+    for(int i = 0; i < vector_count(later); i++){
+        vector_push(parser_preceding_statements, vector_at(later, i));
+    }
+    vector_free(held);
+    vector_free(later);
+}
+
+// A loop's condition (and a for loop's step) is evaluated on every round,
+// and so is a compound literal in it (C11 6.5.2.5p16: the object is
+// initialized each time the expression is evaluated). The stores that
+// initialize one move from before the statement into the expression,
+// `(store, ..., cond)`; the declaration stays before the statement.
+// Before the stores could only run once, before the loop, so
+// `while(!f((struct s){x, y}))` would keep passing the first x and y.
+// The same for an if's condition and a switch's expression, which run
+// once but at their own time.
+static struct node* parser_condition_with_stores(struct node* cond, int before){
+    struct vector* stores = vector_create(sizeof(struct node*));
+    struct vector* kept   = vector_create(sizeof(struct node*));
+    for(int i = before; i < vector_count(parser_preceding_statements); i++){
+        struct node* statement = *(struct node**)vector_at(parser_preceding_statements, i);
+        vector_push(statement->type == NODE_TYPE_VARIABLE ? kept : stores, &statement);
+    }
+    while(vector_count(parser_preceding_statements) > before){
+        vector_pop(parser_preceding_statements);
+    }
+    for(int i = 0; i < vector_count(kept); i++){
+        vector_push(parser_preceding_statements, vector_at(kept, i));
+    }
+    struct node* exp = 0;
+    for(int i = 0; i < vector_count(stores); i++){
+        struct node* store = *(struct node**)vector_at(stores, i);
+        if(exp){
+            make_exp_node(exp, store, ",");
+            exp = node_pop();
+        } else {
+            exp = store;
+        }
+    }
+    if(exp){
+        make_exp_node(exp, cond, ",");
+        cond = node_pop();
+    }
+    vector_free(stores);
+    vector_free(kept);
+    return cond;
+}
+
 // ch78/79: parse `if (cond) <body> [else if ... | else ...]`.
 static void parse_if_stmt(struct history* history){
     expect_keyword("if");
     expect_op("(");
+    int before = vector_count(parser_preceding_statements);
     parse_expressionable_root(history);
     expect_sym(')');
 
-    struct node* cond_node = node_pop();
+    // The stores go into the condition here too: an `else if`'s must not
+    // run before the first condition is tested.
+    struct node* cond_node = parser_condition_with_stores(node_pop(), before);
+    struct vector* held = parser_hold_preceding();
     size_t var_size = 0;
     parse_body(&var_size, history);
     struct node* body_node = node_pop();
 
     make_if_node(cond_node, body_node, parse_else_or_else_if(history));
+    parser_release_preceding(held);
 }
 
 // ch83: shared helper - consume `keyword (` expr `)` and leave expr on stack.
@@ -6161,11 +6276,14 @@ static void parse_keyword_parentheses_expression(const char* keyword){
 
 // ch83: `while (exp) body`.
 static void parse_while(struct history* history){
+    int before = vector_count(parser_preceding_statements);
     parse_keyword_parentheses_expression("while");
-    struct node* exp_node = node_pop();
+    struct node* exp_node = parser_condition_with_stores(node_pop(), before);
+    struct vector* held = parser_hold_preceding();
     size_t var_size = 0;
     parse_loop_body(&var_size, history, true);
     struct node* body_node = node_pop();
+    parser_release_preceding(held);
     make_while_node(exp_node, body_node);
 }
 
@@ -6175,8 +6293,9 @@ static void parse_do_while(struct history* history){
     size_t var_size = 0;
     parse_loop_body(&var_size, history, true);
     struct node* body_node = node_pop();
+    int before = vector_count(parser_preceding_statements);
     parse_keyword_parentheses_expression("while");
-    struct node* exp_node = node_pop();
+    struct node* exp_node = parser_condition_with_stores(node_pop(), before);
     expect_sym(';');
     make_do_while_node(body_node, exp_node);
 }
@@ -6186,11 +6305,14 @@ static void parse_do_while(struct history* history){
 // handed off to the switch node.
 static void parse_switch(struct history* history){
     struct parser_history_switch sw = parser_new_switch_statement(history);
+    int before = vector_count(parser_preceding_statements);
     parse_keyword_parentheses_expression("switch");
-    struct node* exp_node = node_pop();
+    struct node* exp_node = parser_condition_with_stores(node_pop(), before);
+    struct vector* held = parser_hold_preceding();
     size_t var_size = 0;
     parse_loop_body(&var_size, history, false);
     struct node* body_node = node_pop();
+    parser_release_preceding(held);
     make_switch_node(exp_node, body_node, sw.case_data->cases, sw.case_data->has_default_case);
     parser_end_switch_statement(&sw);
 }
@@ -6332,13 +6454,17 @@ static void parse_for_stmt(struct history* history){
     // parser sets flags on the one it is given, and the body read the
     // loop part's EXPRESSION_FLAG_RIGHT_NODE as HISTORY_FLAG_INSIDE_UNION:
     // its locals were sized as a union and the frame left them out.
-    if(parse_for_loop_part(history_down(history, history->flags)))      cond_node = node_pop();
-    if(parse_for_loop_part_loop(history_down(history, history->flags))) loop_node = node_pop();
+    int before = vector_count(parser_preceding_statements);
+    if(parse_for_loop_part(history_down(history, history->flags)))      cond_node = parser_condition_with_stores(node_pop(), before);
+    before = vector_count(parser_preceding_statements);
+    if(parse_for_loop_part_loop(history_down(history, history->flags))) loop_node = parser_condition_with_stores(node_pop(), before);
     expect_sym(')');
 
+    struct vector* held = parser_hold_preceding();
     size_t var_size = 0;
     parse_loop_body(&var_size, history, true);
     body_node = node_pop();
+    parser_release_preceding(held);
     if(declares){
         resolver_default_finish_scope(current_process->resolver);
         parser_scope_finish();
@@ -6527,12 +6653,37 @@ static bool parser_expression_type(struct node* node, struct datatype* out){
     return false;
 }
 
+// `_Alignof(type)` (C11 6.5.3.4), and gcc's `__alignof__`,
+// which also takes an expression, is the type's alignment, a size_t
+// constant like sizeof's. `alignof` is <stdalign.h>'s macro for it.
+static bool parser_is_alignof(const char* keyword){
+    return S_EQ(keyword, "_Alignof") || S_EQ(keyword, "__alignof__") || S_EQ(keyword, "__alignof");
+}
+
+// The alignment _Alignof gives: the one a member of the type has
+// (datatype_alignment), the element's for an array. gcc's __alignof__,
+// and _Alignof of an expression (a GNU extension), give the preferred
+// alignment, which on i386 is 8 for a double where _Alignof(double)
+// gives the ABI's 4.
+static size_t parser_alignof_value(struct datatype* dtype, bool gnu){
+    struct datatype t = *dtype;
+    size_t align = datatype_alignment(&t);
+    if(gnu && target_current()->pointer_size == DATA_SIZE_DWORD && !(t.flags & DATATYPE_FLAG_IS_POINTER)
+       && t.type == DATA_TYPE_DOUBLE && t.size == DATA_SIZE_DDWORD){
+        align = DATA_SIZE_DDWORD;
+    }
+    return align;
+}
+
 // ch232: `sizeof` as a NUMBER node holding the size, worked out at parse
 // time; codegen sees a constant of type size_t. `sizeof(type)` was the
 // only form; `sizeof(expr)` and `sizeof expr` failed.
+// `_Alignof` takes the same operands.
 static void parse_sizeof(struct history* history){
     (void)history;
-    expect_keyword("sizeof");
+    struct token* keyword = token_next();
+    bool alignof_ = parser_is_alignof(keyword->sval);
+    bool gnu_alignof = alignof_ && !S_EQ(keyword->sval, "_Alignof");
     struct datatype dtype;
     struct token* after_paren = 0;
     struct node* operand = 0;
@@ -6555,6 +6706,13 @@ static void parse_sizeof(struct history* history){
             parser_vla_mode = parser_current_function ? PARSER_VLA_MODE_LOCAL : PARSER_VLA_MODE_NONE;
             struct array_brackets* brackets = parse_array_brackets(history_begin(0));
             parser_vla_mode = PARSER_VLA_MODE_NONE;
+            if(parser_vla_dims && alignof_){
+                parser_vla_dims = 0;
+                expect_sym(')');
+                node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = parser_alignof_value(&dtype, gnu_alignof),
+                    .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG });
+                return;
+            }
             if(parser_vla_dims){
                 struct vector* dims = parser_vla_dims;
                 parser_vla_dims = 0;
@@ -6592,6 +6750,11 @@ static void parse_sizeof(struct history* history){
         // an i386 thread-local array is its decayed address
         // here (parser_thread_local_object); its size is the array's.
         struct parser_thread_local* tls_array = parser_thread_local_array(inner);
+        if(tls_array && alignof_){
+            node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = parser_alignof_value(&tls_array->type, true),
+                .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG });
+            return;
+        }
         if(tls_array){
             node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&tls_array->type),
                 .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG, .num.sizeof_operand = operand });
@@ -6599,12 +6762,15 @@ static void parse_sizeof(struct history* history){
         }
         // The size of a variable-length array is known when it runs.
         const char* vla_size = inner->type == NODE_TYPE_IDENTIFIER ? parser_vla_size_of(inner->sval) : 0;
+        if(vla_size && alignof_){
+            compiler_error(current_process, "_Alignof of a variable-length array is not supported\n");
+        }
         if(vla_size){
             node_push(parser_identifier(vla_size));
             return;
         }
         // So is a row of one, `sizeof a[i]`, `sizeof *p`.
-        if(parser_vla_active()){
+        if(parser_vla_active() && !alignof_){
             operand = parser_vla_lower(operand);
             struct parser_vla_view view;
             if(parser_vla_view_of(operand, &view) && view.level > 0){
@@ -6616,6 +6782,18 @@ static void parse_sizeof(struct history* history){
             compiler_error(current_process, "Cannot work out the size of this sizeof operand\n");
         }
     }
+    if(alignof_){
+        // A member keeps the alignment it has in its struct (4 for a
+        // double member on i386), as in gcc.
+        struct node* inner = operand;
+        while(inner && inner->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            inner = inner->parenthesis.exp;
+        }
+        bool member = inner && inner->type == NODE_TYPE_EXPRESSION && is_access_operator(inner->exp.op);
+        node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = parser_alignof_value(&dtype, (gnu_alignof || operand) && !member),
+            .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG });
+        return;
+    }
     // sizeof yields a size_t, which is unsigned long on every target.
     node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&dtype),
         .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG, .num.sizeof_operand = operand });
@@ -6623,7 +6801,7 @@ static void parse_sizeof(struct history* history){
 
 static void parse_keyword(struct history* history){
     struct token* token = token_peek_next();
-    if(S_EQ(token->sval, "sizeof")){
+    if(S_EQ(token->sval, "sizeof") || parser_is_alignof(token->sval)){
         parse_sizeof(history);
         return;
     }
@@ -6766,7 +6944,7 @@ static void parse_keyword_for_global(void){
     // parse_for_stmt with no function and segfaulted; `else` was never
     // consumed and the parser looped forever.
     struct token* keyword = token_peek_next();
-    if(parser_is_statement_keyword(keyword->sval) || S_EQ(keyword->sval, "sizeof")){
+    if(parser_is_statement_keyword(keyword->sval) || S_EQ(keyword->sval, "sizeof") || parser_is_alignof(keyword->sval)){
         compiler_error(current_process, "Expected a declaration at file scope but found '%s'\n", keyword->sval);
     }
     // ch149: top-level parse runs under HISTORY_FLAG_IS_GLOBAL_SCOPE

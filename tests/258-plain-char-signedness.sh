@@ -14,8 +14,8 @@ char c = 200;
 int main(void){ return c > 0; }
 EOF
 for t in x86_64 aarch64 riscv64; do
-    ./main -target=$t -S "$tmp/c.c" "$tmp/c_$t.s" >/dev/null 2>&1 \
-        || ./main -target=$t "$tmp/c.c" "$tmp/c_$t.s" object >/dev/null 2>&1 \
+    samcc -target=$t -S "$tmp/c.c" "$tmp/c_$t.s" >/dev/null 2>&1 \
+        || samcc -target=$t "$tmp/c.c" "$tmp/c_$t.s" object >/dev/null 2>&1 \
         || fail "$t: did not compile"
 done
 assert_contains "$(cat "$tmp/c_x86_64.s")"  "movsx"  "x86_64 loads a plain char signed"

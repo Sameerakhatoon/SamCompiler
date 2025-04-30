@@ -22,7 +22,7 @@ struct foo { int b; };
 int main() { return 0; }
 EOF
 
-out=$("$REPO_ROOT/main" "$src_dup" "$asm" 2>&1 || true)
+out=$(samcc "$src_dup" "$asm" 2>&1 || true)
 case "$out" in
     *"Cannot define struct"*) ;;
     *) fail "expected duplicate-struct diagnostic; got: $out" ;;
@@ -33,7 +33,7 @@ struct foo { int a; };
 int main() { return 0; }
 EOF
 
-out=$("$REPO_ROOT/main" "$src_ok" "$asm" 2>&1 || true)
+out=$(samcc "$src_ok" "$asm" 2>&1 || true)
 case "$out" in
     *"everything compiled fine"*|*"Issue assemblign"*) ;;
     *) fail "single struct def should compile; got: $out" ;;

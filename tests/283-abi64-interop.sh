@@ -25,7 +25,7 @@ for target in x86_64 aarch64 riscv64; do
     [ -z "$run" ] || command -v "$run" >/dev/null || fail "$target: $run is missing"
 
     # object mode: the asm goes to the named file, the object next to it.
-    ./main -target=$target tests/abi64/sam.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
+    samcc -target=$target tests/abi64/sam.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
         || fail "$target: sam.c did not compile: $(tail -2 "$tmp/log")"
     $cc -c tests/abi64/gcc.c -o "$tmp/gcc_$target.o" || fail "$target: gcc rejected gcc.c"
     $cc "$tmp/gcc_$target.o" "$tmp/sam_$target.s.o" -o "$tmp/interop_$target" 2>"$tmp/log" \
@@ -37,7 +37,7 @@ for target in x86_64 aarch64 riscv64; do
     $cc -w tests/abi64/self.c -o "$tmp/self_gcc_$target" || fail "$target: gcc rejected self.c"
     want=0
     $run "$tmp/self_gcc_$target" || want=$?
-    ./main -target=$target tests/abi64/self.c "$tmp/self_$target" >"$tmp/log" 2>&1 \
+    samcc -target=$target tests/abi64/self.c "$tmp/self_$target" >"$tmp/log" 2>&1 \
         || fail "$target: self.c did not build: $(tail -2 "$tmp/log")"
     got=0
     $run "$tmp/self_$target" || got=$?

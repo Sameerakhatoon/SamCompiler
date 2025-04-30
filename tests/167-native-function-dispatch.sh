@@ -30,7 +30,7 @@ EOF
 
 # The asm is no longer echoed to stdout:
 # read it from the output file.
-out=$("$REPO_ROOT/main" "$src" "$asm" object 2>&1 || true; cat "$asm")
+out=$(samcc "$src" "$asm" object 2>&1 || true; cat "$asm")
 case "$out" in
     *"; NATIVE FUNCTION va_start"*) ;;
     *) fail "expected '; NATIVE FUNCTION va_start' tag in asm output; got: $out" ;;

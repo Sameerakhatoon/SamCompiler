@@ -24,7 +24,7 @@ for target in x86 x86_64 aarch64 riscv64; do
     command -v "${cc%% *}" >/dev/null || fail "$target: ${cc%% *} is missing"
     [ -z "$run" ] || command -v "$run" >/dev/null || fail "$target: $run is missing"
 
-    ./main -target=$target tests/ldinit/table.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
+    samcc -target=$target tests/ldinit/table.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
         || fail "$target: table.c did not compile: $(tail -2 "$tmp/log")"
     $cc -w -Dtable=gcc_table -Dtable_count=gcc_table_count -c tests/ldinit/table.c -o "$tmp/gcc_$target.o" \
         || fail "$target: gcc rejected table.c"

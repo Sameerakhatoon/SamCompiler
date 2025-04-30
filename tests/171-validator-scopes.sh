@@ -27,7 +27,7 @@ int x;
 int main() { return 0; }
 EOF
 
-out=$("$REPO_ROOT/main" "$src" "$asm" 2>&1 || true)
+out=$(samcc "$src" "$asm" 2>&1 || true)
 case "$out" in
     *"everything compiled fine"*|*"Issue assemblign"*) ;;
     *) fail "trivial source did not reach codegen with validator scopes: $out" ;;

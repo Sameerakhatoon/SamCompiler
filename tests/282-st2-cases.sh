@@ -23,7 +23,7 @@ for src in tests/st2/*.c; do
     [ -n "$want" ] || fail "$src has no // EXPECT: line"
     for t in $targets; do
         bin="$tmp/$base.$t"
-        "$REPO_ROOT/main" -target=$t "$src" "$bin" >"$bin.log" 2>&1 || true
+        samcc -target=$t "$src" "$bin" >"$bin.log" 2>&1 || true
         if [ ! -x "$bin" ]; then
             failures="$failures $base/$t(build: $(grep -v '^\(push\|pop\|mov\)' "$bin.log" | tail -1))"
             continue

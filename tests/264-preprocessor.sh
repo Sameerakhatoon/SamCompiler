@@ -13,7 +13,7 @@ trap 'rm -rf "$tmp"' EXIT
 expect_error(){
     printf '%s\n' "$2" > "$tmp/$1.c"
     local rc=0 err
-    err=$(./main -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
+    err=$(samcc -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
     [ $rc != 0 ] || fail "$1: compiled without an error"
     assert_contains "$err" "$3" "$1 diagnostic"
 }
@@ -29,7 +29,7 @@ expect_error many_args     $'#define F(a) a\nint main(void){ return F(1, 2); }' 
 # E6: a file that includes itself stops with an error.
 printf '#include "%s"\nint main(void){ return 0; }\n' "$tmp/self.c" > "$tmp/self.c"
 rc=0
-err=$(./main -target=x86_64 "$tmp/self.c" "$tmp/self" 2>&1 >/dev/null) || rc=$?
+err=$(samcc -target=x86_64 "$tmp/self.c" "$tmp/self" 2>&1 >/dev/null) || rc=$?
 [ $rc != 0 ] || fail "self include: compiled without an error"
 assert_contains "$err" "nested more than 200 deep" "self include diagnostic"
 
@@ -40,7 +40,7 @@ int once_value = 3;
 EOF
 printf '#include "%s"\n#include "%s"\nint main(void){ return once_value; }\n' "$tmp/once.h" "$tmp/once.h" > "$tmp/once.c"
 for t in x86 x86_64; do
-    ./main -target=$t "$tmp/once.c" "$tmp/once_$t" >/dev/null 2>&1 || fail "$t: once.c did not compile"
+    samcc -target=$t "$tmp/once.c" "$tmp/once_$t" >/dev/null 2>&1 || fail "$t: once.c did not compile"
     rc=0
     "$tmp/once_$t" || rc=$?
     assert_eq 3 "$rc" "$t #pragma once"

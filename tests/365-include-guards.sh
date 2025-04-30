@@ -79,7 +79,7 @@ int main(void){
 EOF
 
 for target in x86_64 x86; do
-    "$REPO_ROOT/main" -target=$target -I"$tmp/inc" "$tmp/prog.c" "$tmp/prog-$target" >"$tmp/build-$target.log" 2>&1 \
+    samcc -target=$target -I"$tmp/inc" "$tmp/prog.c" "$tmp/prog-$target" >"$tmp/build-$target.log" 2>&1 \
         || fail "$target build failed: $(grep -v '^\s*$' "$tmp/build-$target.log" | tail -3)"
     "$tmp/prog-$target" && rc=0 || rc=$?
     assert_eq 40 "$rc" "$target exit status (99/98: a guarded body ran twice, 97: unguarded ran once)"

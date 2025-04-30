@@ -26,7 +26,7 @@ int foo() { return 2; }
 int main() { return foo(); }
 EOF
 
-out=$("$REPO_ROOT/main" "$src_dup" "$asm" 2>&1 || true)
+out=$(samcc "$src_dup" "$asm" 2>&1 || true)
 case "$out" in
     *"Cannot define function"*) ;;
     *) fail "expected duplicate-function diagnostic from validator; got: $out" ;;
@@ -38,7 +38,7 @@ int foo() { return 1; }
 int main() { return foo(); }
 EOF
 
-out=$("$REPO_ROOT/main" "$src_ok" "$asm" 2>&1 || true)
+out=$(samcc "$src_ok" "$asm" 2>&1 || true)
 case "$out" in
     *"everything compiled fine"*|*"Issue assemblign"*) ;;
     *) fail "single-function source should still reach codegen; got: $out" ;;

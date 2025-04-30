@@ -27,7 +27,7 @@ EOF
 
 compile() {
     # 8 MB: the usual default, and what the numbers in the note assume.
-    (ulimit -s 8192; ./main -target="$1" "$2" "$tmp/out.s" object) >/dev/null 2>"$tmp/err.txt"
+    (ulimit -s 8192; samcc -target="$1" "$2" "$tmp/out.s" object) >/dev/null 2>"$tmp/err.txt"
 }
 
 for kind in paren blocks unary sum; do
@@ -52,6 +52,6 @@ done
 # The limit is the stack limit, not a fixed depth.
 gen paren 40000
 compile x86 "$tmp/paren40000.c" && fail "40,000 parentheses compiled with an 8 MB stack"
-(ulimit -s 65536; ./main "$tmp/paren40000.c" "$tmp/out.s" object) >/dev/null 2>"$tmp/err.txt" \
+(ulimit -s 65536; samcc "$tmp/paren40000.c" "$tmp/out.s" object) >/dev/null 2>"$tmp/err.txt" \
     || fail "40,000 parentheses with a 64 MB stack: $(head -2 "$tmp/err.txt")"
 pass

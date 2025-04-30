@@ -24,7 +24,7 @@ int main(void){
 }
 EOF
 for t in x86 x86_64; do
-    ./main -target=$t "$tmp/a.c" "$tmp/a_$t" >/dev/null 2>&1 || fail "$t: the program did not compile"
+    samcc -target=$t "$tmp/a.c" "$tmp/a_$t" >/dev/null 2>&1 || fail "$t: the program did not compile"
     rc=0
     "$tmp/a_$t" || rc=$?
     assert_eq 17 "$rc" "$t exit status"

@@ -734,7 +734,10 @@ static bool is_keyword(const char* str){
         || S_EQ(str, "volatile") || S_EQ(str, "register")
         || S_EQ(str, "inline")   || S_EQ(str, "auto")
         || S_EQ(str, "_Atomic")  || S_EQ(str, "_Thread_local")
-        || S_EQ(str, "__thread");
+        || S_EQ(str, "__thread")
+        // _Alignof and gcc's spellings of it.
+        || S_EQ(str, "_Alignof") || S_EQ(str, "__alignof__")
+        || S_EQ(str, "__alignof");
 }
 
 // '<' is the wart: in `#include <stdio.h>` it opens a string literal, not

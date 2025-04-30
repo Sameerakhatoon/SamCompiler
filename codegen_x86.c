@@ -530,6 +530,8 @@ static void codegen_generate_body(struct node* node, struct history* history);
 // ch158: forward decls for the entry/exit point helpers (real impls
 // live in the label-system block below).
 static void codegen_begin_entry_exit_point(void);
+static void codegen_register_entry_point(int entry_point_id);
+static void codegen_begin_exit_point(void);
 static void codegen_end_entry_exit_point(void);
 // ch161: forward decl for the goto-exit-point helper.
 static void codegen_goto_exit_point(struct node* node);
@@ -928,6 +930,16 @@ static void codegen_generate_entity_access_for_unary_indirection_for_assignment_
     // this also comes from a member access after the `*`.
     int depth = entity->indirection.depth - 1;
     if(codegen_indirection_operand_is_address(result, entity)){
+        depth++;
+    }
+    // A subscript or another `*` after it (`(*pp)[i] = c`, `*(*pp) = c`,
+    // stores through the pointer `*pp` holds, so that pointer
+    // is loaded too; the store went to the bytes after *pp's own address.
+    // On i386 a thread-local pointer is such a chain (`name[i] = c` is
+    // `(*(char**)tls_address)[i] = c`).
+    bool through_result = entity->next && (entity->next->type == RESOLVER_ENTITY_TYPE_ARRAY_BRACKET
+        || entity->next->type == RESOLVER_ENTITY_TYPE_UNARY_INDIRECTION);
+    if(through_result && (entity->dtype.flags & DATATYPE_FLAG_IS_POINTER) && !(entity->dtype.flags & DATATYPE_FLAG_IS_ARRAY)){
         depth++;
     }
     codegen_apply_unary_access(depth);
@@ -3572,7 +3584,10 @@ static struct datatype x87_call_emit(struct node* node, bool struct_result){
         asm_push("mov [esp], eax");
     }
     if(function){
-        asm_push("call %s", function->name);
+        // `$name` like every other call: the PIC pass sends a
+        // `call $f` to a symbol from another object through the GOT; a
+        // bare `call f` stayed a text relocation, which a PIE refuses.
+        asm_push("call %s", codegen_symbol(function->name));
     } else {
         asm_push("call [function_call_%i]", slot);
     }
@@ -4029,14 +4044,17 @@ static void codegen_generate_switch_stmt(struct node* node){
     codegen_end_entry_exit_point();
 }
 
-// ch168: `goto LABEL;` - emits `jmp label_<name>`.
+// ch168: `goto LABEL;` - emits `jmp ..@label_<name>`.
 static void codegen_generate_goto_stmt(struct node* node){
-    asm_push("jmp label_%s", node->stmt._goto.label->sval);
+    asm_push("jmp ..@label_%s", node->stmt._goto.label->sval);
 }
 
 // ch169: `LABEL:` statement - emits the asm label.
 static void codegen_generate_label(struct node* node){
-    asm_push("label_%s:", node->stmt.label.name->sval);
+    // a `..@` label is not a NASM non-local label, so the
+    // `.name` labels after it (an if's, a loop's) keep the function's
+    // scope; `label_f_x:` started a new one and left them undefined.
+    asm_push("..@label_%s:", node->stmt.label.name->sval);
 }
 
 // ch167: `case N:` - emits the `.switch_stmt_<id>_case_N:` label
@@ -4066,10 +4084,15 @@ static void codegen_generate_continue_stmt(struct node* node){
 // ch159: do/while - body first, then condition; jump back to start
 // when condition is non-zero.
 static void codegen_generate_do_while_stmt(struct node* node){
-    codegen_begin_entry_exit_point();
+    // `continue` goes to the condition, so the entry point is
+    // placed after the body, not at the start (same label numbers).
+    int entry_point_id = codegen_label_count();
+    codegen_register_entry_point(entry_point_id);
+    codegen_begin_exit_point();
     int do_while_start_id = codegen_label_count();
     asm_push(".do_while_start_%i:", do_while_start_id);
     codegen_generate_body(node->stmt.do_while_stmt.body_node, codegen_history_begin(IS_ALONE_STATEMENT));
+    asm_push(".entry_point_%i:", entry_point_id);
     codegen_generate_expressionable(node->stmt.do_while_stmt.exp_node, codegen_history_begin(0));
     asm_push_ins_pop("eax", STACK_FRAME_ELEMENT_TYPE_PUSHED_VALUE, "result_value");
     asm_push("cmp eax, 0");

@@ -44,7 +44,7 @@ int main(void){
 EOF
 
 for target in x86 x86_64 aarch64 riscv64; do
-    "$REPO_ROOT/main" -target=$target "$tmp/prog.c" "$tmp/prog-$target" >"$tmp/build-$target.log" 2>&1 \
+    samcc -target=$target "$tmp/prog.c" "$tmp/prog-$target" >"$tmp/build-$target.log" 2>&1 \
         || fail "$target build failed: $(grep -v '^\s*$' "$tmp/build-$target.log" | tail -2 | cut -c1-200)"
     case $target in
         aarch64) run=qemu-aarch64 ;;
@@ -57,7 +57,7 @@ done
 
 long=$(name z)x
 printf 'int main(void){ int %s = 1; return %s; }\n' "$long" "$long" > "$tmp/bad.c"
-err=$("$REPO_ROOT/main" -target=x86_64 "$tmp/bad.c" "$tmp/bad" 2>&1) && rc=0 || rc=$?
+err=$(samcc -target=x86_64 "$tmp/bad.c" "$tmp/bad" 2>&1) && rc=0 || rc=$?
 [ "$rc" != 0 ] && { [ "$rc" -lt 128 ] || [ "$rc" = 255 ]; } || fail "a 256-character local gave status $rc"
 assert_contains "$err" "the limit is 255" "256-character local"
 pass

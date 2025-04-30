@@ -17,7 +17,7 @@ sources=$(ls ./*.c helpers/*.c preprocessor/*.c preprocessor/static-includes/*.c
 mkdir -p "$tmp/s1" "$tmp/obj"
 for f in $sources tools/selfhost/samvprintf.c; do
     name=$(echo "$f" | tr '/.' '__')
-    ./main -Itools/selfhost/include -I. -target=x86_64 -S "$f" -o "$tmp/s1/$name.s" >"$tmp/log" 2>&1 \
+    samcc -Itools/selfhost/include -I. -target=x86_64 -S "$f" -o "$tmp/s1/$name.s" >"$tmp/log" 2>&1 \
         || fail "stage 1 cannot compile $f: $(grep -v '^everything' "$tmp/log" | head -2)"
     nasm -f elf64 "$tmp/s1/$name.s" -o "$tmp/obj/$name.o" 2>"$tmp/log" \
         || fail "nasm rejects $f: $(head -2 "$tmp/log")"
@@ -30,7 +30,7 @@ gcc -no-pie "$tmp"/obj/*.o -o "$tmp/stage2" 2>"$tmp/log" || fail "link: $(head -
 compare(){
     local target="$1" src="$2"
     rm -f "$tmp/a1.s" "$tmp/a2.s"
-    ./main -target="$target" -S "$src" -o "$tmp/a1.s" >"$tmp/l1" 2>&1
+    samcc -target="$target" -S "$src" -o "$tmp/a1.s" >"$tmp/l1" 2>&1
     local r1=$?
     "$tmp/stage2" -target="$target" -S "$src" -o "$tmp/a2.s" >"$tmp/l2" 2>&1
     local r2=$?

@@ -9,7 +9,7 @@
 # (it reported 0); only the compile result matters here.
 # With no arguments the driver prints its usage now instead of
 # compiling ./test.c, so name the files.
-out="$(./main ./test.c ./test)" || true
+out="$(samcc ./test.c ./test)" || true
 assert_contains "$out" "everything compiled fine" "main output (lexer stub)"
 
 # Probe: confirm we can create a lex_process and that pos starts at 1/1.

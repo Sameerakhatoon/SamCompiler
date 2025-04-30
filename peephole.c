@@ -1805,7 +1805,7 @@ void peephole_run(const char* target_name, FILE* in, FILE* out){
     ph_mark_functions();
     // Every rule leaves fewer instructions (one inserts a line but takes
     // away two), so this ends; one rule's result is often another's
-    // start, so it runs until nothing changes.
+    // start, so it runs until nothing changes, 64 passes at most.
     for(int pass = 0; pass < 64; pass++){
         ph_changed = false;
         for(int i = 0; i < ph_count; i++){

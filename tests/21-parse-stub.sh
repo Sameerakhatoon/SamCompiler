@@ -8,7 +8,7 @@
 # (it reported 0); only the compile result matters here.
 # With no arguments the driver prints its usage now instead of
 # compiling ./test.c, so name the files.
-out="$(./main ./test.c ./test)" || true
+out="$(samcc ./test.c ./test)" || true
 assert_contains "$out" "everything compiled fine" "main still succeeds with parser stub"
 
 probe=$(mktemp /tmp/sam_ch25_probe.XXXXXX.c)

@@ -20,7 +20,6 @@ mov dword [ebp-4], eax
 push dword 1
 pop eax
 mov dword [ebp-8], eax
-.entry_point_1:
 .do_while_start_3:
 .entry_point_4:
 .switch_stmt_6:
@@ -115,6 +114,7 @@ add eax, ecx
 push eax
 pop eax
 mov dword [ebp-8], eax
+.entry_point_1:
 push dword [ebp-8]
 push dword 6
 pop ecx

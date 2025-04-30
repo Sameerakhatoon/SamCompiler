@@ -29,7 +29,7 @@ for target in x86 x86_64 aarch64 riscv64; do
 
     $cc -w tests/float/print.c -o "$tmp/ref_$target" -lm || fail "$target: gcc rejected print.c"
     want=$($run "$tmp/ref_$target")
-    ./main -target=$target tests/float/print.c "$tmp/print_$target.s" object >"$tmp/log" 2>&1 \
+    samcc -target=$target tests/float/print.c "$tmp/print_$target.s" object >"$tmp/log" 2>&1 \
         || fail "$target: print.c did not compile: $(tail -2 "$tmp/log")"
     $cc "$tmp/print_$target.s.o" -o "$tmp/print_$target" -lm 2>"$tmp/log" \
         || fail "$target: link failed: $(tail -2 "$tmp/log")"
@@ -40,7 +40,7 @@ done
 reject(){
     local target="$1" what="$2" src="$3"
     printf '%s\n' "$src" > "$tmp/bad.c"
-    if ./main -target=$target "$tmp/bad.c" "$tmp/bad" >"$tmp/log" 2>&1; then
+    if samcc -target=$target "$tmp/bad.c" "$tmp/bad" >"$tmp/log" 2>&1; then
         fail "$target: $what was accepted"
     fi
     grep -q "$4" "$tmp/log" || fail "$target: $what: unexpected message: $(grep -v '^\s' "$tmp/log" | tail -2)"
@@ -67,7 +67,7 @@ for target in x86 x86_64 aarch64 riscv64; do
         riscv64) run="qemu-riscv64" ;;
         *)       run="" ;;
     esac
-    ./main -target=$target "$tmp/va.c" "$tmp/va_$target" >"$tmp/log" 2>&1 \
+    samcc -target=$target "$tmp/va.c" "$tmp/va_$target" >"$tmp/log" 2>&1 \
         || fail "$target: va_arg(ap, double) did not build: $(tail -2 "$tmp/log")"
     rc=0
     $run "$tmp/va_$target" || rc=$?

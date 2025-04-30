@@ -104,7 +104,7 @@ for target in x86 x86_64 aarch64 riscv64; do
         riscv64)    run="qemu-riscv64" ;;
     esac
     have_tools ${run:-true} || continue
-    ./main -target=$target "$tmp/atomic_double.c" "$tmp/ad_$target" >"$tmp/log" 2>&1 \
+    samcc -target=$target "$tmp/atomic_double.c" "$tmp/ad_$target" >"$tmp/log" 2>&1 \
         || fail "$target: did not compile: $(tail -2 "$tmp/log")"
     set +e
     got=$(timeout 60 $run "$tmp/ad_$target")
@@ -115,7 +115,7 @@ for target in x86 x86_64 aarch64 riscv64; do
 done
 
 # The 8-byte loops are cmpxchg8b; no .data scratch is left for the x87.
-./main -target=x86 -S -o "$tmp/ad.s" "$tmp/atomic_double.c" >"$tmp/log" 2>&1 || fail "x86: -S failed"
+samcc -target=x86 -S -o "$tmp/ad.s" "$tmp/atomic_double.c" >"$tmp/log" 2>&1 || fail "x86: -S failed"
 grep -q "lock cmpxchg8b" "$tmp/ad.s" || fail "x86: no lock cmpxchg8b"
 grep -q "fistp qword" "$tmp/ad.s" || fail "x86: no fistp qword for the 8-byte load and store"
 if grep -q "x87_tmp\|x87_cw" "$tmp/ad.s"; then
@@ -136,7 +136,7 @@ int main(void){
 }
 EOF
 need_x86_link
-./main -target=x86 "$tmp/align.c" "$tmp/align" >"$tmp/log" 2>&1 || fail "x86: align.c: $(tail -2 "$tmp/log")"
+samcc -target=x86 "$tmp/align.c" "$tmp/align" >"$tmp/log" 2>&1 || fail "x86: align.c: $(tail -2 "$tmp/log")"
 set +e
 "$tmp/align"
 rc=$?

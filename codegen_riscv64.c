@@ -55,6 +55,8 @@ static void          codegen_generate_global_variable(struct node* node);
 static void          codegen_generate_body(struct node* node, struct history* history);
 static int           codegen_label_count(void);
 static void          codegen_begin_entry_exit_point(void);
+static void          codegen_register_entry_point(int entry_point_id);
+static void          codegen_begin_exit_point(void);
 static void          codegen_end_entry_exit_point(void);
 static void          codegen_goto_exit_point(struct node* node);
 static void          codegen_goto_exit_point_maintain_stack(struct node* node);
@@ -1320,10 +1322,15 @@ static void codegen_generate_continue_stmt(struct node* node){
 }
 
 static void codegen_generate_do_while_stmt(struct node* node){
-    codegen_begin_entry_exit_point();
+    // `continue` goes to the condition, so the entry point is
+    // placed after the body, not at the start (same label numbers).
+    int entry_point_id = codegen_label_count();
+    codegen_register_entry_point(entry_point_id);
+    codegen_begin_exit_point();
     int do_while_start_id = codegen_label_count();
     asm_push(".Ldo_while_start_%i:", do_while_start_id);
     codegen_generate_body(node->stmt.do_while_stmt.body_node, codegen_history_begin(IS_ALONE_STATEMENT));
+    asm_push(".Lentry_point_%i:", entry_point_id);
     codegen_generate_condition(node->stmt.do_while_stmt.exp_node);
     asm_push("bnez a0, .Ldo_while_start_%i", do_while_start_id);
     codegen_end_entry_exit_point();

@@ -56,7 +56,7 @@ assert_contains "$got" "ND ID ABCD"  "the identifier is the root"
 # Two operands in a row are now an error.
 printf '5837 ABCD' > "$scratch"
 rc=0
-err=$(./main -target=x86_64 "$scratch" /tmp/sam_ch27_out object 2>&1 >/dev/null) || rc=$?
+err=$(samcc -target=x86_64 "$scratch" /tmp/sam_ch27_out object 2>&1 >/dev/null) || rc=$?
 [ $rc != 0 ] || fail "two operands in a row were accepted"
 assert_contains "$err" "after the number 5837 but found 'ABCD'" "two operands in a row"
 pass

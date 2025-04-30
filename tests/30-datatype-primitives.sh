@@ -8,7 +8,7 @@
 for input in 'int' 'char' 'short' 'long int' 'float'; do
     scratch=$(mktemp /tmp/sam_ch35_input.XXXXXX)
     printf '%s' "$input" > "$scratch"
-    out="$( (./main >/dev/null 2>&1; printf '') ; ./main_with_input "$scratch" 2>&1 || true)"
+    out="$( (samcc >/dev/null 2>&1; printf '') ; ./main_with_input "$scratch" 2>&1 || true)"
     rm -f "$scratch"
 done
 

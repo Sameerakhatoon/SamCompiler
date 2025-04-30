@@ -35,9 +35,9 @@ EOF
 # codegen pipeline still produces output - skip cleanly if nasm /
 # 32-bit gcc are not installed.
 if command -v nasm >/dev/null; then
-    "$REPO_ROOT/main" "$src" "$asm" object >/dev/null 2>&1 || true
+    samcc "$src" "$asm" object >/dev/null 2>&1 || true
 fi
-out=$("$REPO_ROOT/main" "$src" "$asm" 2>&1 || true)
+out=$(samcc "$src" "$asm" 2>&1 || true)
 case "$out" in
     *"everything compiled fine"*|*"Issue assemblign"*) ;;
     *) fail "main did not reach codegen on a trivial source after preprocessor wiring: $out" ;;

@@ -15,7 +15,7 @@ trap 'rm -rf "$tmp"' EXIT
 expect_error(){
     printf '%s\n' "$2" > "$tmp/$1.c"
     local rc=0 err
-    err=$(./main -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
+    err=$(samcc -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
     [ $rc != 0 ] || fail "$1: compiled without an error"
     assert_contains "$err" "$3" "$1 diagnostic"
 }
@@ -40,7 +40,7 @@ int main(void){
     return r;                           /* 63 */
 }
 EOF
-./main -target=x86_64 "$tmp/t.c" "$tmp/t" >/dev/null 2>&1 || fail "the program did not compile"
+samcc -target=x86_64 "$tmp/t.c" "$tmp/t" >/dev/null 2>&1 || fail "the program did not compile"
 rc=0
 "$tmp/t" || rc=$?
 assert_eq 63 "$rc" "exit status"

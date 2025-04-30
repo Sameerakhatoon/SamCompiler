@@ -12,7 +12,7 @@ trap 'rm -rf "$tmp"' EXIT
 expect_error(){
     printf '%s\n' "$2" > "$tmp/$1.c"
     local rc=0 err
-    err=$(./main -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
+    err=$(samcc -target=x86_64 "$tmp/$1.c" "$tmp/$1" 2>&1 >/dev/null) || rc=$?
     [ $rc != 0 ] || fail "$1: compiled without an error"
     assert_contains "$err" "$3" "$1 diagnostic"
 }
@@ -35,7 +35,7 @@ EOF
 # x86_64: in at 8 (16 bytes), n at 24, p at 32, z at 40, size 48.
 for t in x86:49 x86_64:69; do
     target=${t%%:*}
-    ./main -target=$target "$tmp/layout.c" "$tmp/layout_$target" >/dev/null 2>&1 || fail "$target: layout.c did not compile"
+    samcc -target=$target "$tmp/layout.c" "$tmp/layout_$target" >/dev/null 2>&1 || fail "$target: layout.c did not compile"
     rc=0
     "$tmp/layout_$target" || rc=$?
     assert_eq "${t##*:}" "$rc" "$target struct layout"

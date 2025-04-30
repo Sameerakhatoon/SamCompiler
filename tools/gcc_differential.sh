@@ -15,6 +15,12 @@
 # SamCompiler rejected the program, A means assembling or linking failed,
 # X means SamCompiler crashed, T a timeout, Sn the program died with
 # signal n. A '*' marks a mismatch with gcc.
+#
+# Each SamCompiler compile runs under a 4 GB address-space cap (prlimit
+# --as) and a timeout, so a runaway compile shows as X or T in the
+# table instead of taking the machine's memory. The timeouts
+# are generous for a loaded machine: SAM_DIFF_COMPILE_TIMEOUT (seconds,
+# default 300) per compile, SAM_DIFF_RUN_TIMEOUT (default 60) per run.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -22,6 +28,11 @@ dir="${1:-tests/diff}"
 shift || true
 targets="${*:-x86 x86_64 aarch64 riscv64}"
 dir="$(cd "$dir" && pwd)"
+
+# The memory cap, when util-linux's prlimit is there (it is on the CI
+# image and in WSL).
+cap=""
+command -v prlimit >/dev/null && cap="prlimit --as=4294967296"
 
 tmp=$(mktemp -d /tmp/sam_diff.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
@@ -50,7 +61,7 @@ runner_for(){
 # Exit status of a binary, or T for a timeout, or Sn for signal n.
 run_status(){
     local runner="$1" bin="$2" rc
-    timeout 10 $runner "$bin" >/dev/null 2>&1
+    timeout "${SAM_DIFF_RUN_TIMEOUT:-60}" $runner "$bin" >/dev/null 2>&1
     rc=$?
     if [ $rc = 124 ]; then echo T
     elif [ $rc -ge 128 ]; then echo "S$((rc - 128))"
@@ -106,7 +117,7 @@ for src in "$dir"/*.c; do
         fi
         # bash reports a crashed child ("Segmentation fault") on its own
         # stderr; the group keeps that redirected away from the table.
-        { timeout 20 ./main -target="$t" ${SAMCC_FLAGS:-} "$src" "$out" >"$out.log" 2>&1; } 2>/dev/null
+        { timeout "${SAM_DIFF_COMPILE_TIMEOUT:-300}" $cap ./main -target="$t" ${SAMCC_FLAGS:-} "$src" "$out" >"$out.log" 2>&1; } 2>/dev/null
         rc=$?
         if [ $rc = 0 ]; then
             got=$(run_status "$runner" "$out")

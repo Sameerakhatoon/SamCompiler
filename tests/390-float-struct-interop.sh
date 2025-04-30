@@ -26,7 +26,7 @@ for target in x86 x86_64 aarch64 riscv64; do
     command -v "${cc%% *}" >/dev/null || fail "$target: ${cc%% *} is missing"
     [ -z "$run" ] || command -v "$run" >/dev/null || fail "$target: $run is missing"
 
-    ./main -target=$target tests/fpabi/sam.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
+    samcc -target=$target tests/fpabi/sam.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
         || fail "$target: sam.c did not compile: $(tail -2 "$tmp/log")"
     $cc -c tests/fpabi/gcc.c -o "$tmp/gcc_$target.o" || fail "$target: gcc rejected gcc.c"
     $cc "$tmp/gcc_$target.o" "$tmp/sam_$target.s.o" -o "$tmp/interop_$target" 2>"$tmp/log" \

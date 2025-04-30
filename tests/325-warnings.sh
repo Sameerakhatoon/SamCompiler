@@ -26,7 +26,7 @@ int main(void){
 SRC
 for target in x86 x86_64; do
     rc=0
-    out=$(./main -target=$target "$tmp/warn.c" "$tmp/warn_$target" 2>"$tmp/err_$target") || rc=$?
+    out=$(samcc -target=$target "$tmp/warn.c" "$tmp/warn_$target" 2>"$tmp/err_$target") || rc=$?
     err=$(cat "$tmp/err_$target")
     assert_eq 0 "$rc" "status with warnings ($target)"
     assert_contains "$out" "everything compiled fine" "stdout ($target)"
@@ -75,7 +75,7 @@ int main(void){
     return first(values, count) + second(1) + third(0) + fourth(1) + has;
 }
 SRC
-err=$(./main -target=x86_64 "$tmp/clean.c" "$tmp/clean.o" object 2>&1 >/dev/null) || fail "the clean program was rejected: $err"
+err=$(samcc -target=x86_64 "$tmp/clean.c" "$tmp/clean.o" object 2>&1 >/dev/null) || fail "the clean program was rejected: $err"
 case "$err" in *"warning:"*) fail "unexpected warning: $err" ;; esac
 
 pass

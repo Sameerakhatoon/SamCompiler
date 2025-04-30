@@ -28,7 +28,7 @@ for target in x86 x86_64 aarch64 riscv64; do
 
     for f in main lib; do
         # object mode: the asm goes to the named file, the object next to it.
-        ./main -target=$target tests/link/$f.c "$tmp/$f.$target.s" object >"$tmp/log" 2>&1 \
+        samcc -target=$target tests/link/$f.c "$tmp/$f.$target.s" object >"$tmp/log" 2>&1 \
             || fail "$target: $f.c did not compile: $(tail -2 "$tmp/log")"
         $cc -w -c tests/link/$f.c -o "$tmp/$f.$target.gcc.o" || fail "$target: gcc rejected $f.c"
         readelf -S "$tmp/$f.$target.s.o" | grep -q '\.note\.GNU-stack' \
@@ -57,7 +57,7 @@ done
 # aarch64 and i386 (static-pie); riscv64 stays -static (no rcrt1.o in
 # the cross glibc).
 for target in x86 x86_64 aarch64; do
-    ./main -target=$target tests/diff/register_names.c "$tmp/default_$target" >"$tmp/log" 2>&1 \
+    samcc -target=$target tests/diff/register_names.c "$tmp/default_$target" >"$tmp/log" 2>&1 \
         || fail "$target: the default link failed: $(tail -2 "$tmp/log")"
     file "$tmp/default_$target" | grep -q 'pie executable' \
         || fail "$target: the default link is not a PIE: $(file "$tmp/default_$target")"

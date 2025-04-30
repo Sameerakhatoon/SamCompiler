@@ -70,12 +70,12 @@ for t in x86_64 aarch64 riscv64; do
     ar rcs "$sys/lib/libsamos.a" "$tmp/libc-$t.o"
     cp "$tmp/user.ld" "$sys/lib/user.ld"
 
-    out=$("$REPO_ROOT/main" -target=samos-$t "$tmp/prog.c" "$tmp/x" 2>&1 && echo "rc=0" || echo "rc=$?")
+    out=$(samcc -target=samos-$t "$tmp/prog.c" "$tmp/x" 2>&1 && echo "rc=0" || echo "rc=$?")
     assert_contains "$out" "needs -sysroot=DIR or SAMOS_SYSROOT" "$t without a sysroot"
     assert_contains "$out" "rc=1" "$t without a sysroot exits 1"
 
     elf="$tmp/prog-$t.elf"
-    (cd "$tmp" && "$REPO_ROOT/main" -target=samos-$t -sysroot="$sys" "$tmp/prog.c" "$elf" > "$tmp/build-$t.log" 2>&1) || true
+    (cd "$tmp" && samcc -target=samos-$t -sysroot="$sys" "$tmp/prog.c" "$elf" > "$tmp/build-$t.log" 2>&1) || true
     head -c 4 "$elf" 2>/dev/null | grep -q ELF || fail "$t: no ELF: $(grep -i 'error' "$tmp/build-$t.log" | head -3)"
     readelf -h "$elf" | grep -q "Machine:.*$machine" || fail "$t: wrong machine: $(readelf -h "$elf" | grep Machine)"
     readelf -h "$elf" | grep -q "Type: *EXEC" || fail "$t: not a static executable"
@@ -85,15 +85,15 @@ for t in x86_64 aarch64 riscv64; do
     assert_eq "$start" "$entry" "$t entry is _start"
     nm "$elf" | grep -qE '__libc_start_main|GLIBC' && fail "$t: glibc linked in"
 
-    SAMOS_SYSROOT="$sys" "$REPO_ROOT/main" -target=samos-$t "$tmp/prog.c" "$tmp/env-$t.elf" > /dev/null 2>&1 || true
+    SAMOS_SYSROOT="$sys" samcc -target=samos-$t "$tmp/prog.c" "$tmp/env-$t.elf" > /dev/null 2>&1 || true
     head -c 4 "$tmp/env-$t.elf" 2>/dev/null | grep -q ELF || fail "$t: SAMOS_SYSROOT not used"
 
     # The arch macro, and no glibc headers.
     printf '#ifndef %s\n#error no arch macro\n#endif\nint main(){ return 0; }\n' "$macro" > "$tmp/arch.c"
-    "$REPO_ROOT/main" -target=samos-$t -sysroot="$sys" "$tmp/arch.c" "$tmp/arch.s" object > "$tmp/arch.log" 2>&1 || true
+    samcc -target=samos-$t -sysroot="$sys" "$tmp/arch.c" "$tmp/arch.s" object > "$tmp/arch.log" 2>&1 || true
     grep -q "everything compiled fine" "$tmp/arch.log" || fail "$t: $macro not defined"
     printf '#include <unistd.h>\nint main(){ return 0; }\n' > "$tmp/glibc.c"
-    "$REPO_ROOT/main" -target=samos-$t -sysroot="$sys" "$tmp/glibc.c" "$tmp/glibc.s" object > "$tmp/glibc.log" 2>&1 || true
+    samcc -target=samos-$t -sysroot="$sys" "$tmp/glibc.c" "$tmp/glibc.s" object > "$tmp/glibc.log" 2>&1 || true
     grep -q "everything compiled fine" "$tmp/glibc.log" && fail "$t: found <unistd.h> (glibc headers searched)"
     checked=$((checked + 1))
 done

@@ -23,7 +23,7 @@ for target in x86 x86_64 aarch64 riscv64; do
     command -v "${cc%% *}" >/dev/null || fail "$target: ${cc%% *} is missing"
     [ -z "$run" ] || command -v "$run" >/dev/null || fail "$target: $run is missing"
 
-    ./main -target=$target tests/ldabi/va_sam.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
+    samcc -target=$target tests/ldabi/va_sam.c "$tmp/sam_$target.s" object >"$tmp/log" 2>&1 \
         || fail "$target: va_sam.c did not compile: $(tail -2 "$tmp/log")"
     sed 's/sam_/gcc_/g' tests/ldabi/va_sam.c > "$tmp/va_ref.c"
     $cc -I tests/ldabi -c "$tmp/va_ref.c" -o "$tmp/ref_$target.o" || fail "$target: gcc rejected va_sam.c"

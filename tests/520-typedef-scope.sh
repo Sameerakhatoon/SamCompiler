@@ -16,7 +16,7 @@ tmp=$(mktemp -d /tmp/sam_typedef_scope.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
 for name in typedef_scope typedef_scope_more typedef_scope_vla; do
-    ./main -target=x86_64 -o "$tmp/$name" "tests/diff/$name.c" >"$tmp/log" 2>&1 \
+    samcc -target=x86_64 -o "$tmp/$name" "tests/diff/$name.c" >"$tmp/log" 2>&1 \
         || fail "$name.c did not compile: $(tail -2 "$tmp/log")"
     set +e
     "$tmp/$name"
@@ -31,19 +31,19 @@ typedef unsigned int u32;
 typedef struct { u32 x; } point;
 int f(void){ typedef char u32; u32 c = 1; return c; }
 EOF
-./main -E "$tmp/e.c" > "$tmp/e.i" 2>"$tmp/log" || fail "-E failed: $(tail -2 "$tmp/log")"
+samcc -E "$tmp/e.c" > "$tmp/e.i" 2>"$tmp/log" || fail "-E failed: $(tail -2 "$tmp/log")"
 grep -q 'typedef unsigned int u32' "$tmp/e.i" || fail "-E lost the typedef: $(cat "$tmp/e.i")"
 grep -q 'typedef char u32' "$tmp/e.i" || fail "-E lost the block scope typedef: $(cat "$tmp/e.i")"
 grep -q 'typedef struct __anonymous_[0-9]* point' "$tmp/e.i" || fail "-E: no typedef of the hoisted body: $(cat "$tmp/e.i")"
 grep -q 'u32 c = 1' "$tmp/e.i" || fail "-E replaced a typedef name: $(cat "$tmp/e.i")"
 # And it compiles again.
 cp "$tmp/e.i" "$tmp/e2.c"
-./main -target=x86_64 -c -o "$tmp/e2.o" "$tmp/e2.c" >"$tmp/log" 2>&1 || fail "-E output does not compile: $(tail -2 "$tmp/log")"
+samcc -target=x86_64 -c -o "$tmp/e2.o" "$tmp/e2.c" >"$tmp/log" 2>&1 || fail "-E output does not compile: $(tail -2 "$tmp/log")"
 
 reject(){
     local what="$1" src="$2" message="$3"
     printf '%s\n' "$src" > "$tmp/bad.c"
-    if ./main -target=x86_64 -c -o "$tmp/bad.o" "$tmp/bad.c" >"$tmp/log" 2>&1; then
+    if samcc -target=x86_64 -c -o "$tmp/bad.o" "$tmp/bad.c" >"$tmp/log" 2>&1; then
         fail "$what was accepted"
     fi
     grep -q "$message" "$tmp/log" || fail "$what: unexpected message: $(grep -v '^\s' "$tmp/log" | tail -2)"

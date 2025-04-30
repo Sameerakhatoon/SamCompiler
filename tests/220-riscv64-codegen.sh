@@ -11,7 +11,7 @@ tmp=$(mktemp -d /tmp/sam_rv64_asm.XXXXXX)
 trap 'rm -rf "$tmp"' EXIT
 
 asm_for(){
-    "$REPO_ROOT/main" -target=riscv64 "$1" "$tmp/out.s" object >"$tmp/log" 2>&1 || true
+    samcc -target=riscv64 "$1" "$tmp/out.s" object >"$tmp/log" 2>&1 || true
     grep -q "everything compiled fine" "$tmp/log" || fail "$1 did not compile: $(tail -2 "$tmp/log")"
     cat "$tmp/out.s"
 }

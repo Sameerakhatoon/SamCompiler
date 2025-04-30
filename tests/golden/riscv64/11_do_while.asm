@@ -27,7 +27,6 @@ mv a1, a0
 ld a0, 0(sp)
 addi sp, sp, 16
 sw a0, 0(a1)
-.Lentry_point_1:
 .Ldo_while_start_3:
 addi a0, s0, -4
 lw a0, 0(a0)
@@ -40,6 +39,7 @@ mv t3, a0
 mv a0, a1
 mv a1, t3
 sw a0, 0(a1)
+.Lentry_point_1:
 addi a0, s0, -4
 lw a0, 0(a0)
 li a1, 4

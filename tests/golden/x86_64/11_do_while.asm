@@ -21,7 +21,6 @@ lea rax, [rbp-4]
 mov rcx, rax
 pop rax
 mov dword [rcx], eax
-.entry_point_1:
 .do_while_start_3:
 lea rax, [rbp-4]
 movsxd rax, dword [rax]
@@ -32,6 +31,7 @@ mov rcx, rax
 lea rax, [rbp-4]
 xchg rax, rcx
 mov dword [rcx], eax
+.entry_point_1:
 lea rax, [rbp-4]
 movsxd rax, dword [rax]
 mov rcx, 4

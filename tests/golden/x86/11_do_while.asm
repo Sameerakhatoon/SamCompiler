@@ -17,7 +17,6 @@ add esi, _GLOBAL_OFFSET_TABLE_+$$-.pic_base wrt ..gotpc
 push dword 0
 pop eax
 mov dword [ebp-4], eax
-.entry_point_1:
 .do_while_start_3:
 push dword [ebp-4]
 push dword 1
@@ -27,6 +26,7 @@ add eax, ecx
 push eax
 pop eax
 mov dword [ebp-4], eax
+.entry_point_1:
 push dword [ebp-4]
 push dword 4
 pop ecx

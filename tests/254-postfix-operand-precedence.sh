@@ -24,7 +24,7 @@ int main(void){
     return x + y + z + w;           /* 54 */
 }
 EOF
-./main -target=x86_64 "$tmp/p.c" "$tmp/p" >/dev/null 2>&1 || fail "the program did not compile"
+samcc -target=x86_64 "$tmp/p.c" "$tmp/p" >/dev/null 2>&1 || fail "the program did not compile"
 rc=0
 "$tmp/p" || rc=$?
 assert_eq 54 "$rc" "exit status"

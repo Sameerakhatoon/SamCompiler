@@ -20,10 +20,10 @@ int main() {
 }
 EOF
 
-"$REPO_ROOT/main" "$src" "$asm" object >/dev/null 2>&1 || true
+samcc "$src" "$asm" object >/dev/null 2>&1 || true
 # The asm is no longer echoed to stdout:
 # read it from the output file.
-out=$("$REPO_ROOT/main" "$src" "$asm" object 2>&1 || true; cat "$asm")
+out=$(samcc "$src" "$asm" object 2>&1 || true; cat "$asm")
 case "$out" in
     *"sete al"*|*"sete  al"*) ;;
     *) fail "expected sete al instruction emitted for !0; got: $out" ;;

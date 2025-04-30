@@ -22,7 +22,7 @@ int main(void){
 }
 EOF
 for t in x86 x86_64; do
-    ./main -target=$t "$tmp/d.c" "$tmp/d_$t" >/dev/null 2>&1 || fail "$t: did not compile"
+    samcc -target=$t "$tmp/d.c" "$tmp/d_$t" >/dev/null 2>&1 || fail "$t: did not compile"
     rc=0
     "$tmp/d_$t" || rc=$?
     assert_eq 19 "$rc" "$t exit status"

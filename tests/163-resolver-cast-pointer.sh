@@ -42,7 +42,7 @@ EOF
 
 # The asm is no longer echoed to stdout:
 # read it from the output file.
-out=$("$REPO_ROOT/main" "$src" "$asm" object 2>&1 || true; cat "$asm")
+out=$(samcc "$src" "$asm" object 2>&1 || true; cat "$asm")
 # Confirm we reached codegen (no "Compile failed" / no resolver crash).
 case "$out" in
     *"everything compiled fine"*|*"Issue assemblign"*) ;;
