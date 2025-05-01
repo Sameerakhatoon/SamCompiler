@@ -1789,8 +1789,14 @@ static void codegen_generate_global_variable_for_primitive(struct node* node){
     // as the i386 backend does, so a plain load or store of it is one
     // access. Other scalar globals keep the packed layout the locked
     // golden output has.
+    // A size with no lock-free access (an _Atomic struct of 24 bytes, say)
+    // keeps its type's alignment: NASM wants a power of two.
     if(datatype_is_atomic(&node->var.type) && variable_size(node) > DATA_SIZE_BYTE){
-        asm_push("align %lu, db 0", (unsigned long)variable_size(node));
+        unsigned long size = (unsigned long)variable_size(node);
+        unsigned long align = size <= 16 && (size & (size - 1)) == 0 ? size : (unsigned long)datatype_alignment(&node->var.type);
+        if(align > 1){
+            asm_push("align %lu, db 0", align);
+        }
     }
     asm_push("%s: %s %s", codegen_symbol(node->var.name),
         asm_keyword_for_size(variable_size(node), tmp_buf), value);

@@ -930,6 +930,10 @@ struct resolver_entity* resolver_follow_unary_address(struct resolver_process* r
     result->flags |= RESOLVER_RESULT_FLAG_DOES_GET_ADDRESS;
     resolver_follow_part(resolver, node->unary.operand, result);
     struct resolver_entity* last_entity = resolver_result_peek(result);
+    if(!last_entity){
+        // `&(x == 1)`, `&(x + 1)`: no object to take the address of.
+        compiler_error(resolver->compiler, "Cannot take the address of an rvalue\n");
+    }
     struct resolver_entity* addr = resolver_create_new_unary_get_address_entity(resolver, result, &last_entity->dtype, node, last_entity->scope, last_entity->offset);
     resolver_result_entity_push(result, addr);
     return addr;
