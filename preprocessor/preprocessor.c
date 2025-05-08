@@ -1541,7 +1541,123 @@ void preprocessor_macro_function_push_something(struct compile_process *compiler
     }
 }
 
-void preprocessor_handle_function_argument_to_string(struct compile_process *compiler, struct vector *src_vec, struct vector *value_vec_target, struct preprocessor_definition *definition, struct preprocessor_function_arguments *arguments)
+// A string or character value written back as C source, for a literal
+// the preprocessor made (its token has no spelling).
+static void preprocessor_spell_escaped(struct buffer *out, const char *value, char quote)
+{
+    buffer_write(out, quote);
+    for (const char *c = value; *c; c++)
+    {
+        unsigned char u = (unsigned char)*c;
+        if (u == '\\' || u == (unsigned char)quote)
+        {
+            buffer_write(out, '\\');
+            buffer_write(out, *c);
+        }
+        else if (u == '\n')
+        {
+            buffer_printf(out, "\\n");
+        }
+        else if (u < 32 || u == 127)
+        {
+            buffer_printf(out, "\\%03o", u);
+        }
+        else
+        {
+            buffer_write(out, *c);
+        }
+    }
+    buffer_write(out, quote);
+}
+
+// One token as # spells it (C11 6.10.3.2p2): as written and, with
+// `escape`, a \ put before each " and \ of a string literal or
+// character constant. Without it, the value of the literal # makes.
+static void preprocessor_stringify_token(struct buffer *out, struct token *token, bool escape)
+{
+    struct buffer *spelled = NULL;
+    const char *text = token->spelling;
+    if (!text)
+    {
+        switch (token->type)
+        {
+        case TOKEN_TYPE_IDENTIFIER:
+        case TOKEN_TYPE_KEYWORD:
+        case TOKEN_TYPE_OPERATOR:
+            text = token->sval;
+            break;
+        case TOKEN_TYPE_SYMBOL:
+            buffer_write(out, token->cval);
+            return;
+        case TOKEN_TYPE_STRING:
+            spelled = buffer_create();
+            preprocessor_spell_escaped(spelled, token->sval ? token->sval : "", '"');
+            text = buffer_ptr(spelled);
+            break;
+        case TOKEN_TYPE_NUMBER:
+            spelled = buffer_create();
+            if (token->num.flags & NUMBER_FLAG_LONG_DOUBLE)
+            {
+                buffer_printf(spelled, "%sL", token->num.text);
+            }
+            else if (token->num.flags & NUMBER_FLAG_FLOATING)
+            {
+                double value;
+                memcpy(&value, &token->llnum, sizeof(value));
+                buffer_printf(spelled, "%a%s", value, (token->num.flags & NUMBER_FLAG_FLOAT) ? "f" : "");
+            }
+            else
+            {
+                buffer_printf(spelled, "%llu%s%s", token->llnum, (token->num.flags & NUMBER_FLAG_UNSIGNED) ? "u" : "", (token->num.flags & NUMBER_FLAG_LONG) ? "l" : "");
+            }
+            text = buffer_ptr(spelled);
+            break;
+        default:
+            return;
+        }
+    }
+    bool literal = escape && (token->type == TOKEN_TYPE_STRING || token->type == TOKEN_TYPE_NUMBER);
+    for (const char *c = text; *c; c++)
+    {
+        if (literal && (*c == '"' || *c == '\\'))
+        {
+            buffer_write(out, '\\');
+        }
+        buffer_write(out, *c);
+    }
+    if (spelled)
+    {
+        buffer_free(spelled);
+    }
+}
+
+// The text of the string literal #x makes of an argument: its tokens
+// spelled one after another, one space where there was whitespace (a
+// newline or a comment counts) between two of them, none before the
+// first or after the last (C11 6.10.3.2p2).
+static void preprocessor_stringify_tokens(struct buffer *out, struct vector *tokens, bool escape)
+{
+    bool written = false;
+    bool space = false;
+    for (int i = 0; i < vector_count(tokens); i++)
+    {
+        struct token *token = vector_at(tokens, i);
+        if (token->type == TOKEN_TYPE_NEWLINE || token->type == TOKEN_TYPE_COMMENT)
+        {
+            space = true;
+            continue;
+        }
+        if (written && space)
+        {
+            buffer_write(out, ' ');
+        }
+        preprocessor_stringify_token(out, token, escape);
+        written = true;
+        space = token->whitespace;
+    }
+}
+
+void preprocessor_handle_function_argument_to_string(struct compile_process *compiler, struct token *hash_token, struct vector *src_vec, struct vector *value_vec_target, struct preprocessor_definition *definition, struct preprocessor_function_arguments *arguments)
 {
     struct token *next_token = vector_peek(src_vec);
     if (!next_token || next_token->type != TOKEN_TYPE_IDENTIFIER)
@@ -1561,11 +1677,22 @@ void preprocessor_handle_function_argument_to_string(struct compile_process *com
         compiler_error(compiler, "BUG: argument exists but failed to pull");
     }
 
-    struct token *first_token_for_argument = vector_peek_at(argument->tokens, 0);
-    // Lets create a string token
+    // the string is spelled from the argument's tokens as
+    // written. It was the text the lexer recorded after the macro's (,
+    // which took the ) of an enclosing call (`strlen(STR(abc))` gave
+    // "abc)"), stopped at a nested ( (`STR(f(2))` gave "f("), and was
+    // NULL for tokens from a macro's replacement (`XSTR(TWO)` crashed).
+    struct buffer *value = buffer_create();
+    preprocessor_stringify_tokens(value, argument->tokens, false);
+    struct buffer *spelling = buffer_create();
+    buffer_write(spelling, '"');
+    preprocessor_stringify_tokens(spelling, argument->tokens, true);
+    buffer_write(spelling, '"');
     struct token str_token = {0};
     str_token.type = TOKEN_TYPE_STRING;
-    str_token.sval = first_token_for_argument->between_arguments;
+    str_token.pos = hash_token->pos;
+    str_token.sval = buffer_ptr(value);
+    str_token.spelling = buffer_ptr(spelling);
     vector_push(value_vec_target, &str_token);
 }
 
@@ -1605,6 +1732,7 @@ static void preprocessor_match_macro_arguments(struct compile_process *compiler,
             struct token comma = {};
             comma.type = TOKEN_TYPE_OPERATOR;
             comma.sval = ",";
+            comma.whitespace = preprocessor_function_argument_at(arguments, i - 1)->comma_whitespace;
             vector_push(rest.tokens, &comma);
         }
         preprocessor_function_argument_push_raw_to_vec(preprocessor_function_argument_at(arguments, i), rest.tokens);
@@ -1664,7 +1792,7 @@ int preprocessor_macro_function_execute(struct compile_process *compiler, const 
     {
         if (token_is_symbol(token, '#'))
         {
-            preprocessor_handle_function_argument_to_string(compiler, definition_token_vec, value_vec_target, definition, arguments);
+            preprocessor_handle_function_argument_to_string(compiler, token, definition_token_vec, value_vec_target, definition, arguments);
             token = vector_peek(definition_token_vec);
             continue;
         }
@@ -2439,6 +2567,8 @@ struct token *preprocessor_handle_identifier_macro_call_argument_parse(struct co
     if (token_is_operator(token, ","))
     {
         preprocessor_handle_identifier_macro_call_argument(arguments, value_vec);
+        struct preprocessor_function_argument *ended = vector_back(arguments->arguments);
+        ended->comma_whitespace = token->whitespace;
         // Clear the value vector ready for next argument
         vector_clear(value_vec);
         token = vector_peek(src_vec);
@@ -2464,6 +2594,19 @@ struct preprocessor_function_arguments *preprocessor_handle_identifier_macro_cal
 
     vector_free(value_vec);
     return arguments;
+}
+
+// the whitespace after a macro use (its name, or the ) of a
+// call) is after the last token of the expansion, not whatever followed
+// that token in the #define: `XSTR(E c)` with `#define E a + b` is
+// "a + b c". Only # and -E look at it.
+static void preprocessor_expansion_whitespace(struct vector *dst_vec, int before, bool whitespace)
+{
+    if (vector_count(dst_vec) > before)
+    {
+        struct token *last = vector_back(dst_vec);
+        last->whitespace = whitespace;
+    }
 }
 
 int preprocessor_handle_identifier_for_token_vector(struct compile_process *compiler, struct vector *src_vec, struct vector *dst_vec, struct token *token)
@@ -2503,17 +2646,23 @@ int preprocessor_handle_identifier_for_token_vector(struct compile_process *comp
             return -1;
         }
         struct preprocessor_function_arguments *arguments = preprocessor_handle_identifier_macro_call_arguments(compiler, src_vec);
+        struct token *right_bracket = vector_peek_at(src_vec, src_vec->pindex - 1);
+        bool after = right_bracket && right_bracket->whitespace;
         const char *function_name = token->sval;
+        int before = vector_count(dst_vec);
         preprocessor_macro_function_execute(compiler, function_name, arguments, 0, dst_vec);
+        preprocessor_expansion_whitespace(dst_vec, before, after);
         return 0;
     }
 
     // The replacement is a vector shared by every use of the macro, so
     // rescan a copy: a nested use would move its peek pointer.
     struct vector *definition_val = vector_clone(preprocessor_definition_value(definition));
+    int before = vector_count(dst_vec);
     definition->expanding++;
     preprocessor_token_vec_push_src_resolve_definitions(compiler, definition_val, dst_vec);
     definition->expanding--;
+    preprocessor_expansion_whitespace(dst_vec, before, token->whitespace);
     return 0;
 }
 int preprocessor_handle_identifier(struct compile_process *compiler, struct token *token)

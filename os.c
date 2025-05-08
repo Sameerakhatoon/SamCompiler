@@ -274,7 +274,17 @@ int os_run_forked(int (*fn)(void* arg), void* arg){
         exit(fn(arg));
     }
     int status = 0;
-    if(waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0){
+    if(waitpid(pid, &status, 0) < 0){
+        fprintf(stderr, "error: cannot wait for the compile: %s\n", strerror(errno));
+        return 1;
+    }
+    // a compile that crashed made the driver exit 1 with no
+    // message at all (`XSTR(TWO)` did).
+    if(WIFSIGNALED(status)){
+        fprintf(stderr, "error: internal compiler error: the compile was killed by signal %d\n", WTERMSIG(status));
+        return 1;
+    }
+    if(!WIFEXITED(status) || WEXITSTATUS(status) != 0){
         return 1;
     }
     return 0;

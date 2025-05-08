@@ -182,8 +182,12 @@ struct token {
     // For tokens inside parens, e.g. "(5+10+20)", the original substring.
     const char* between_brackets;
 
-    // Anything between function call arguments. ABC(hello world)
-    const char* between_arguments;
+    // the token as written, for a number, a string literal or
+    // a character constant (`0x10`, `L"a\"b"`, `'\n'`), whose value
+    // does not give the spelling back. NULL for a token the
+    // preprocessor made, and for the other kinds, whose sval or cval is
+    // the spelling. The # operator spells its argument with it.
+    const char* spelling;
 };
 
 // Forward decls for the lexer types so the function-pointer typedefs below
@@ -216,7 +220,6 @@ struct lex_process {
     // e.g. "((50))".
     int                           current_expression_count;
     struct buffer*                parentheses_buffer;
-    struct buffer*                argument_string_buffer;
     struct lex_process_functions* function;
 
     // Opaque blob owned by the caller; the lexer never touches it.
@@ -429,6 +432,10 @@ struct preprocessor_function_argument {
     // The same tokens with their macros expanded (C11 6.10.3.1); NULL
     // until a macro call fills it. Operands of # and ## use `tokens`.
     struct vector* expanded;
+
+    // the comma after this argument had whitespace after it,
+    // so #__VA_ARGS__ of `F(a, b)` is "a, b" and of `F(a,b)` "a,b".
+    bool comma_whitespace;
 };
 
 struct preprocessor_function_arguments {
