@@ -1246,10 +1246,119 @@ static void codegen_generate_read_modify_write(struct node* node, struct resolve
     }
 }
 
+static struct node* codegen_access_conditional(struct node* node);
+static struct node* codegen_access_with_operand(struct node* path, struct node* conditional, struct node* operand);
+
+// A copy of `like` (its position and bindings) made a unary `op` of
+// `operand`.
+static struct node* codegen_unary_of(struct node* like, const char* op, struct node* operand){
+    struct node* unary = malloc(sizeof(struct node));
+    memcpy(unary, like, sizeof(struct node));
+    unary->type = NODE_TYPE_UNARY;
+    memset(&unary->unary, 0, sizeof(unary->unary));
+    unary->unary.op      = op;
+    unary->unary.operand = operand;
+    if(op_is_indirection(op)){
+        unary->unary.indirection.depth = 1;
+    }
+    return unary;
+}
+
+// a member through an address, `(&x)->m`, is `x.m`. The
+// resolver walked `&x` as an address and then `->` through it as a
+// pointer it had loaded, and the program read or wrote at x's contents
+// (`(&p->in)->t = 1`, and `(c ? &p->in : &q->in)->t` once a conditional
+// is taken apart). A copy of the access chain `node` with each such `->`
+// made a `.`, or node itself when it has none.
+static struct node* codegen_access_through_address(struct node* node){
+    if(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        struct node* inner = codegen_access_through_address(node->parenthesis.exp);
+        if(inner == node->parenthesis.exp){
+            return node;
+        }
+        struct node* copy = malloc(sizeof(struct node));
+        memcpy(copy, node, sizeof(struct node));
+        copy->parenthesis.exp = inner;
+        return copy;
+    }
+    if(node->type != NODE_TYPE_EXPRESSION || !(is_access_node(node) || is_array_node(node))){
+        return node;
+    }
+    struct node* base = node->exp.left;
+    while(base->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        base = base->parenthesis.exp;
+    }
+    bool through_address = S_EQ(node->exp.op, "->") && base->type == NODE_TYPE_UNARY && op_is_address(base->unary.op);
+    struct node* left = codegen_access_through_address(through_address ? base->unary.operand : node->exp.left);
+    if(!through_address && left == node->exp.left){
+        return node;
+    }
+    struct node* copy = malloc(sizeof(struct node));
+    memcpy(copy, node, sizeof(struct node));
+    if(through_address){
+        copy->exp.op = ".";
+    }
+    copy->exp.left = left;
+    return copy;
+}
+
+// an assignment to a member or element of a conditional,
+// `(c ? p : q)->m = v`, is one to `*(c ? &p->m : &q->m)`: the resolver
+// has no entity for a conditional, so the store had no object and the
+// backend crashed (the driver said nothing and exited with 1). It is an
+// lvalue only through a pointer (`->`, `[]`); a member of a struct
+// value, `(c ? s : t).m`, is not one, as in gcc. Any other left operand
+// is returned as it is.
+static struct node* codegen_conditional_lvalue(struct node* node, const char* op){
+    struct node* conditional = codegen_access_conditional(node);
+    if(!conditional){
+        return node;
+    }
+    bool through_pointer = false;
+    for(struct node* path = node; path != conditional; ){
+        if(path->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            path = path->parenthesis.exp;
+            continue;
+        }
+        through_pointer |= S_EQ(path->exp.op, "->") || is_array_node(path);
+        path = path->exp.left;
+    }
+    if(!through_pointer){
+        compiler_error(current_process, "The left operand of %s is a member of a conditional's value, which is not an lvalue\n", op);
+    }
+    struct node* tenary = malloc(sizeof(struct node));
+    memcpy(tenary, conditional->exp.right, sizeof(struct node));
+    tenary->tenary.true_node  = codegen_unary_of(node, "&",
+        codegen_access_through_address(codegen_access_with_operand(node, conditional, conditional->exp.right->tenary.true_node)));
+    tenary->tenary.false_node = codegen_unary_of(node, "&",
+        codegen_access_through_address(codegen_access_with_operand(node, conditional, conditional->exp.right->tenary.false_node)));
+    struct node* addresses = malloc(sizeof(struct node));
+    memcpy(addresses, conditional, sizeof(struct node));
+    addresses->exp.right = tenary;
+    struct node* parentheses = malloc(sizeof(struct node));
+    memcpy(parentheses, node, sizeof(struct node));
+    parentheses->type = NODE_TYPE_EXPRESSION_PARENTHESES;
+    memset(&parentheses->parenthesis, 0, sizeof(parentheses->parenthesis));
+    parentheses->parenthesis.exp = addresses;
+    return codegen_unary_of(node, "*", parentheses);
+}
+
 static void codegen_generate_assignment_part(struct node* node, const char* op, struct history* history, int assign_flags){
+    node = codegen_conditional_lvalue(codegen_access_through_address(node), op);
     struct resolver_result* result = resolver_follow(current_process->resolver, node);
-    if(!resolver_result_ok(result)){
+    // No entity at the end is no object to store to (it crashed below).
+    if(!resolver_result_ok(result) || !result->last_entity){
         compiler_error(current_process, "The left operand of %s cannot be assigned to\n", op);
+    }
+    // `*(c ? a : b) = v`: the indirection of an expression the resolver
+    // does not follow had no type, and the store came out as `mov (null)
+    // [edx], (null)`, which only the assembler refused.
+    // x87_type gives any expression its C type.
+    if(datatype_element_size(&result->last_entity->dtype) == 0){
+        struct datatype t = x87_type(node);
+        if(datatype_element_size(&t) != 0){
+            result->last_entity->dtype = t;
+        }
     }
     if(S_EQ(op, "=")){
         codegen_generate_plain_assignment(node, result, history, assign_flags);
@@ -2408,6 +2517,11 @@ static void codegen_generate_exp_node(struct node* node, struct history* history
     struct datatype conditional_type;
     if(codegen_struct_conditional(node, &conditional_type)){
         codegen_generate_struct_conditional(node, &conditional_type, history);
+        return;
+    }
+    struct node* direct = codegen_access_through_address(node);
+    if(direct != node){
+        codegen_generate_expressionable(direct, history);
         return;
     }
     struct node* conditional = codegen_access_conditional(node);
@@ -4598,7 +4712,7 @@ static void codegen_global_label(struct node* node){
 
 static void codegen_generate_global_initializer(struct node* node){
     codegen_global_label(node);
-    asm_push("align %lu, db 0", (unsigned long)datatype_alignment(&node->var.type));
+    asm_push("align %lu, db 0", (unsigned long)variable_alignment(node));
     asm_push("%s:", codegen_symbol(node->var.name));
     codegen_emit_initializer(node, &(struct initializer_emitter){
         .value        = codegen_init_value,
@@ -4614,7 +4728,7 @@ static void codegen_generate_global_initializer(struct node* node){
 // global alias (tls_alias), which NASM takes in a TLS reference also
 // when the variable is static. The data section continues after it.
 static void codegen_generate_thread_local(struct node* node){
-    unsigned long align = datatype_alignment(&node->var.type);
+    unsigned long align = variable_alignment(node);
     const char* alias = codegen_symbol(tls_alias(current_process, node->var.name));
     asm_push(node->var.val ? "section .tdata progbits alloc write tls" : "section .tbss nobits alloc write tls");
     asm_push(node->var.val ? "align %lu, db 0" : "alignb %lu", align);
@@ -4660,6 +4774,10 @@ static void codegen_generate_global_variable(struct node* node){
         }
         codegen_new_scope_entity(node, 0, 0);
         return;
+    }
+    // _Alignas, of the variable or a member of its type.
+    if(variable_alignas(node)){
+        asm_push("align %lu, db 0", (unsigned long)variable_alignas(node));
     }
     codegen_global_label(node);
     // ch179: arrays go through their own emit path and also register

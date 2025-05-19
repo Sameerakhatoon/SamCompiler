@@ -1736,7 +1736,7 @@ static void codegen_init_zero(size_t count){
 
 static void codegen_generate_global_initializer(struct node* node){
     codegen_global_label(node);
-    asm_push(".balign %lu", (unsigned long)datatype_alignment(&node->var.type));
+    asm_push(".balign %lu", (unsigned long)variable_alignment(node));
     asm_push("%s:", node->var.name);
     codegen_emit_initializer(node, &(struct initializer_emitter){
         .value        = codegen_init_value,
@@ -1761,7 +1761,7 @@ static void codegen_generate_global_variable(struct node* node){
     if(!node->var.val){
         asm_push(".pushsection .tbss,\"awT\",@nobits");
         codegen_global_label(node);
-        asm_push(".balign %lu", (unsigned long)datatype_alignment(&node->var.type));
+        asm_push(".balign %lu", (unsigned long)variable_alignment(node));
         asm_push("%s: .zero %lu", node->var.name, (unsigned long)variable_size(node));
         asm_push(".popsection");
         codegen_new_scope_entity(node, 0, 0);
@@ -1782,6 +1782,10 @@ static void codegen_generate_global_variable_data(struct node* node){
     if(node->var.type.flags & DATATYPE_FLAG_IS_EXTERN){
         codegen_new_scope_entity(node, 0, 0);
         return;
+    }
+    // _Alignas, of the variable or a member of its type.
+    if(variable_alignas(node)){
+        asm_push(".balign %lu", (unsigned long)variable_alignas(node));
     }
     codegen_global_label(node);
     if(node->var.type.flags & (DATATYPE_FLAG_IS_ARRAY | DATATYPE_FLAG_IS_POINTER)){

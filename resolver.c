@@ -928,6 +928,16 @@ struct resolver_entity* resolver_follow_unary_address(struct resolver_process* r
     // ch233: mark the result as "we want the address" so any inner
     // `->` doesn't try to indirect through the address-of operand.
     result->flags |= RESOLVER_RESULT_FLAG_DOES_GET_ADDRESS;
+    // A cast is not an lvalue (C11 6.5.4): `&((char)x)` followed the
+    // cast to x and took x's address as a char's, and the program read
+    // through it at run time.
+    struct node* operand = node->unary.operand;
+    while(operand->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        operand = operand->parenthesis.exp;
+    }
+    if(operand->type == NODE_TYPE_CAST){
+        compiler_error(resolver->compiler, "Cannot take the address of an rvalue\n");
+    }
     resolver_follow_part(resolver, node->unary.operand, result);
     struct resolver_entity* last_entity = resolver_result_peek(result);
     if(!last_entity){

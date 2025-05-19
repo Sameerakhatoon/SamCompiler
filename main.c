@@ -249,7 +249,15 @@ struct main_compile_job {
 
 static int main_compile_job_run(void* arg){
     struct main_compile_job* job = arg;
-    return compile_file(job->input, job->output, job->flags) == COMPILER_FILE_COMPILED_OK ? 0 : 1;
+    if(compile_file(job->input, job->output, job->flags) == COMPILER_FILE_COMPILED_OK){
+        return 0;
+    }
+    // A failure is reported where it happens; one that was not still
+    // fails, but not without a word.
+    if(!compiler_error_count()){
+        fprintf(stderr, "internal compiler error: compiling %s failed without a diagnostic\n", job->input);
+    }
+    return 1;
 }
 
 // Without fork (Windows, or SAMCC_NO_FORK set) the driver runs itself

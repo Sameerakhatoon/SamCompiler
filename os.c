@@ -278,10 +278,13 @@ int os_run_forked(int (*fn)(void* arg), void* arg){
         fprintf(stderr, "error: cannot wait for the compile: %s\n", strerror(errno));
         return 1;
     }
-    // a compile that crashed made the driver exit 1 with no
-    // message at all (`XSTR(TWO)` did).
+    // A child that crashed printed nothing: the driver failed with 1 and
+    // no word (`XSTR(TWO)` did). (Signal 11 is
+    // SIGSEGV on every Linux target; <signal.h> is left out for the
+    // self-hosted build.)
     if(WIFSIGNALED(status)){
-        fprintf(stderr, "error: internal compiler error: the compile was killed by signal %d\n", WTERMSIG(status));
+        fprintf(stderr, "error: internal compiler error: the compiler was killed by signal %d%s\n",
+            WTERMSIG(status), WTERMSIG(status) == 11 ? " (a segmentation fault)" : "");
         return 1;
     }
     if(!WIFEXITED(status) || WEXITSTATUS(status) != 0){

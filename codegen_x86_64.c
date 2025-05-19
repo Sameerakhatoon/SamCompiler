@@ -1848,7 +1848,7 @@ static void codegen_init_zero(size_t count){
 
 static void codegen_generate_global_initializer(struct node* node){
     codegen_global_label(node);
-    asm_push("align %lu, db 0", (unsigned long)datatype_alignment(&node->var.type));
+    asm_push("align %lu, db 0", (unsigned long)variable_alignment(node));
     asm_push("%s:", codegen_symbol(node->var.name));
     codegen_emit_initializer(node, &(struct initializer_emitter){
         .value        = codegen_init_value,
@@ -1865,7 +1865,7 @@ static void codegen_generate_global_initializer(struct node* node){
 // Accesses go through the variable's hidden alias (tls_alias), which
 // NASM takes in a TLS reference also when the variable is static.
 static void codegen_generate_thread_local(struct node* node){
-    unsigned long align = datatype_alignment(&node->var.type);
+    unsigned long align = variable_alignment(node);
     const char* alias = codegen_symbol(tls_alias(current_process, node->var.name));
     asm_push(node->var.val ? "section .tdata progbits alloc write tls" : "section .tbss nobits alloc write tls");
     asm_push(node->var.val ? "align %lu, db 0" : "alignb %lu", align);
@@ -1906,6 +1906,10 @@ static void codegen_generate_global_variable(struct node* node){
         }
         codegen_new_scope_entity(node, 0, 0);
         return;
+    }
+    // _Alignas, of the variable or a member of its type.
+    if(variable_alignas(node)){
+        asm_push("align %lu, db 0", (unsigned long)variable_alignas(node));
     }
     codegen_global_label(node);
     if(node->var.type.flags & (DATATYPE_FLAG_IS_ARRAY | DATATYPE_FLAG_IS_POINTER)){

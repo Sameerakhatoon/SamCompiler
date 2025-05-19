@@ -9,6 +9,28 @@ size_t variable_size(struct node* var_node){
     return datatype_size(&var_node->var.type);
 }
 
+// a variable's or member's alignment, its type's or the more
+// that _Alignas asked for.
+size_t variable_alignment(struct node* var_node){
+    assert(var_node->type == NODE_TYPE_VARIABLE);
+    size_t align = datatype_alignment(&var_node->var.type);
+    return (size_t)var_node->var.align > align ? (size_t)var_node->var.align : align;
+}
+
+// the alignment a variable needs on top of the layout its
+// target always gave it: what _Alignas asked for the variable, or for a
+// member of its struct or union type (which makes the type that
+// aligned). 0 when there is none, and the variable is laid out as
+// before.
+size_t variable_alignas(struct node* var_node){
+    size_t align = (size_t)var_node->var.align;
+    struct node* body = (var_node->var.type.flags & DATATYPE_FLAG_IS_POINTER) ? 0 : variable_struct_or_union_body_node(var_node);
+    if(body && body->body.has_alignas && body->body.align > align){
+        align = body->body.align;
+    }
+    return align;
+}
+
 // For a struct/union variable, follow the type back to its body node.
 struct node* variable_struct_or_union_body_node(struct node* node){
     if(!node_is_struct_or_union_variable(node) || !node->var.type.struct_node){

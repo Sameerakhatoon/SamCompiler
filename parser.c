@@ -752,24 +752,56 @@ static int parser_typedef_count_pointer_levels(struct vector* tokens){
     return levels;
 }
 
-// Where a type may start: a visible typedef name next becomes its type.
+// C23's typeof and typeof_unqual, and gcc's spellings of them.
+// They are identifiers to the lexer, as `typeof` is an ordinary name
+// before C23.
+static bool parser_is_typeof_unqual(const char* name){
+    return S_EQ(name, "typeof_unqual") || S_EQ(name, "__typeof_unqual__") || S_EQ(name, "__typeof_unqual");
+}
+
+static bool parser_is_typeof(const char* name){
+    return S_EQ(name, "typeof") || S_EQ(name, "__typeof__") || S_EQ(name, "__typeof")
+        || parser_is_typeof_unqual(name);
+}
+
+// The most tokens a typeof may add to the token vector: its type's
+// tokens less those of `typeof ( operand )` (parser_typedef_reserve
+// makes the room).
+#define PARSER_TYPEOF_ROOM 64
+
+// The `remove` tokens at `at` (the next ones) give way to the tokens of
+// a type, as a typedef name's: the `*`s and the position are noted for
+// the declarators that follow.
+static void parser_type_splice(int at, int remove, struct vector* tokens, bool function){
+    parser_typedef_pointer_levels = parser_typedef_count_pointer_levels(tokens);
+    parser_typedef_stars_seen = 0;
+    for(int i = vector_count(tokens) - 1; i >= 0 && token_is_operator(vector_at(tokens, i), "*"); i--){
+        parser_typedef_stars_seen++;
+    }
+    parser_typedef_stars_end = at + vector_count(tokens);
+    parser_typedef_was_function = function;
+    parser_typedef_expand_at = at;
+    parser_splice(at, remove, tokens);
+}
+
+static bool parser_typeof_next(void);
+static void parser_typeof_expand(void);
+
+// Where a type may start: a visible typedef name next becomes its type,
+// and so does `typeof(...)`.
 static bool parser_typedef_expand(void){
+    if(parser_typeof_next()){
+        parser_typeof_expand();
+        return true;
+    }
     struct token* token = token_peek_next();
     struct parser_enumerator* e = token_is_identifier(token) ? parser_typedef_find(token->sval) : 0;
     if(!e){
         return false;
     }
-    parser_typedef_pointer_levels = parser_typedef_count_pointer_levels(e->tokens);
-    parser_typedef_stars_seen = 0;
-    for(int i = vector_count(e->tokens) - 1; i >= 0 && token_is_operator(vector_at(e->tokens, i), "*"); i--){
-        parser_typedef_stars_seen++;
-    }
     int at = current_process->token_vec->pindex;
-    parser_typedef_stars_end = at + vector_count(e->tokens);
-    parser_typedef_was_function = e->function;
-    parser_typedef_expand_at = at;
     // `fn* p` for a function type fn is the pointer its tokens already are.
-    parser_splice(at, e->function && parser_token_after_is_star(current_process->token_vec, at) ? 2 : 1, e->tokens);
+    parser_type_splice(at, e->function && parser_token_after_is_star(current_process->token_vec, at) ? 2 : 1, e->tokens, e->function);
     return true;
 }
 
@@ -804,7 +836,7 @@ static void parser_typedef_reserve(void){
         struct token* token = vector_at(vec, i);
         if(token_is_identifier(token)){
             struct parser_typedef_length* known = *parser_typedef_length_slot(table, token->sval);
-            extra += known ? known->length : 0;
+            extra += known ? known->length : parser_is_typeof(token->sval) ? PARSER_TYPEOF_ROOM : 0;
             continue;
         }
         if(!token_is_keyword(token, "typedef")){
@@ -831,7 +863,9 @@ static void parser_typedef_reserve(void){
             for(int k = 0; k < vector_count(list); k++){
                 struct token* t = vector_at(list, k);
                 struct parser_typedef_length* known = token_is_identifier(t) ? *parser_typedef_length_slot(table, t->sval) : 0;
-                length += k == at ? 0 : known ? known->length : 1;
+                // A typeof among the tokens is resolved when the typedef
+                // is declared, to at most PARSER_TYPEOF_ROOM more.
+                length += k == at ? 0 : known ? known->length : token_is_identifier(t) && parser_is_typeof(t->sval) ? PARSER_TYPEOF_ROOM + 1 : 1;
             }
             if(parser_typedef_names_function(list, at)){
                 length += 3;
@@ -1561,6 +1595,9 @@ static void parse_for_tenary(struct history* history){
 static void parse_for_cast(void){
     struct datatype dtype = {0};
     parse_datatype(&dtype);
+    if(dtype.align_as){
+        compiler_error(current_process, "_Alignas cannot be given in a cast or a compound literal's type\n");
+    }
     if(parser_type_vla_dims){
         compiler_error(current_process, "A cast to a variable-length array type is not supported\n");
     }
@@ -1700,7 +1737,8 @@ static bool is_keyword_variable_modifier(const char* val){
         || S_EQ(val, "volatile") || S_EQ(val, "register")
         || S_EQ(val, "inline")   || S_EQ(val, "auto")
         || S_EQ(val, "restrict") || S_EQ(val, "_Atomic")
-        || S_EQ(val, "_Thread_local") || S_EQ(val, "__thread");
+        || S_EQ(val, "_Thread_local") || S_EQ(val, "__thread")
+        || S_EQ(val, "_Alignas");
 }
 
 // `_Atomic (`: the atomic type specifier, `_Atomic(int*)`, rather than
@@ -1719,6 +1757,8 @@ static bool parser_atomic_specifier_next(void){
 // Consume a run of modifier keywords, OR-ing matching DATATYPE_FLAG_*s
 // into dtype. Stops at the first non-modifier keyword. Returns whether
 // `signed` or `unsigned` was among them.
+static void parse_alignas_specifier(struct datatype* dtype);
+
 static bool parse_datatype_modifiers(struct datatype* dtype){
     bool sign_given = false;
     struct token* token = token_peek_next();
@@ -1727,6 +1767,12 @@ static bool parse_datatype_modifiers(struct datatype* dtype){
             break;
         }
 
+        if(S_EQ(token->sval, "_Alignas")){
+            // it reads its own parentheses.
+            parse_alignas_specifier(dtype);
+            token = token_peek_next();
+            continue;
+        }
         if(S_EQ(token->sval, "_Atomic")){
             // the qualifier makes the object at the pointer
             // depth read so far atomic: `_Atomic int *p` is a pointer to
@@ -2306,8 +2352,10 @@ static void parse_atomic_type_specifier(struct datatype* dtype){
     parser_ignore_int(&inner);
     expect_sym(')');
     int given = dtype->flags & ~DATATYPE_FLAG_IS_SIGNED;
+    int align_as = dtype->align_as;
     *dtype = inner;
     dtype->flags |= given;
+    dtype->align_as = align_as;
     dtype->atomic_level = inner.pointer_depth + 1;
     int depth = parser_get_pointer_depth();
     if(depth > 0){
@@ -2504,6 +2552,82 @@ static int parse_datatype_stars(struct datatype* dtype){
 
 static void parse_datatype(struct datatype* dtype){
     parser_datatype_typedef_stars = parse_datatype_stars(dtype);
+}
+
+static size_t parser_alignof_value(struct datatype* dtype, bool gnu);
+static struct array_brackets* parse_array_brackets(struct history* history);
+
+// The largest alignment _Alignas takes (gcc's limit is far above; this
+// one keeps the stack and data directives sane).
+#define PARSER_ALIGNAS_MAX 65536
+
+// `_Alignas(constant-expression)` or `_Alignas(type-name)`
+// (C11 6.7.5), one of the declaration specifiers: the object declared
+// gets at least that alignment (the type's, for a type name), the
+// largest when there are several. 0 asks for nothing. The type name is
+// read with the declaration's own type half read, so the parser state
+// that type keeps is put back afterwards.
+static void parse_alignas_specifier(struct datatype* dtype){
+    expect_keyword("_Alignas");
+    expect_op("(");
+    size_t align = 0;
+    parser_typedef_expand();
+    struct token* next = token_peek_next();
+    if(next && next->type == TOKEN_TYPE_KEYWORD
+       && (keyword_is_datatype(next->sval) || is_keyword_variable_modifier(next->sval))){
+        int stars_seen = parser_typedef_stars_seen, stars_end = parser_typedef_stars_end;
+        bool was_function = parser_typedef_was_function;
+        int expand_at = parser_typedef_expand_at, pointer_levels = parser_typedef_pointer_levels;
+        int type_stars = parser_type_typedef_stars, datatype_stars = parser_datatype_typedef_stars;
+        bool type_function = parser_type_typedef_function, datatype_function = parser_datatype_typedef_function;
+        int datatype_end = parser_datatype_typedef_end;
+        bool sign_given = parser_sign_given, sign_settled = parser_type_sign_settled, type_sign = parser_type_sign_given;
+        bool was_enum = parser_last_datatype_was_enum;
+        struct datatype type;
+        parse_datatype(&type);
+        struct token* no_name = 0;
+        parse_function_pointer_declarator(&type, &no_name);
+        if(token_next_is_operator("[")){
+            // The alignment of an array type is its element's.
+            parse_array_brackets(history_begin(0));
+        }
+        if(type.align_as){
+            compiler_error(current_process, "_Alignas cannot be given inside _Alignas\n");
+        }
+        align = parser_alignof_value(&type, false);
+        parser_typedef_stars_seen = stars_seen;
+        parser_typedef_stars_end = stars_end;
+        parser_typedef_was_function = was_function;
+        parser_typedef_expand_at = expand_at;
+        parser_typedef_pointer_levels = pointer_levels;
+        parser_type_typedef_stars = type_stars;
+        parser_datatype_typedef_stars = datatype_stars;
+        parser_type_typedef_function = type_function;
+        parser_datatype_typedef_function = datatype_function;
+        parser_datatype_typedef_end = datatype_end;
+        parser_sign_given = sign_given;
+        parser_type_sign_settled = sign_settled;
+        parser_type_sign_given = type_sign;
+        parser_last_datatype_was_enum = was_enum;
+    } else {
+        parse_expressionable_root(history_begin(HISTORY_FLAG_NO_COMMA_OPERATOR));
+        struct constant value;
+        if(!constant_fold(current_process, node_pop(), &value) || !constant_is_integer(&value)){
+            compiler_error(current_process, "_Alignas needs an integer constant expression or a type name\n");
+        }
+        long long n = (long long)value.value;
+        if(n < 0 || (n & (n - 1)) != 0){
+            compiler_error(current_process, "_Alignas(%lld): an alignment must be a power of two\n", n);
+        }
+        if(n > PARSER_ALIGNAS_MAX){
+            compiler_error(current_process, "_Alignas(%lld) is more than the %d this compiler supports\n", n, PARSER_ALIGNAS_MAX);
+        }
+        align = (size_t)n;
+    }
+    expect_sym(')');
+    if((int)align > dtype->align_as){
+        dtype->align_as = (int)align;
+    }
 }
 
 static struct node* parser_bracket_of(size_t n);
@@ -2962,14 +3086,18 @@ static void make_variable_node(struct datatype* dtype, struct token* name_token,
         name_str = name_token->sval;
     }
     node_create(&(struct node){
-        .type     = NODE_TYPE_VARIABLE,
-        .var.name = name_str,
-        .var.type = *dtype,
-        .var.val  = value_node,
+        .type      = NODE_TYPE_VARIABLE,
+        .var.name  = name_str,
+        .var.type  = *dtype,
+        .var.val   = value_node,
+        .var.align = dtype->align_as,
     });
     // ch97: if the variable references a struct we haven't seen yet,
     // register a fixup to backfill the datatype once parsing finishes.
     struct node* var_node = node_peek_or_null();
+    // _Alignas is the object's, not its type's: `typeof`, a
+    // pointer to it or a copy of the type has the type's alignment.
+    var_node->var.type.align_as = 0;
     if(var_node->var.type.type == DATA_TYPE_STRUCT && !var_node->var.type.struct_node){
         struct datatype_struct_node_fix_private* priv = calloc(1, sizeof(*priv));
         priv->node = var_node;
@@ -2979,6 +3107,33 @@ static void make_variable_node(struct datatype* dtype, struct token* name_token,
             .private = priv,
         });
     }
+}
+
+// The most a local may ask for with _Alignas: what the frame pointer
+// itself is aligned to.
+#define PARSER_LOCAL_ALIGN_MAX 16
+
+// a local _Alignas asked more alignment for is moved further
+// down until its address is a multiple of it. Its offset is from the
+// frame pointer, which is 16-aligned on the 64-bit targets and 8 past
+// that on i386 (the return address and the saved ebp under an esp that
+// was 16-aligned at the call), so that is the most a local can
+// have without realigning the stack.
+static void parser_scope_offset_alignas(struct node* node, bool upward_stack){
+    int align = (int)variable_alignas(node);
+    if(!align || upward_stack){
+        return;
+    }
+    if(align > PARSER_LOCAL_ALIGN_MAX){
+        compiler_error(current_process, "_Alignas(%i) on a local variable is not supported: at most %i (a static one can have more)\n",
+            align, PARSER_LOCAL_ALIGN_MAX);
+    }
+    int bias = current_process->target->pointer_size == DATA_SIZE_DWORD ? 8 : 0;
+    int below = -node->var.aoffset;
+    int rem = ((below - bias) % align + align) % align;
+    int extra = rem ? align - rem : 0;
+    node->var.padding += extra;
+    node->var.aoffset -= extra;
 }
 
 // ch58/73/74: stack-offset computation. Locals grow downward
@@ -3047,6 +3202,7 @@ static void parser_scope_offset_for_stack(struct node* node, struct history* his
     variable_node(node)->var.aoffset = offset + (upward_stack
         ?  variable_node(node)->var.padding
         : -variable_node(node)->var.padding);
+    parser_scope_offset_alignas(node, upward_stack);
 }
 
 // Global vars don't live on the stack; they get offset 0 and the
@@ -3100,7 +3256,7 @@ static void parser_scope_offset_for_structure(struct node* node, struct history*
         return;
     }
     int offset = (end_bits + 7) / 8;
-    int aligned = align_value(offset, (int)datatype_alignment(&node->var.type));
+    int aligned = align_value(offset, (int)variable_alignment(node));
     node->var.padding = aligned - offset;
     node->var.aoffset = aligned;
 }
@@ -3133,6 +3289,21 @@ static void make_variable_node_and_register(struct history* history,
                                             struct node* value_node){
     make_variable_node(dtype, name_token, value_node);
     struct node* var_node = node_pop();
+    // where _Alignas may not be, and what it may not do (C11
+    // 6.7.5p2-4, as gcc).
+    if(var_node->var.align){
+        if(history->flags & HISTORY_FLAG_IS_UPWARD_STACK){
+            compiler_error(current_process, "_Alignas cannot be given to a parameter\n");
+        }
+        if(parser_bitfield_width >= 0){
+            compiler_error(current_process, "_Alignas cannot be given to a bit-field\n");
+        }
+        if((size_t)var_node->var.align < datatype_alignment(&var_node->var.type)){
+            compiler_error(current_process, "_Alignas(%i) cannot make %s less aligned than its type (%lu)\n",
+                var_node->var.align, name_token ? name_token->sval : "the object",
+                (unsigned long)datatype_alignment(&var_node->var.type));
+        }
+    }
     // A member's name is in its struct's own name space.
     if(!(history->flags & (HISTORY_FLAG_INSIDE_STRUCTURE | HISTORY_FLAG_INSIDE_UNION))){
         parser_enumerator_hide(name_token ? name_token->sval : 0);
@@ -4177,6 +4348,9 @@ static struct parser_vla_info* parser_vla_info_new(struct vector* dims, size_t e
 // its first one back at its end, and break and continue too.
 static void parser_declare_vla(struct datatype* dtype, struct token* name_token, struct vector* dims, struct history* history){
     int number = parser_vla_number++;
+    if(dtype->align_as){
+        compiler_error(current_process, "_Alignas on the variable-length array %s is not supported\n", name_token->sval);
+    }
     if(token_next_is_operator("=")){
         compiler_error(current_process, "The variable-length array %s cannot be initialized\n", name_token->sval);
     }
@@ -5123,6 +5297,9 @@ static struct vector* parse_identifier_list_parameters(struct history* history){
 
 static void parse_function(struct datatype* ret_type, struct token* name_token, struct history* history){
     struct vector* arguments_vector = 0;
+    if(ret_type->align_as){
+        compiler_error(current_process, "_Alignas cannot be given to a function (%s)\n", name_token->sval);
+    }
     // A function inside a function body, defined (a GNU extension) or
     // only declared (C allows a block-scope prototype), became a body
     // statement that codegen segfaulted on.
@@ -5297,12 +5474,21 @@ static bool parse_typedef(void){
     bool sized = false;
     int depth = 0;
     while(true){
+        // `typedef typeof(x) T;` is the type typeof gives here.
+        if(parser_typeof_next()){
+            parser_typeof_expand();
+            continue;
+        }
         struct token* token = token_peek_next();
         if(!token){
             compiler_error(current_process, "Expected ';' to end the typedef but found the end of the file\n");
         }
         if(depth == 0 && token_is_symbol(token, ';')){
             break;
+        }
+        if(token_is_keyword(token, "_Alignas")){
+            // C11 6.7.5p2: an alignment is an object's, not a type's.
+            compiler_error(current_process, "_Alignas cannot be given in a typedef\n");
         }
         depth += token_is_operator(token, "(") - token_is_symbol(token, ')');
         vector_push(tokens, token);
@@ -5516,12 +5702,17 @@ static void parser_append_size_for_node(struct history* history, size_t* _variab
     if(node->type == NODE_TYPE_VARIABLE){
         if(node_is_struct_or_union_variable(node)){
             parser_append_size_for_node_struct_union(history, _variable_size, node);
+            if(variable_alignas(node)){
+                *_variable_size += node->var.padding;
+            }
             return;
         }
         *_variable_size += variable_size(node);
-        if(node->var.type.type == DATA_TYPE_LONG_DOUBLE && !(node->var.type.flags & DATATYPE_FLAG_IS_POINTER)){
+        if((node->var.type.type == DATA_TYPE_LONG_DOUBLE && !(node->var.type.flags & DATATYPE_FLAG_IS_POINTER))
+           || variable_alignas(node)){
             // the up to 12 bytes that align a long double to
-            // 16 count too, or the last ones of a frame overran it.
+            // 16 count too, or the last ones of a frame overran it; so
+            // do those of an _Alignas local.
             *_variable_size += node->var.padding;
         }
     } else if(node->type == NODE_TYPE_VARIABLE_LIST){
@@ -5529,9 +5720,10 @@ static void parser_append_size_for_node(struct history* history, size_t* _variab
     }
 }
 
-static void parser_struct_member_extent(struct node* member, size_t* end, size_t* align){
+static void parser_struct_member_extent(struct node* member, size_t* end, size_t* align, bool* has_alignas){
     size_t member_end = member->var.aoffset + variable_size(member);
-    size_t member_align = datatype_alignment(&member->var.type);
+    size_t member_align = variable_alignment(member);
+    *has_alignas |= variable_alignas(member) != 0;
     if(member->var.bitfield.is_bitfield){
         // A bit-field ends at the byte of its last bit; an unnamed one
         // does not align the struct (the psABIs).
@@ -5556,17 +5748,18 @@ static void parser_finalize_struct_or_union_body(struct node* body_node, struct 
                                                  struct node* largest_align_eligible_var_node){
     size_t end   = 0;
     size_t align = 1;
+    bool has_alignas = false;
     vector_set_peek_pointer(body_vec, 0);
     struct node* statement = vector_peek_ptr(body_vec);
     while(statement){
         if(statement->type == NODE_TYPE_VARIABLE){
-            parser_struct_member_extent(statement, &end, &align);
+            parser_struct_member_extent(statement, &end, &align, &has_alignas);
         } else if(statement->type == NODE_TYPE_VARIABLE_LIST){
             struct vector* list = statement->var_list.list;
             vector_set_peek_pointer(list, 0);
             struct node* member = vector_peek_ptr(list);
             while(member){
-                parser_struct_member_extent(member, &end, &align);
+                parser_struct_member_extent(member, &end, &align, &has_alignas);
                 member = vector_peek_ptr(list);
             }
         }
@@ -5577,6 +5770,7 @@ static void parser_finalize_struct_or_union_body(struct node* body_node, struct 
     body_node->body.largest_var_node = largest_align_eligible_var_node;
     body_node->body.padded           = (pad != 0);
     body_node->body.align            = align;
+    body_node->body.has_alignas      = has_alignas;
     body_node->body.size             = align_value((int)end, (int)align);
     body_node->body.statements       = body_vec;
 }
@@ -5631,6 +5825,23 @@ static void parser_take_pending_statements(struct vector* body_vec){
     vector_clear(parser_pending_statements);
 }
 
+// One statement of a body, which leaves exactly one node. A construct
+// the parser does not know (`typeof(x) y;`, `foo(1) x;`)
+// could parse as two expressions in a row and leave two: the body took
+// the last, and the other stayed on the node stack, where it later took
+// the place of the function. The function vanished from the output and
+// the compile still succeeded.
+static void parse_body_statement(struct history* history){
+    struct token* first = token_peek_next();
+    struct pos start = first ? first->pos : current_process->pos;
+    size_t count_before = node_count();
+    parse_statement(history);
+    if(node_count() != count_before + 1){
+        compiler_error_at(&start, "This statement is not valid C: it parsed as %s (an unknown type name or an unsupported construct?)\n",
+            node_count() > count_before + 1 ? "more than one statement" : "nothing");
+    }
+}
+
 // ch49: single-statement body (no braces), e.g. `y = 30;` in
 // `if (x) y = 30;`. Brace bodies come in ch54.
 static void parse_body_single_statement(size_t* variable_size, struct vector* body_vec, struct history* history){
@@ -5639,7 +5850,7 @@ static void parse_body_single_statement(size_t* variable_size, struct vector* bo
     body_node->binded.owner = parser_current_body;
     parser_current_body     = body_node;
 
-    parse_statement(history_down(history, history->flags));
+    parse_body_statement(history_down(history, history->flags));
     struct node* stmt_node = node_pop();
     parser_take_preceding_statements(body_vec, history, variable_size);
     vector_push(body_vec, &stmt_node);
@@ -5679,7 +5890,7 @@ static void parse_body_multiple_statements(size_t* variable_size,
     }
 
     while(!token_next_is_symbol('}')){
-        parse_statement(history_down(history, history->flags));
+        parse_body_statement(history_down(history, history->flags));
         stmt_node = node_pop();
 
         if(stmt_node->type == NODE_TYPE_VARIABLE){
@@ -6675,6 +6886,31 @@ static size_t parser_alignof_value(struct datatype* dtype, bool gnu){
     return align;
 }
 
+// The variable or member an _Alignof operand names (`buf`, `s.m`,
+// `p->m`), or NULL.
+static struct node* parser_alignof_object(struct node* node){
+    if(node->type == NODE_TYPE_EXPRESSION && is_access_operator(node->exp.op) && node->exp.right->type == NODE_TYPE_IDENTIFIER){
+        struct datatype base;
+        if(!parser_expression_type(node->exp.left, &base)){
+            return 0;
+        }
+        if(S_EQ(node->exp.op, "->")){
+            base = *datatype_pointer_reduce(&base, 1);
+        }
+        struct node* su = datatype_is_struct_or_union(&base) ? base.struct_node : 0;
+        return su && su->_struct.body_n ? struct_member_named(su->_struct.body_n->body.statements, node->exp.right->sval) : 0;
+    }
+    if(node->type != NODE_TYPE_IDENTIFIER){
+        return 0;
+    }
+    struct resolver_result* result = resolver_follow(current_process->resolver, node);
+    if(!resolver_result_ok(result) || !result->last_entity){
+        return 0;
+    }
+    struct node* object = result->last_entity->node;
+    return result->last_entity->type == RESOLVER_ENTITY_TYPE_VARIABLE && object && object->type == NODE_TYPE_VARIABLE ? object : 0;
+}
+
 // ch232: `sizeof` as a NUMBER node holding the size, worked out at parse
 // time; codegen sees a constant of type size_t. `sizeof(type)` was the
 // only form; `sizeof(expr)` and `sizeof expr` failed.
@@ -6697,6 +6933,9 @@ static void parse_sizeof(struct history* history){
         parser_sizeof_type_brackets = true;
         parse_datatype(&dtype);
         parser_sizeof_type_brackets = false;
+        if(dtype.align_as){
+            compiler_error(current_process, "_Alignas cannot be given in the type name of %s\n", keyword->sval);
+        }
         // `sizeof(int (*)(int))`, also through a typedef name.
         struct token* no_name = 0;
         parse_function_pointer_declarator(&dtype, &no_name);
@@ -6790,13 +7029,455 @@ static void parse_sizeof(struct history* history){
             inner = inner->parenthesis.exp;
         }
         bool member = inner && inner->type == NODE_TYPE_EXPRESSION && is_access_operator(inner->exp.op);
-        node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = parser_alignof_value(&dtype, (gnu_alignof || operand) && !member),
+        size_t align = parser_alignof_value(&dtype, (gnu_alignof || operand) && !member);
+        // a variable or member keeps what _Alignas gave it, as
+        // in gcc (its DECL_ALIGN).
+        struct node* object = inner ? parser_alignof_object(inner) : 0;
+        if(object && (size_t)object->var.align > align){
+            align = object->var.align;
+        }
+        node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = align,
             .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG });
         return;
     }
     // sizeof yields a size_t, which is unsigned long on every target.
     node_create(&(struct node){ .type = NODE_TYPE_NUMBER, .llnum = datatype_size(&dtype),
         .num.flags = NUMBER_FLAG_UNSIGNED | NUMBER_FLAG_LONG, .num.sizeof_operand = operand });
+}
+
+// ---- typeof ----
+//
+// `typeof(operand)` stands for the type of its operand, a type name or
+// an expression (C23 6.7.2.5), wherever a type may start: a
+// declaration, a cast, sizeof, a typedef. parser_typedef_expand puts
+// the tokens of that type in place of `typeof ( operand )`, as it does
+// for a typedef name, so the rest of the parser reads keywords as it
+// always did. For a type name they are its own tokens; for an
+// expression they are written from the type the parser works out for it
+// (parser_expression_type, as for sizeof), which is not evaluated.
+// typeof_unqual drops the qualifiers of the type itself.
+
+// Whether `typeof (` is next.
+static bool parser_typeof_next(void){
+    struct token* token = token_peek_next();
+    if(!token_is_identifier(token) || !parser_is_typeof(token->sval)){
+        return false;
+    }
+    struct vector* vec = current_process->token_vec;
+    for(int i = vec->pindex + 1; i < vector_count(vec); i++){
+        struct token* next = vector_at(vec, i);
+        if(!token_is_nl_or_comment_or_newline_seperator(next)){
+            return token_is_operator(next, "(");
+        }
+    }
+    return false;
+}
+
+static void parser_type_token(struct vector* out, int type, const char* sval, struct pos pos){
+    struct token token = { .type = type, .pos = pos };
+    if(type == TOKEN_TYPE_SYMBOL){
+        token.cval = sval[0];
+    } else {
+        token.sval = sval;
+    }
+    vector_push(out, &token);
+}
+
+static void parser_type_number_token(struct vector* out, unsigned long long value, struct pos pos){
+    struct token token = { .type = TOKEN_TYPE_NUMBER, .llnum = value, .pos = pos };
+    vector_push(out, &token);
+}
+
+static bool parser_is_qualifier_token(struct token* token){
+    return token_is_keyword(token, "const") || token_is_keyword(token, "volatile")
+        || token_is_keyword(token, "restrict") || token_is_keyword(token, "_Atomic");
+}
+
+// The tokens of a type name for typeof_unqual: the qualifiers of the
+// type itself go, those after its last `*` for a pointer, else all of
+// them (`_Atomic(T)` becomes T).
+static void parser_typeof_unqualify(struct vector* tokens){
+    int last_star = -1;
+    for(int i = 0; i < vector_count(tokens); i++){
+        if(token_is_operator(vector_at(tokens, i), "*")){
+            last_star = i;
+        }
+    }
+    if(last_star >= 0){
+        while(last_star + 1 < vector_count(tokens) && parser_is_qualifier_token(vector_at(tokens, last_star + 1))){
+            vector_pop_at(tokens, last_star + 1);
+        }
+        return;
+    }
+    for(int i = 0; i < vector_count(tokens); ){
+        struct token* token = vector_at(tokens, i);
+        if(!parser_is_qualifier_token(token)){
+            i++;
+            continue;
+        }
+        if(token_is_keyword(token, "_Atomic") && i + 1 < vector_count(tokens) && token_is_operator(vector_at(tokens, i + 1), "(")){
+            // `_Atomic ( T )`: its parentheses go too.
+            int depth = 0;
+            for(int j = i + 1; j < vector_count(tokens); j++){
+                struct token* t = vector_at(tokens, j);
+                depth += token_is_operator(t, "(") - token_is_symbol(t, ')');
+                if(depth == 0){
+                    vector_pop_at(tokens, j);
+                    break;
+                }
+            }
+            vector_pop_at(tokens, i + 1);
+        }
+        vector_pop_at(tokens, i);
+    }
+}
+
+static void parser_datatype_to_tokens(struct datatype* type, bool unqual, struct vector* out, struct pos pos);
+
+// The base type of `type`, its qualifiers and sign, without the `*`s.
+static void parser_base_type_tokens(struct datatype* type, bool unqual, struct vector* out, struct pos pos){
+    bool top = type->pointer_depth == 0;
+    if((type->flags & DATATYPE_FLAG_IS_CONST) && !(unqual && top)){
+        parser_type_token(out, TOKEN_TYPE_KEYWORD, "const", pos);
+    }
+    if(type->atomic_level == 1 && !(unqual && top)){
+        parser_type_token(out, TOKEN_TYPE_KEYWORD, "_Atomic", pos);
+    }
+    bool is_bool = type->flags & DATATYPE_FLAG_IS_BOOL;
+    bool is_signed = type->flags & DATATYPE_FLAG_IS_SIGNED;
+    switch(type->type){
+        case DATA_TYPE_CHAR:
+            if(!is_bool){
+                // Plain char is signed on i386 and x86_64 and unsigned on
+                // aarch64 and riscv64: say which this one is.
+                parser_type_token(out, TOKEN_TYPE_KEYWORD, is_signed ? "signed" : "unsigned", pos);
+            }
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, is_bool ? "_Bool" : "char", pos);
+            break;
+        case DATA_TYPE_SHORT:
+        case DATA_TYPE_INTEGER:
+        case DATA_TYPE_LONG:
+            if(!is_signed){
+                parser_type_token(out, TOKEN_TYPE_KEYWORD, "unsigned", pos);
+            }
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, type->type == DATA_TYPE_SHORT ? "short"
+                : type->type == DATA_TYPE_LONG ? "long" : "int", pos);
+            break;
+        case DATA_TYPE_VOID:
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, "void", pos);
+            break;
+        case DATA_TYPE_FLOAT:
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, "float", pos);
+            break;
+        case DATA_TYPE_DOUBLE:
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, "double", pos);
+            break;
+        case DATA_TYPE_LONG_DOUBLE:
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, "long", pos);
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, "double", pos);
+            break;
+        case DATA_TYPE_STRUCT:
+        case DATA_TYPE_UNION:
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, type->type == DATA_TYPE_STRUCT ? "struct" : "union", pos);
+            parser_type_token(out, TOKEN_TYPE_IDENTIFIER, type->type_str, pos);
+            break;
+        default:
+            compiler_error(current_process, "typeof of this type is not supported\n");
+    }
+}
+
+// The `[N]`s of an array type.
+static void parser_array_type_tokens(struct datatype* type, struct vector* out, struct pos pos){
+    if(!(type->flags & DATATYPE_FLAG_IS_ARRAY) || !type->array.brackets){
+        return;
+    }
+    struct vector* brackets = type->array.brackets->n_brackets;
+    // An element or a row the resolver gives (`a[0]`, `m[1]`) keeps the
+    // array's brackets and flag, with the size of what is left: only
+    // the last dimensions that make up that size are its own.
+    int first = 0;
+    size_t element = type->flags & DATATYPE_FLAG_IS_POINTER ? (size_t)target_current()->pointer_size : type->size;
+    if(type->array.size && element){
+        size_t rest = element;
+        first = vector_count(brackets);
+        while(first > 0 && rest < type->array.size){
+            struct node* bracket = *(struct node**)vector_at(brackets, first - 1);
+            struct node* inner = bracket && bracket->type == NODE_TYPE_BRACKET ? bracket->bracket.inner : bracket;
+            if(!inner || inner->type != NODE_TYPE_NUMBER || !inner->llnum){
+                break;
+            }
+            rest *= inner->llnum;
+            first--;
+        }
+        if(rest != type->array.size){
+            first = 0;
+        }
+    }
+    for(int i = first; i < vector_count(brackets); i++){
+        struct node* bracket = *(struct node**)vector_at(brackets, i);
+        struct node* inner = bracket && bracket->type == NODE_TYPE_BRACKET ? bracket->bracket.inner : bracket;
+        parser_type_token(out, TOKEN_TYPE_OPERATOR, "[", pos);
+        if(inner && inner->type == NODE_TYPE_NUMBER){
+            if(inner->llnum){
+                parser_type_number_token(out, inner->llnum, pos);
+            }
+        } else if(inner){
+            compiler_error(current_process, "typeof of a variable-length array is not supported\n");
+        }
+        parser_type_token(out, TOKEN_TYPE_SYMBOL, "]", pos);
+    }
+}
+
+// The tokens of `type` as an abstract declarator, `unsigned long * const`,
+// `struct s [4]`, `int (*)(char*, ...)`.
+static void parser_datatype_to_tokens(struct datatype* type, bool unqual, struct vector* out, struct pos pos){
+    if(type->flags & DATATYPE_FLAG_IS_FUNCTION_POINTER){
+        struct datatype* ret = type->function_return;
+        if(!ret || type->atomic_level){
+            compiler_error(current_process, "typeof of this function pointer type is not supported\n");
+        }
+        parser_datatype_to_tokens(ret, false, out, pos);
+        parser_type_token(out, TOKEN_TYPE_OPERATOR, "(", pos);
+        for(int level = ret->pointer_depth; level < type->pointer_depth; level++){
+            parser_type_token(out, TOKEN_TYPE_OPERATOR, "*", pos);
+            bool top = level == type->pointer_depth - 1;
+            if(level < 30 && (type->pointer_const & (1 << level)) && !(unqual && top)){
+                parser_type_token(out, TOKEN_TYPE_KEYWORD, "const", pos);
+            }
+        }
+        parser_array_type_tokens(type, out, pos);
+        parser_type_token(out, TOKEN_TYPE_SYMBOL, ")", pos);
+        parser_type_token(out, TOKEN_TYPE_OPERATOR, "(", pos);
+        struct function_prototype* params = type->function_params;
+        if(params){
+            int count = vector_count(params->types);
+            for(int i = 0; i < count; i++){
+                if(i){
+                    parser_type_token(out, TOKEN_TYPE_OPERATOR, ",", pos);
+                }
+                parser_datatype_to_tokens(vector_at(params->types, i), false, out, pos);
+            }
+            if(params->variadic){
+                if(count){
+                    parser_type_token(out, TOKEN_TYPE_OPERATOR, ",", pos);
+                }
+                for(int i = 0; i < 3; i++){
+                    parser_type_token(out, TOKEN_TYPE_OPERATOR, ".", pos);
+                }
+            } else if(!count){
+                parser_type_token(out, TOKEN_TYPE_KEYWORD, "void", pos);
+            }
+        }
+        parser_type_token(out, TOKEN_TYPE_SYMBOL, ")", pos);
+        return;
+    }
+    int depth = type->flags & DATATYPE_FLAG_IS_POINTER ? type->pointer_depth : 0;
+    if(type->atomic_level > 1 && type->atomic_level != depth + 1){
+        compiler_error(current_process, "typeof of a pointer to an _Atomic pointer is not supported\n");
+    }
+    parser_base_type_tokens(type, unqual, out, pos);
+    for(int level = 0; level < depth; level++){
+        parser_type_token(out, TOKEN_TYPE_OPERATOR, "*", pos);
+        bool top = level == depth - 1;
+        if(level < 30 && (type->pointer_const & (1 << level)) && !(unqual && top)){
+            parser_type_token(out, TOKEN_TYPE_KEYWORD, "const", pos);
+        }
+    }
+    if(depth > 0 && type->atomic_level == depth + 1 && !unqual){
+        parser_type_token(out, TOKEN_TYPE_KEYWORD, "_Atomic", pos);
+    }
+    parser_array_type_tokens(type, out, pos);
+}
+
+// `typeof(type-name)`, the `(` read: the type name's tokens, with the
+// typedef names among them expanded, through the `)`.
+static struct vector* parser_typeof_type_name(bool unqual){
+    struct vector* raw = vector_create(sizeof(struct token));
+    int depth = 0;
+    while(true){
+        struct token* token = token_peek_next();
+        if(!token){
+            compiler_error(current_process, "Expected ')' to end the typeof but found the end of the file\n");
+        }
+        if(depth == 0 && token_is_symbol(token, ')')){
+            break;
+        }
+        if(token_is_keyword(token, "_Alignas")){
+            compiler_error(current_process, "_Alignas cannot be given in the type name of typeof\n");
+        }
+        depth += (token_is_operator(token, "(") || token_is_operator(token, "["))
+               - (token_is_symbol(token, ')') || token_is_symbol(token, ']'));
+        vector_push(raw, token);
+        token_next();
+    }
+    expect_sym(')');
+    struct vector* tokens = parser_typedef_tokens(raw);
+    vector_free(raw);
+    if(unqual){
+        parser_typeof_unqualify(tokens);
+    }
+    return tokens;
+}
+
+// The function `node` names, when it is the name of one and no variable
+// hides it.
+static struct node* parser_function_named(struct node* node){
+    if(node->type != NODE_TYPE_IDENTIFIER || resolver_get_variable(0, current_process->resolver, node->sval)){
+        return 0;
+    }
+    struct vector* tree = current_process->node_tree_vec;
+    for(int i = vector_count(tree) - 1; i >= 0; i--){
+        struct node* function = *(struct node**)vector_at(tree, i);
+        if(function->type == NODE_TYPE_FUNCTION && S_EQ(function->func.name, node->sval)){
+            return function;
+        }
+    }
+    return 0;
+}
+
+// A pointer to `function`, as parse_function_pointer_declarator makes one.
+static struct datatype parser_function_pointer_type(struct node* function){
+    struct datatype dtype = function->func.rtype;
+    struct datatype* ret = calloc(1, sizeof(struct datatype));
+    *ret = function->func.rtype;
+    struct function_prototype* prototype = calloc(1, sizeof(struct function_prototype));
+    prototype->types = vector_create(sizeof(struct datatype));
+    prototype->variadic = function->func.flags & FUNCTION_NODE_FLAG_IS_VARIADIC;
+    struct vector* args = function->func.args.vector;
+    for(int i = 0; args && i < vector_count(args); i++){
+        struct node* arg = *(struct node**)vector_at(args, i);
+        if(arg->type == NODE_TYPE_VARIABLE){
+            vector_push(prototype->types, &arg->var.type);
+        }
+    }
+    dtype.flags |= DATATYPE_FLAG_IS_POINTER | DATATYPE_FLAG_IS_FUNCTION_POINTER;
+    dtype.flags &= ~(DATATYPE_FLAG_IS_STATIC | DATATYPE_FLAG_IS_EXTERN);
+    dtype.pointer_depth   = ret->pointer_depth + 1;
+    dtype.function_return = ret;
+    dtype.function_params = prototype;
+    return dtype;
+}
+
+// The variables an operand of typeof names count as used, as for sizeof
+// (whose operand the validator walks): the operand is gone once its type
+// is known.
+static void parser_mark_referenced(struct node* node){
+    if(!node){
+        return;
+    }
+    switch(node->type){
+        case NODE_TYPE_IDENTIFIER: {
+            struct resolver_entity* entity = resolver_get_variable(0, current_process->resolver, node->sval);
+            if(entity && entity->node){
+                entity->node->flags |= NODE_FLAG_IS_REFERENCED;
+            }
+            break;
+        }
+        case NODE_TYPE_EXPRESSION:
+            parser_mark_referenced(node->exp.left);
+            parser_mark_referenced(node->exp.right);
+            break;
+        case NODE_TYPE_EXPRESSION_PARENTHESES:
+            parser_mark_referenced(node->parenthesis.exp);
+            break;
+        case NODE_TYPE_UNARY:
+            parser_mark_referenced(node->unary.operand);
+            break;
+        case NODE_TYPE_CAST:
+            parser_mark_referenced(node->cast.operand);
+            break;
+        case NODE_TYPE_TENARY:
+            parser_mark_referenced(node->tenary.true_node);
+            parser_mark_referenced(node->tenary.false_node);
+            break;
+        default:
+            break;
+    }
+}
+
+// `typeof(expression)`, the `(` read: the tokens of the expression's
+// type, through the `)`. The expression is not evaluated. *function is
+// set when it is a function's name, whose type is a function type.
+static struct vector* parser_typeof_expression(bool unqual, struct pos pos, bool* function){
+    size_t count_before = node_count();
+    parse_expressionable_root(history_begin(0));
+    expect_sym(')');
+    parser_expect_new_node(count_before, "an operand of typeof");
+    struct node* operand = node_pop();
+    parser_mark_referenced(operand);
+    struct node* inner = operand;
+    while(inner->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        inner = inner->parenthesis.exp;
+    }
+    struct datatype dtype;
+    struct parser_thread_local* tls_array = parser_thread_local_array(inner);
+    // A function, `typeof(f)`, is kept as the pointer to it a function
+    // typedef is (parser_typedef_declare); `&f` is that pointer.
+    struct node* address_of = inner->type == NODE_TYPE_UNARY && op_is_address(inner->unary.op) ? inner->unary.operand : 0;
+    while(address_of && address_of->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+        address_of = address_of->parenthesis.exp;
+    }
+    struct node* named = parser_function_named(address_of ? address_of : inner);
+    *function = named && !address_of;
+    if(named){
+        dtype = parser_function_pointer_type(named);
+    } else if(tls_array){
+        // an i386 thread-local array is its decayed address here.
+        dtype = tls_array->type;
+    } else {
+        if(inner->type == NODE_TYPE_IDENTIFIER && parser_vla_size_of(inner->sval)){
+            compiler_error(current_process, "typeof of a variable-length array is not supported\n");
+        }
+        if(!parser_expression_type(operand, &dtype)){
+            compiler_error(current_process, "Cannot work out the type of this typeof operand\n");
+        }
+        // `&array` is a pointer to an array, a type this compiler has
+        // only as a declarator (`T (*p)[n]`).
+        struct datatype operand_type;
+        if(inner->type == NODE_TYPE_UNARY && op_is_address(inner->unary.op)
+           && parser_expression_type(inner->unary.operand, &operand_type) && (operand_type.flags & DATATYPE_FLAG_IS_ARRAY)){
+            compiler_error(current_process, "typeof of a pointer to an array is not supported\n");
+        }
+    }
+    struct vector* tokens = vector_create(sizeof(struct token));
+    parser_datatype_to_tokens(&dtype, unqual, tokens, pos);
+    return tokens;
+}
+
+// `typeof ( operand )` is next: its type's tokens take its place.
+static void parser_typeof_expand(void){
+    struct vector* vec = current_process->token_vec;
+    int at = vec->pindex;
+    struct token* keyword = token_next();
+    bool unqual = parser_is_typeof_unqual(keyword->sval);
+    struct pos pos = keyword->pos;
+    expect_op("(");
+    // A typedef name, or another typeof, at the start of the operand.
+    parser_typedef_expand();
+    struct token* next = token_peek_next();
+    struct vector* tokens;
+    bool function = false;
+    if(next && next->type == TOKEN_TYPE_KEYWORD
+       && (keyword_is_datatype(next->sval) || is_keyword_variable_modifier(next->sval))){
+        tokens = parser_typeof_type_name(unqual);
+    } else {
+        tokens = parser_typeof_expression(unqual, pos, &function);
+    }
+    int remove = vec->pindex - at;
+    if(vector_count(tokens) == 0){
+        compiler_error(current_process, "Expected a type or an expression in typeof\n");
+    }
+    if(vector_count(tokens) - remove > PARSER_TYPEOF_ROOM){
+        compiler_error(current_process, "The type typeof gives here is too long to spell out\n");
+    }
+    vector_set_peek_pointer(vec, at);
+    // `typeof(f)* p` for a function f is the pointer its tokens already
+    // are, as for a function typedef.
+    if(function && parser_token_after_is_star(vec, at + remove - 1)){
+        remove++;
+    }
+    parser_type_splice(at, remove, tokens, function);
+    vector_free(tokens);
 }
 
 static void parse_keyword(struct history* history){

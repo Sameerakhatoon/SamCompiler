@@ -760,7 +760,9 @@ static bool is_keyword(const char* str){
         || S_EQ(str, "__thread")
         // _Alignof and gcc's spellings of it.
         || S_EQ(str, "_Alignof") || S_EQ(str, "__alignof__")
-        || S_EQ(str, "__alignof");
+        || S_EQ(str, "__alignof")
+        // the alignment specifier.
+        || S_EQ(str, "_Alignas");
 }
 
 // '<' is the wart: in `#include <stdio.h>` it opens a string literal, not

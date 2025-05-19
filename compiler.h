@@ -839,6 +839,11 @@ struct datatype {
     // With DATATYPE_FLAG_IS_FUNCTION_POINTER: the parameter types, or
     // NULL when the declarator names none (`int (*f)()`).
     struct function_prototype* function_params;
+    // the alignment `_Alignas` asked for among the declaration
+    // specifiers just read, 0 for none. Only parse_datatype sets it, and
+    // make_variable_node moves it to the variable (var.align): it is the
+    // object's, never part of a type.
+    int align_as;
 };
 
 // The parameters of a function pointer's type: a vector of struct
@@ -970,6 +975,9 @@ struct node {
                 int  width;
                 int  bit_offset;
             } bitfield;
+            // the alignment `_Alignas` gave this object or
+            // member, 0 for its type's (variable_alignment).
+            int             align;
         } var;
 
         struct varlist {
@@ -1005,6 +1013,8 @@ struct node {
             struct node*   largest_var_node;
             // Struct and union bodies: the strictest member alignment.
             size_t         align;
+            // a member, or a member's member, has _Alignas.
+            bool           has_alignas;
         } body;
 
         // ch78+: control-flow statements share this payload.
@@ -1257,6 +1267,8 @@ bool is_logical_node(struct node* node);
 
 // ch52: size helpers that look at variable nodes (not datatypes).
 size_t       variable_size(struct node* var_node);
+size_t       variable_alignment(struct node* var_node);
+size_t       variable_alignas(struct node* var_node);
 size_t       variable_size_for_list(struct node* var_list_node);
 struct node* variable_node(struct node* node);
 bool         variable_node_is_primitive(struct node* node);
