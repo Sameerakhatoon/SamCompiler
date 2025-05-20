@@ -1111,6 +1111,9 @@ int lex(struct lex_process* process){
     process->parentheses_buffer       = 0;
     lex_process                      = process;
     process->pos.filename             = process->compiler->cfile.abs_path;
+    // The spelling buffer comes from the compile's arena, which a second
+    // compile_file in the same process (tests/30) has freed: start anew.
+    lex_spelling                      = 0;
 
     struct token* token = read_next_token();
     while(token){
