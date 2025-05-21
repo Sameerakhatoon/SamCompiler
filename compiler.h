@@ -823,6 +823,14 @@ struct datatype {
     // itself (`int* const p`). DATATYPE_FLAG_IS_CONST is the base type's
     // (`const int* p`, `const int x`).
     int    pointer_const;
+    // the alignment `_Alignas` asked for among the declaration
+    // specifiers just read, 0 for none. Only parse_datatype sets it, and
+    // make_variable_node moves it to the variable (var.align): it is the
+    // object's, never part of a type. It sits in the padding before the
+    // union so the struct stays 88 bytes: expression code generation
+    // keeps copies of it in every recursive frame, and 16 more bytes per
+    // level cost test 352 its 8,000-term expression.
+    int    align_as;
     union {
         struct node* struct_node;
         struct node* union_node;
@@ -839,11 +847,6 @@ struct datatype {
     // With DATATYPE_FLAG_IS_FUNCTION_POINTER: the parameter types, or
     // NULL when the declarator names none (`int (*f)()`).
     struct function_prototype* function_params;
-    // the alignment `_Alignas` asked for among the declaration
-    // specifiers just read, 0 for none. Only parse_datatype sets it, and
-    // make_variable_node moves it to the variable (var.align): it is the
-    // object's, never part of a type.
-    int align_as;
 };
 
 // The parameters of a function pointer's type: a vector of struct
