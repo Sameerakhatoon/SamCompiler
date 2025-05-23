@@ -31,10 +31,17 @@ cat > "$tmp/v.c" <<'C'
 struct S { int m; };
 int main(void) { struct S s = { 1 }, t = { 2 }; int c = 1; (c ? s : t).m = 7; return s.m; }
 C
-rc=0
-samcc -target=x86 -S "$tmp/v.c" -o "$tmp/v.s" >"$tmp/log" 2>&1 || rc=$?
-[ "$rc" != 0 ] || fail "x86 accepted (c ? s : t).m = 7"
-grep -q 'not an lvalue' "$tmp/log" || fail "x86: no message for (c ? s : t).m = 7: $(head -2 "$tmp/log")"
+# On the 64-bit targets the store asserted in stackframe.c (found by
+# hand); the same error now, on every target, and for ++.
+echo 'struct S { int m; }; int main(void) { struct S s = { 1 }, t = { 2 }; int c = 1; ((c ? s : t).m)++; return s.m; }' > "$tmp/w.c"
+for src in v w; do
+    for t in x86 x86_64 aarch64 riscv64; do
+        rc=0
+        samcc -target=$t -S "$tmp/$src.c" -o "$tmp/v.s" >"$tmp/log" 2>&1 || rc=$?
+        [ "$rc" != 0 ] || fail "$t accepted the store in $src.c"
+        grep -q 'not an lvalue' "$tmp/log" || fail "$t: no lvalue message for $src.c: $(head -2 "$tmp/log")"
+    done
+done
 
 for expr in '(char)x' '((char)x)' '(int)x' '(long)(x)'; do
     echo "int main(void){ int x = 65; char* p = (char*)&($expr); return *p; }" > "$tmp/a.c"

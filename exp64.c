@@ -569,6 +569,29 @@ static struct datatype exp64_address(struct node* node){
     return t;
 }
 
+// `(c ? s : t).m = 7` stores into a member of a conditional's
+// value, which is not an lvalue (gcc rejects it; x86 reports it in
+// codegen_conditional_lvalue). Here the store went on with the
+// conditional's struct value as its address and the stack frame
+// bookkeeping asserted. Members reached with `->` or `[]` from the
+// conditional are fine: the conditional is a pointer there.
+static void exp64_require_lvalue(struct node* node, const char* op){
+    bool member = false;
+    while(true){
+        if(node->type == NODE_TYPE_EXPRESSION_PARENTHESES){
+            node = node->parenthesis.exp;
+        } else if(node->type == NODE_TYPE_EXPRESSION && is_access_node(node) && S_EQ(node->exp.op, ".")){
+            node = node->exp.left;
+            member = true;
+        } else {
+            break;
+        }
+    }
+    if(member && node->type == NODE_TYPE_EXPRESSION && S_EQ(node->exp.op, "?")){
+        compiler_error(current_process, "The left operand of %s is a member of a conditional's value, which is not an lvalue\n", op);
+    }
+}
+
 static struct datatype exp64_unqualified(struct datatype* t);
 static void exp64_atomic_memory_load(struct datatype* t, int order);
 
@@ -1081,6 +1104,7 @@ static struct datatype exp64_register_assignment(struct node* node, int k, struc
 static struct datatype exp64_assignment(struct node* node){
     const char* op = node->exp.op;
     struct datatype lt;
+    exp64_require_lvalue(node->exp.left, op);
     int k = exp64_register_of(node->exp.left, &lt);
     if(k >= 0){
         return exp64_register_assignment(node, k, &lt);
@@ -3216,6 +3240,7 @@ static struct datatype exp64_increment(struct node* node){
         }
         return rlt;
     }
+    exp64_require_lvalue(node->unary.operand, node->unary.op);
     struct datatype lt = exp64_address(node->unary.operand);
     if(exp64_is_struct(&lt) || exp64_is_array(&lt)){
         compiler_error(current_process, "%s needs a scalar operand\n", node->unary.op);
