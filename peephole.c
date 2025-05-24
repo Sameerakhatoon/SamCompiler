@@ -1204,6 +1204,20 @@ static bool ph_copy_forward(int i, struct ph_ins* a){
     if(ph_live_after(j, dst)){
         return false;
     }
+    // When I is a branch, A must also be dead where it goes: ph_live_after
+    // only follows the fall-through. `mv s1, a0; bnez s1, .Ltrue` lost
+    // the move while the taken side stored through s1 (`char* eol =
+    // strstr(...); if(eol) *eol = 0;`, SamOS's wget on riscv64 -O1).
+    if(ph_is_branch(&b)){
+        const char* label = b.op[b.count - 1].text;
+        int target = ph_label_after(j, label);
+        if(target < 0){
+            target = ph_label_before(j, label);
+        }
+        if(target < 0 || ph_live_from(target, dst, 1)){
+            return false;
+        }
+    }
     for(int k = 0; k < b.count; k++){
         if(!ph_rename_text(b.op[k].text, dst, src)){
             return false;
